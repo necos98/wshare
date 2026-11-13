@@ -61,6 +61,12 @@ pub struct KeyRouter {
     alt_down: HashSet<bool>,
     /// Keys whose press triggered a hotkey: repeats and release swallowed.
     hotkey_keys: HashSet<(u16, bool)>,
+    /// Keys whose press this router has seen. A release without its press
+    /// belongs to whoever saw the press — typically Windows, for keys held
+    /// when the hook was installed (the Ctrl and Alt of the Ctrl+Alt+Enter
+    /// that entered full screen). It must go back there, or Windows keeps
+    /// the key down, even after the viewer closes.
+    pressed: HashSet<(u16, bool)>,
 }
 
 impl KeyRouter {
@@ -74,6 +80,11 @@ impl KeyRouter {
             };
         }
         self.track_modifiers(key);
+        if key.pressed {
+            self.pressed.insert(key.id());
+        } else if !self.pressed.remove(&key.id()) {
+            return KeyAction::PassThrough;
+        }
 
         if key.pressed && self.hotkey_keys.contains(&key.id()) {
             return KeyAction::Swallow; // auto-repeat of a hotkey: run it once
@@ -252,6 +263,27 @@ mod tests {
             KeyAction::Forward(_)
         ));
         assert_eq!(r.route(key(0x1C, true), true), forwarded(0x1C, true));
+    }
+
+    #[test]
+    fn release_of_a_key_pressed_before_us_goes_back_to_windows() {
+        // Full screen entered with Ctrl+Alt+Enter: the hook is installed
+        // while the three keys are down, and Windows saw their presses.
+        let mut r = KeyRouter::default();
+        assert_eq!(r.route(key(0x1C, false), true), KeyAction::PassThrough);
+        assert_eq!(r.route(key(0x1D, false), true), KeyAction::PassThrough);
+        assert_eq!(r.route(key(0x38, false), true), KeyAction::PassThrough);
+        // Nor are Ctrl and Alt left "held" for hotkey detection.
+        assert_eq!(r.route(key(0x17, true), true), forwarded(0x17, true));
+    }
+
+    #[test]
+    fn release_after_a_seen_press_is_forwarded_once() {
+        let mut r = KeyRouter::default();
+        r.route(key(0x2A, true), true);
+        r.route(key(0x2A, true), true); // auto-repeat
+        assert_eq!(r.route(key(0x2A, false), true), forwarded(0x2A, false));
+        assert_eq!(r.route(key(0x2A, false), true), KeyAction::PassThrough);
     }
 
     #[test]

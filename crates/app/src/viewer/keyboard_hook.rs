@@ -187,6 +187,20 @@ fn viewer_is_foreground() -> (bool, u32) {
     (pid == std::process::id(), pid)
 }
 
+const VK_RSHIFT: u32 = 0xA1;
+
+/// The key as the router expects it. The hook marks Right Shift as
+/// extended, but on the wire "extended 0x36" (E0 36) is the fake Shift
+/// keyboards emit around some keys, which Windows ignores: forwarded as-is,
+/// Right Shift would do nothing on the host (no `?`, no capitals).
+fn raw_key(vk: u32, scan: u32, extended: bool, pressed: bool) -> RawKey {
+    RawKey {
+        scan,
+        extended: extended && vk != VK_RSHIFT,
+        pressed,
+    }
+}
+
 /// Returns true when the key must not reach Windows.
 fn handle(state: &mut HookState, info: &KBDLLHOOKSTRUCT) -> bool {
     let (ours, _) = viewer_is_foreground();
@@ -202,11 +216,12 @@ fn handle(state: &mut HookState, info: &KBDLLHOOKSTRUCT) -> bool {
         0 => unsafe { MapVirtualKeyW(info.vkCode, MAPVK_VK_TO_VSC) },
         scan => scan,
     };
-    let key = RawKey {
+    let key = raw_key(
+        info.vkCode,
         scan,
-        extended: info.flags.0 & LLKHF_EXTENDED.0 != 0,
-        pressed: info.flags.0 & LLKHF_UP.0 == 0,
-    };
+        info.flags.0 & LLKHF_EXTENDED.0 != 0,
+        info.flags.0 & LLKHF_UP.0 == 0,
+    );
     let forwarding = state.forwarding.load(Ordering::Relaxed);
     let action = state.router.route(key, forwarding);
     key_log::log(|| format!("    -> {action:?} (forwarding={forwarding})"));
@@ -249,6 +264,21 @@ mod tests {
         let started = Instant::now();
         drop(hook);
         assert!(started.elapsed() < Duration::from_secs(1), "hook thread did not stop");
+    }
+
+    #[test]
+    fn right_shift_is_not_extended() {
+        // As the hook reports it: vk 0xA1, scan 0x36, LLKHF_EXTENDED set.
+        let key = raw_key(0xA1, 0x36, true, true);
+        assert_eq!(key, RawKey { scan: 0x36, extended: false, pressed: true });
+    }
+
+    #[test]
+    fn other_extended_keys_keep_the_flag() {
+        // Right Ctrl, the Windows key.
+        assert!(raw_key(0xA3, 0x1D, true, true).extended);
+        assert!(raw_key(0x5B, 0x5B, true, false).extended);
+        assert!(!raw_key(0xA0, 0x2A, false, true).extended); // Left Shift
     }
 
     #[test]

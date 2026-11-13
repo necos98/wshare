@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/gpu",
+    "crates/protocol",
+    "crates/pipeline",
+    "crates/capture",
+    "crates/codec",
+    "crates/render",
+    "crates/net",
+    "crates/discovery",
+    "crates/input",
+    "crates/app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+anyhow = "1.0.104"
+windows = "0.62.2"
+gpu = { path = "crates/gpu" }
+protocol = { path = "crates/protocol" }
+pipeline = { path = "crates/pipeline" }
+capture = { path = "crates/capture" }
+codec = { path = "crates/codec" }
+render = { path = "crates/render" }
+net = { path = "crates/net" }
+discovery = { path = "crates/discovery" }
+input = { path = "crates/input" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

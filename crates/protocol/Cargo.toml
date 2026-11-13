@@ -1,0 +1,10 @@
+[package]
+name = "protocol"
+version.workspace = true
+edition.workspace = true
+
+# Pure Rust wire formats. No I/O, no platform APIs: fully unit-testable.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
+thiserror = "2"

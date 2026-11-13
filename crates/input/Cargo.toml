@@ -1,0 +1,15 @@
+[package]
+name = "input"
+version.workspace = true
+edition.workspace = true
+
+# Injects the viewer's remote-control events into the host desktop
+# (Win32 SendInput). Policy is pure and unit-tested; the OS calls sit behind
+# two small traits (`InputBackend`, `DesktopMetrics`).
+[dependencies]
+anyhow.workspace = true
+protocol.workspace = true
+windows = { workspace = true, features = [
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }

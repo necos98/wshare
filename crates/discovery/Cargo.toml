@@ -1,0 +1,9 @@
+[package]
+name = "discovery"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mdns-sd = "0.21.7"
+anyhow.workspace = true
+gethostname = "1.1.0"

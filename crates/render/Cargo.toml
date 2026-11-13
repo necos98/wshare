@@ -9,11 +9,17 @@ edition.workspace = true
 anyhow.workspace = true
 gpu.workspace = true
 pipeline.workspace = true
+# Vector2 for Direct2D text origins (already in the lockfile via `windows`).
+windows-numerics = "0.3.1"
 windows = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
     "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectWrite",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
+    "Win32_UI_HiDpi",
 ] }
 
 # The end-to-end test decodes real frames with `codec` and needs a window.

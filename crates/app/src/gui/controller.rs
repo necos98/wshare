@@ -5,7 +5,9 @@ use crate::cli::{DEFAULT_PORT, HostOptions, StreamOptions};
 use crate::target::{Target, parse_target};
 
 use super::model::{GuiState, ViewerId, ViewerSession, ViewerStatus};
-use super::ports::{AppEvent, SharingControl, SharingService, TrayAction, ViewerLauncher};
+use super::ports::{
+    AppEvent, PendingStop, SharingControl, SharingService, TrayAction, ViewerLauncher,
+};
 
 /// What the user asked for (from the window or the tray).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,7 +44,11 @@ pub enum WindowCommand {
 /// Closing the window while sharing keeps the app alive in the tray, so
 /// the screen stays reachable; otherwise there is nothing left to do.
 pub fn close_decision(sharing_enabled: bool) -> WindowCommand {
-    if sharing_enabled { WindowCommand::HideToTray } else { WindowCommand::Quit }
+    if sharing_enabled {
+        WindowCommand::HideToTray
+    } else {
+        WindowCommand::Quit
+    }
 }
 
 pub struct Controller<S: SharingService, L: ViewerLauncher> {
@@ -50,6 +56,8 @@ pub struct Controller<S: SharingService, L: ViewerLauncher> {
     service: S,
     launcher: L,
     sharing: Option<Box<dyn SharingControl>>,
+    /// A service switched off and still stopping in the background.
+    stopping: Option<Box<dyn PendingStop>>,
     /// Tags the running service's events, to drop late ones of a previous run.
     generation: u64,
     next_viewer: ViewerId,
@@ -62,6 +70,7 @@ impl<S: SharingService, L: ViewerLauncher> Controller<S, L> {
             service,
             launcher,
             sharing: None,
+            stopping: None,
             generation: 0,
             next_viewer: 1,
         }
@@ -126,6 +135,14 @@ impl<S: SharingService, L: ViewerLauncher> Controller<S, L> {
                     }
                 }
             }
+            AppEvent::SharingStopped { generation } => {
+                if generation == self.generation
+                    && let Some(stop) = self.stopping.take()
+                {
+                    stop.wait(); // already over: only joins its thread
+                    self.state.sharing.stop_finished();
+                }
+            }
             AppEvent::Discovery(event) => {
                 self.state.discovery_error = None;
                 self.state.apply_discovery(event);
@@ -147,14 +164,29 @@ impl<S: SharingService, L: ViewerLauncher> Controller<S, L> {
         None
     }
 
-    /// Stops sharing (if on). Call before the process exits so the LAN
-    /// announcement is withdrawn.
+    /// Stops sharing (if on) and waits until it is over, also for a stop
+    /// already running in the background. Call before the process exits so
+    /// keys are released, the viewer is told Bye and the LAN announcement
+    /// is withdrawn.
     pub fn shutdown(&mut self) {
-        self.set_sharing(false);
+        let running = self.sharing.take();
+        let stopping = self.stopping.take();
+        if running.is_none() && stopping.is_none() {
+            return;
+        }
+        if let Some(sharing) = running {
+            sharing.stop();
+        }
+        if let Some(stop) = stopping {
+            stop.wait();
+        }
+        self.state.sharing.stopped(None);
     }
 
     fn set_sharing(&mut self, on: bool) {
         match (on, self.sharing.is_some()) {
+            // The previous run is still stopping: it must finish first.
+            (true, false) if self.stopping.is_some() => {}
             (true, false) => {
                 self.generation += 1;
                 let options = HostOptions {
@@ -173,10 +205,12 @@ impl<S: SharingService, L: ViewerLauncher> Controller<S, L> {
                 }
             }
             (false, true) => {
+                // Stopping takes up to a second (Bye, keys, port): not on
+                // the UI thread. `SharingStopped` ends the transient state.
                 if let Some(sharing) = self.sharing.take() {
-                    sharing.stop();
+                    self.stopping = Some(sharing.stop_in_background());
                 }
-                self.state.sharing.stopped(None);
+                self.state.sharing.begin_stopping();
             }
             _ => {}
         }
@@ -235,7 +269,12 @@ impl<S: SharingService, L: ViewerLauncher> Controller<S, L> {
             }
         };
         self.state.viewers.retain(|v| v.address != address);
-        self.state.viewers.push(ViewerSession { id, label, address, status });
+        self.state.viewers.push(ViewerSession {
+            id,
+            label,
+            address,
+            status,
+        });
         self.state.selected_host = None;
         self.state.connect_error = None;
     }
@@ -287,6 +326,7 @@ mod tests {
 
     struct FakeService(Shared);
     struct FakeControl(Shared);
+    struct FakePendingStop(Shared);
     struct FakeLauncher(Shared);
 
     impl SharingService for FakeService {
@@ -318,6 +358,16 @@ mod tests {
         fn stop(self: Box<Self>) {
             self.0.borrow_mut().calls.push("stop".into());
         }
+        fn stop_in_background(self: Box<Self>) -> Box<dyn PendingStop> {
+            self.0.borrow_mut().calls.push("stop_in_background".into());
+            Box::new(FakePendingStop(self.0.clone()))
+        }
+    }
+
+    impl PendingStop for FakePendingStop {
+        fn wait(self: Box<Self>) {
+            self.0.borrow_mut().calls.push("wait".into());
+        }
     }
 
     impl ViewerLauncher for FakeLauncher {
@@ -333,7 +383,10 @@ mod tests {
 
     fn controller() -> (Controller<FakeService, FakeLauncher>, Shared) {
         let log = Shared::default();
-        (Controller::new(FakeService(log.clone()), FakeLauncher(log.clone())), log)
+        (
+            Controller::new(FakeService(log.clone()), FakeLauncher(log.clone())),
+            log,
+        )
     }
 
     fn calls(log: &Shared) -> Vec<String> {
@@ -359,10 +412,21 @@ mod tests {
 
         c.handle(Intent::SetSharing(false));
         assert!(!c.state().sharing.enabled);
+        assert!(c.state().sharing.stopping);
         assert_eq!(c.state().sharing.pin, None);
-        assert_eq!(calls(&log), ["stop"]);
+        assert_eq!(
+            calls(&log),
+            ["stop_in_background"],
+            "the UI thread does not wait"
+        );
         c.handle(Intent::SetSharing(false));
         assert!(calls(&log).is_empty(), "already off");
+
+        c.on_event(AppEvent::SharingStopped { generation });
+        assert!(!c.state().sharing.stopping);
+        assert_eq!(calls(&log), ["wait"], "the finished stop thread is joined");
+        c.on_event(AppEvent::SharingStopped { generation });
+        assert!(calls(&log).is_empty(), "a repeated report is ignored");
     }
 
     #[test]
@@ -372,7 +436,13 @@ mod tests {
         c.handle(Intent::SetSharing(true));
         let sharing = &c.state().sharing;
         assert!(!sharing.enabled);
-        assert!(sharing.error.as_deref().unwrap().contains("porta 7420 è già in uso"));
+        assert!(
+            sharing
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("porta 7420 è già in uso")
+        );
 
         log.borrow_mut().fail_start = None;
         c.handle(Intent::ToggleSharing);
@@ -385,7 +455,12 @@ mod tests {
         let (mut c, log) = controller();
         c.handle(Intent::SetSharing(true));
         calls(&log);
-        c.on_event(host(1, HostEvent::Stopped { error: Some("capture failed".into()) }));
+        c.on_event(host(
+            1,
+            HostEvent::Stopped {
+                error: Some("capture failed".into()),
+            },
+        ));
         assert!(!c.state().sharing.enabled);
         assert_eq!(c.state().sharing.error.as_deref(), Some("capture failed"));
         assert_eq!(calls(&log), ["stop"], "the finished service is joined");
@@ -396,8 +471,10 @@ mod tests {
         let (mut c, _log) = controller();
         c.handle(Intent::SetSharing(true));
         c.handle(Intent::SetSharing(false));
+        c.on_event(AppEvent::SharingStopped { generation: 1 });
         c.handle(Intent::SetSharing(true));
         c.on_event(host(1, HostEvent::Stopped { error: None }));
+        c.on_event(AppEvent::SharingStopped { generation: 1 });
         assert!(c.state().sharing.enabled, "stale Stopped of run 1");
         c.on_event(host(2, listening("222222", "ff")));
         assert_eq!(c.state().sharing.pin.as_deref(), Some("222222"));
@@ -425,11 +502,24 @@ mod tests {
         c.handle(Intent::SetSharing(true));
         let address: SocketAddr = "192.168.1.9:6000".parse().unwrap();
         c.on_event(host(1, listening("111111", "ff")));
-        c.on_event(host(1, HostEvent::ViewerConnected { viewer_name: "PC2".into(), address }));
-        assert_eq!(c.state().sharing.status_line(), "Connesso: PC2 (192.168.1.9)");
         c.on_event(host(
             1,
-            HostEvent::ViewerDisconnected { address, stats: Default::default(), error: None },
+            HostEvent::ViewerConnected {
+                viewer_name: "PC2".into(),
+                address,
+            },
+        ));
+        assert_eq!(
+            c.state().sharing.status_line(),
+            "Connesso: PC2 (192.168.1.9)"
+        );
+        c.on_event(host(
+            1,
+            HostEvent::ViewerDisconnected {
+                address,
+                stats: Default::default(),
+                error: None,
+            },
         ));
         assert_eq!(c.state().sharing.status_line(), "In attesa di connessioni…");
     }
@@ -442,7 +532,10 @@ mod tests {
         assert!(calls(&log).is_empty());
 
         c.handle(Intent::SetSharing(true));
-        assert!(log.borrow().started[0].0.view_only, "preference applies at start");
+        assert!(
+            log.borrow().started[0].0.view_only,
+            "preference applies at start"
+        );
         assert_eq!(calls(&log), ["input false"]);
         c.handle(Intent::SetInputAllowed(true));
         assert_eq!(calls(&log), ["input true"]);
@@ -454,7 +547,12 @@ mod tests {
         let (mut c, _log) = controller();
         c.on_event(AppEvent::DiscoveryFailed("socket".into()));
         assert!(c.state().discovery_error.is_some());
-        c.on_event(AppEvent::Discovery(found("bbbb", "Ufficio", "192.168.1.3", PROTOCOL_VERSION)));
+        c.on_event(AppEvent::Discovery(found(
+            "bbbb",
+            "Ufficio",
+            "192.168.1.3",
+            PROTOCOL_VERSION,
+        )));
         assert_eq!(c.state().discovery_error, None);
         assert_eq!(c.state().host_rows().len(), 1);
     }
@@ -462,27 +560,50 @@ mod tests {
     #[test]
     fn connect_to_a_listed_host() {
         let (mut c, log) = controller();
-        c.on_event(AppEvent::Discovery(found("bbbb", "Ufficio", "192.168.1.3", PROTOCOL_VERSION)));
+        c.on_event(AppEvent::Discovery(found(
+            "bbbb",
+            "Ufficio",
+            "192.168.1.3",
+            PROTOCOL_VERSION,
+        )));
         c.handle(Intent::SelectHost(Some("bbbb".into())));
-        c.handle(Intent::ConnectHost { id: "bbbb".into(), pin: " 123456 ".into() });
+        c.handle(Intent::ConnectHost {
+            id: "bbbb".into(),
+            pin: " 123456 ".into(),
+        });
         let address: SocketAddr = "192.168.1.3:7420".parse().unwrap();
         assert_eq!(log.borrow().launched, [(1, address, "123456".to_string())]);
         let viewer = &c.state().viewers[0];
         assert_eq!(viewer.status_line(), "Connessione a Ufficio in corso…");
         assert_eq!(c.state().selected_host, None);
 
-        c.on_event(AppEvent::Viewer { id: 1, update: ViewerUpdate::Connected });
+        c.on_event(AppEvent::Viewer {
+            id: 1,
+            update: ViewerUpdate::Connected,
+        });
         assert_eq!(c.state().viewers[0].status, ViewerStatus::Connected);
 
-        c.handle(Intent::ConnectHost { id: "bbbb".into(), pin: "1".into() });
-        assert!(c.state().connect_error.as_deref().unwrap().contains("già aperta"));
+        c.handle(Intent::ConnectHost {
+            id: "bbbb".into(),
+            pin: "1".into(),
+        });
+        assert!(
+            c.state()
+                .connect_error
+                .as_deref()
+                .unwrap()
+                .contains("già aperta")
+        );
         assert_eq!(log.borrow().launched.len(), 1);
     }
 
     #[test]
     fn viewer_failure_message_and_dismiss() {
         let (mut c, _log) = controller();
-        c.handle(Intent::ConnectAddress { address: "10.0.0.5".into(), pin: "1".into() });
+        c.handle(Intent::ConnectAddress {
+            address: "10.0.0.5".into(),
+            pin: "1".into(),
+        });
         c.on_event(AppEvent::Viewer {
             id: 1,
             update: ViewerUpdate::Exited {
@@ -499,12 +620,22 @@ mod tests {
     #[test]
     fn retry_replaces_the_failed_entry() {
         let (mut c, log) = controller();
-        c.handle(Intent::ConnectAddress { address: "10.0.0.5:9000".into(), pin: "1".into() });
+        c.handle(Intent::ConnectAddress {
+            address: "10.0.0.5:9000".into(),
+            pin: "1".into(),
+        });
         c.on_event(AppEvent::Viewer {
             id: 1,
-            update: ViewerUpdate::Exited { success: false, code: Some(1), stderr: String::new() },
+            update: ViewerUpdate::Exited {
+                success: false,
+                code: Some(1),
+                stderr: String::new(),
+            },
         });
-        c.handle(Intent::ConnectAddress { address: "10.0.0.5:9000".into(), pin: "2".into() });
+        c.handle(Intent::ConnectAddress {
+            address: "10.0.0.5:9000".into(),
+            pin: "2".into(),
+        });
         assert_eq!(c.state().viewers.len(), 1);
         assert_eq!(c.state().viewers[0].id, 2);
         assert_eq!(log.borrow().launched[1].1, "10.0.0.5:9000".parse().unwrap());
@@ -514,23 +645,63 @@ mod tests {
     fn launch_failure_is_shown() {
         let (mut c, log) = controller();
         log.borrow_mut().fail_launch = true;
-        c.handle(Intent::ConnectAddress { address: "10.0.0.5".into(), pin: "1".into() });
-        let ViewerStatus::Failed(message) = &c.state().viewers[0].status else { panic!() };
+        c.handle(Intent::ConnectAddress {
+            address: "10.0.0.5".into(),
+            pin: "1".into(),
+        });
+        let ViewerStatus::Failed(message) = &c.state().viewers[0].status else {
+            panic!()
+        };
         assert!(message.contains("file not found"), "{message}");
     }
 
     #[test]
     fn invalid_connection_requests() {
         let (mut c, log) = controller();
-        c.handle(Intent::ConnectAddress { address: "non-un-ip".into(), pin: "1".into() });
-        assert!(c.state().connect_error.as_deref().unwrap().starts_with("Indirizzo non valido"));
-        c.handle(Intent::ConnectAddress { address: "10.0.0.5".into(), pin: "  ".into() });
+        c.handle(Intent::ConnectAddress {
+            address: "non-un-ip".into(),
+            pin: "1".into(),
+        });
+        assert!(
+            c.state()
+                .connect_error
+                .as_deref()
+                .unwrap()
+                .starts_with("Indirizzo non valido")
+        );
+        c.handle(Intent::ConnectAddress {
+            address: "10.0.0.5".into(),
+            pin: "  ".into(),
+        });
         assert!(c.state().connect_error.as_deref().unwrap().contains("PIN"));
-        c.handle(Intent::ConnectHost { id: "sparito".into(), pin: "1".into() });
-        assert!(c.state().connect_error.as_deref().unwrap().contains("non è più in rete"));
-        c.on_event(AppEvent::Discovery(found("old", "Vecchio", "10.0.0.6", PROTOCOL_VERSION + 1)));
-        c.handle(Intent::ConnectHost { id: "old".into(), pin: "1".into() });
-        assert!(c.state().connect_error.as_deref().unwrap().contains("Versione"));
+        c.handle(Intent::ConnectHost {
+            id: "sparito".into(),
+            pin: "1".into(),
+        });
+        assert!(
+            c.state()
+                .connect_error
+                .as_deref()
+                .unwrap()
+                .contains("non è più in rete")
+        );
+        c.on_event(AppEvent::Discovery(found(
+            "old",
+            "Vecchio",
+            "10.0.0.6",
+            PROTOCOL_VERSION + 1,
+        )));
+        c.handle(Intent::ConnectHost {
+            id: "old".into(),
+            pin: "1".into(),
+        });
+        assert!(
+            c.state()
+                .connect_error
+                .as_deref()
+                .unwrap()
+                .contains("Versione")
+        );
         assert!(log.borrow().launched.is_empty());
         c.handle(Intent::SelectHost(None));
         assert_eq!(c.state().connect_error, None);
@@ -545,7 +716,10 @@ mod tests {
         assert_eq!(c.handle(Intent::CloseWindow), Some(WindowCommand::Quit));
         c.handle(Intent::SetSharing(true));
         calls(&log);
-        assert_eq!(c.handle(Intent::CloseWindow), Some(WindowCommand::HideToTray));
+        assert_eq!(
+            c.handle(Intent::CloseWindow),
+            Some(WindowCommand::HideToTray)
+        );
         assert!(c.state().sharing.enabled, "sharing continues in the tray");
         assert!(calls(&log).is_empty());
     }
@@ -553,12 +727,80 @@ mod tests {
     #[test]
     fn tray_actions() {
         let (mut c, log) = controller();
-        assert_eq!(c.on_event(AppEvent::Tray(TrayAction::Open)), Some(WindowCommand::Show));
+        assert_eq!(
+            c.on_event(AppEvent::Tray(TrayAction::Open)),
+            Some(WindowCommand::Show)
+        );
         c.on_event(AppEvent::Tray(TrayAction::ToggleSharing));
         assert!(c.state().sharing.enabled);
         calls(&log);
-        assert_eq!(c.on_event(AppEvent::Tray(TrayAction::Quit)), Some(WindowCommand::Quit));
+        assert_eq!(
+            c.on_event(AppEvent::Tray(TrayAction::Quit)),
+            Some(WindowCommand::Quit)
+        );
         assert!(!c.state().sharing.enabled);
         assert_eq!(calls(&log), ["stop"], "quitting stops sharing");
+    }
+
+    #[test]
+    fn cannot_switch_on_while_stopping() {
+        let (mut c, log) = controller();
+        c.handle(Intent::SetSharing(true));
+        c.handle(Intent::SetSharing(false));
+        c.handle(Intent::SetSharing(true));
+        c.on_event(AppEvent::Tray(TrayAction::ToggleSharing));
+        assert_eq!(
+            log.borrow().started.len(),
+            1,
+            "no second start while stopping"
+        );
+        assert!(!c.state().sharing.enabled);
+        assert!(c.state().sharing.stopping);
+
+        c.on_event(AppEvent::SharingStopped { generation: 1 });
+        c.handle(Intent::ToggleSharing);
+        assert!(c.state().sharing.enabled);
+        assert_eq!(log.borrow().started[1].1, 2);
+    }
+
+    #[test]
+    fn late_events_of_the_stopping_run_are_ignored() {
+        let (mut c, _log) = controller();
+        c.handle(Intent::SetSharing(true));
+        c.on_event(host(1, listening("111111", "ff")));
+        c.handle(Intent::SetSharing(false));
+        c.on_event(host(
+            1,
+            HostEvent::Stopped {
+                error: Some("late".into()),
+            },
+        ));
+        let sharing = &c.state().sharing;
+        assert!(sharing.stopping);
+        assert_eq!(sharing.error, None);
+        assert_eq!(sharing.pin, None);
+    }
+
+    #[test]
+    fn quitting_while_stopping_waits_for_the_stop() {
+        let (mut c, log) = controller();
+        c.handle(Intent::SetSharing(true));
+        c.handle(Intent::SetSharing(false));
+        calls(&log);
+        assert_eq!(c.handle(Intent::Quit), Some(WindowCommand::Quit));
+        assert_eq!(calls(&log), ["wait"]);
+        assert!(!c.state().sharing.stopping);
+        c.shutdown();
+        assert!(calls(&log).is_empty(), "nothing left to wait for");
+    }
+
+    #[test]
+    fn closing_the_window_while_stopping_quits_after_the_stop() {
+        let (mut c, log) = controller();
+        c.handle(Intent::SetSharing(true));
+        c.handle(Intent::SetSharing(false));
+        calls(&log);
+        assert_eq!(c.handle(Intent::CloseWindow), Some(WindowCommand::Quit));
+        assert_eq!(calls(&log), ["wait"]);
     }
 }

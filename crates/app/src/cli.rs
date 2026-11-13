@@ -28,7 +28,12 @@ impl StreamOptions {
 
 impl Default for StreamOptions {
     fn default() -> Self {
-        Self { monitor: 0, fps: 60, mbps: 20, codec: Codec::H264 }
+        Self {
+            monitor: 0,
+            fps: 60,
+            mbps: 20,
+            codec: Codec::H264,
+        }
     }
 }
 
@@ -56,6 +61,10 @@ pub struct ViewOptions {
     pub pin: Option<String>,
     /// Only watch: do not send mouse/keyboard even if the host allows it.
     pub view_only: bool,
+    /// Open the viewer window in full screen (toggle with Ctrl+Alt+Enter).
+    pub fullscreen: bool,
+    /// Show the statistics overlay from the start (toggle with Ctrl+Alt+I).
+    pub stats: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,7 +84,8 @@ wshare - LAN screen sharing (no arguments: open the window)
 
   wshare host  [--monitor N] [--fps F] [--mbps B] [--codec h264|hevc] [--port P] [--pin PIN]
                [--view-only]
-  wshare view  [HOST | IP[:PORT]] [--pin PIN] [--view-only]
+  wshare view  [HOST | IP[:PORT]] [--pin PIN] [--view-only] [--fullscreen] [--stats]
+               in the viewer: Ctrl+Alt+Enter full screen, Ctrl+Alt+I statistics
   wshare list                       hosts found on the LAN
   wshare monitors                   monitors of this PC
   wshare bench [--monitor N] [--fps F] [--mbps B] [--codec h264|hevc] [--seconds S] [--out FILE]";
@@ -138,7 +148,11 @@ fn stream_flag(
 }
 
 fn parse_bench(args: &[String]) -> Result<BenchOptions> {
-    let mut options = BenchOptions { stream: StreamOptions::default(), seconds: 10, out: None };
+    let mut options = BenchOptions {
+        stream: StreamOptions::default(),
+        seconds: 10,
+        out: None,
+    };
     for_each_arg(args, |flag, value| {
         if stream_flag(&mut options.stream, flag, value)? {
             return Ok(true);
@@ -154,8 +168,12 @@ fn parse_bench(args: &[String]) -> Result<BenchOptions> {
 }
 
 fn parse_host(args: &[String]) -> Result<HostOptions> {
-    let mut options =
-        HostOptions { stream: StreamOptions::default(), port: DEFAULT_PORT, pin: None, view_only: false };
+    let mut options = HostOptions {
+        stream: StreamOptions::default(),
+        port: DEFAULT_PORT,
+        pin: None,
+        view_only: false,
+    };
     for_each_arg(args, |flag, value| {
         if stream_flag(&mut options.stream, flag, value)? {
             return Ok(true);
@@ -172,11 +190,19 @@ fn parse_host(args: &[String]) -> Result<HostOptions> {
 }
 
 fn parse_view(args: &[String]) -> Result<ViewOptions> {
-    let mut options = ViewOptions { target: None, pin: None, view_only: false };
+    let mut options = ViewOptions {
+        target: None,
+        pin: None,
+        view_only: false,
+        fullscreen: false,
+        stats: false,
+    };
     for_each_arg(args, |arg, value| {
         match arg {
             "--pin" => options.pin = Some(value()?),
             "--view-only" => options.view_only = true,
+            "--fullscreen" => options.fullscreen = true,
+            "--stats" => options.stats = true,
             positional if !positional.starts_with("--") && options.target.is_none() => {
                 options.target = Some(positional.to_string())
             }
@@ -224,7 +250,9 @@ mod tests {
 
     #[test]
     fn host_defaults() {
-        let Command::Host(h) = parse(&args("host")).unwrap() else { panic!() };
+        let Command::Host(h) = parse(&args("host")).unwrap() else {
+            panic!()
+        };
         assert_eq!(h.stream, StreamOptions::default());
         assert_eq!(h.port, DEFAULT_PORT);
         assert_eq!(h.pin, None);
@@ -235,10 +263,17 @@ mod tests {
     fn host_with_every_option() {
         let line =
             "host --monitor 1 --fps 30 --mbps 50 --codec HEVC --port 9000 --pin 123456 --view-only";
-        let Command::Host(h) = parse(&args(line)).unwrap() else { panic!() };
+        let Command::Host(h) = parse(&args(line)).unwrap() else {
+            panic!()
+        };
         assert_eq!(
             h.stream,
-            StreamOptions { monitor: 1, fps: 30, mbps: 50, codec: Codec::Hevc }
+            StreamOptions {
+                monitor: 1,
+                fps: 30,
+                mbps: 50,
+                codec: Codec::Hevc
+            }
         );
         assert_eq!(h.port, 9000);
         assert_eq!(h.pin.as_deref(), Some("123456"));
@@ -251,6 +286,8 @@ mod tests {
             target: Some("192.168.1.20:7420".into()),
             pin: Some("42".into()),
             view_only: false,
+            fullscreen: false,
+            stats: false,
         };
         let Command::View(a) = parse(&args("view 192.168.1.20:7420 --pin 42")).unwrap() else {
             panic!()
@@ -264,15 +301,29 @@ mod tests {
 
     #[test]
     fn view_without_target_discovers() {
-        let Command::View(v) = parse(&args("view")).unwrap() else { panic!() };
+        let Command::View(v) = parse(&args("view")).unwrap() else {
+            panic!()
+        };
         assert_eq!(v.target, None);
     }
 
     #[test]
     fn view_only_viewer() {
-        let Command::View(v) = parse(&args("view laptop --view-only")).unwrap() else { panic!() };
+        let Command::View(v) = parse(&args("view laptop --view-only")).unwrap() else {
+            panic!()
+        };
         assert!(v.view_only);
         assert_eq!(v.target.as_deref(), Some("laptop"));
+        assert!(!v.fullscreen);
+    }
+
+    #[test]
+    fn fullscreen_viewer() {
+        let Command::View(v) = parse(&args("view --fullscreen --stats")).unwrap() else {
+            panic!()
+        };
+        assert!(v.fullscreen);
+        assert!(v.stats);
     }
 
     #[test]

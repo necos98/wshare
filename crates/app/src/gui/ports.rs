@@ -22,6 +22,11 @@ pub enum AppEvent {
         generation: u64,
         event: HostEvent,
     },
+    /// The sharing service started as `generation` finished stopping (see
+    /// [`SharingControl::stop_in_background`]).
+    SharingStopped {
+        generation: u64,
+    },
     Discovery(DiscoveryEvent),
     DiscoveryFailed(String),
     Viewer {
@@ -75,7 +80,19 @@ pub trait SharingControl {
     fn set_input_allowed(&self, allowed: bool);
     fn new_pin(&self) -> String;
     fn disconnect_viewer(&self);
+    /// Stops sharing and waits until it is over (keys released, viewer told
+    /// Bye, port closed). Blocks for up to about a second.
     fn stop(self: Box<Self>);
+    /// Like [`Self::stop`] without blocking: the stop runs elsewhere and
+    /// [`AppEvent::SharingStopped`] arrives when it is over. The returned
+    /// handle waits for it (e.g. before the process exits).
+    fn stop_in_background(self: Box<Self>) -> Box<dyn PendingStop>;
+}
+
+/// A stop running in the background.
+pub trait PendingStop {
+    /// Blocks until the stop is over.
+    fn wait(self: Box<Self>);
 }
 
 /// Opens viewer windows.

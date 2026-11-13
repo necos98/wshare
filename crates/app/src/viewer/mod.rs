@@ -8,9 +8,14 @@
 
 mod cursor;
 mod input_map;
+mod key_log;
+mod key_router;
+mod keyboard_hook;
 mod remote;
 mod render_thread;
 mod sink;
+mod stats;
+mod toolbar;
 mod window;
 
 use std::io::Write;
@@ -23,11 +28,11 @@ use discovery::computer_name;
 use net::{ControlReceiver, ControlSender, Fingerprint, SessionHandle, VideoChannel};
 use protocol::control::{ControlMessage, PROTOCOL_VERSION, StreamInfo};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-use winit::event_loop::{EventLoop, EventLoopProxy};
+use winit::event_loop::{DeviceEvents, EventLoop, EventLoopProxy};
 
 use crate::cli::{DEFAULT_PORT, ViewOptions};
 use crate::target::{self, parse_target};
-use window::{UserEvent, ViewerWindow};
+use window::{ControlPolicy, UserEvent, ViewerWindow, WindowOptions};
 
 /// Environment variable holding the PIN when `--pin` is absent (used by
 /// the desktop interface, so the PIN is not visible on the command line).
@@ -61,10 +66,20 @@ pub fn run(options: ViewOptions) -> Result<()> {
         None => prompt(&format!("PIN shown on {label}: "))?,
     };
 
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     let connected = runtime.block_on(connect(addr, pin))?;
-    let Connected { host_name, stream, input_allowed, fingerprint, tx, rx, video, handle } =
-        connected;
+    let Connected {
+        host_name,
+        stream,
+        input_allowed,
+        fingerprint,
+        tx,
+        rx,
+        video,
+        handle,
+    } = connected;
     println!(
         "Connected to \"{host_name}\" ({addr}) - {}x{} @ {} fps {:?}",
         stream.width, stream.height, stream.fps, stream.codec
@@ -72,23 +87,39 @@ pub fn run(options: ViewOptions) -> Result<()> {
     if let Some(fp) = fingerprint {
         println!("Host fingerprint: {fp}");
     }
-    let control_input = input_allowed && !options.view_only;
-    if !control_input {
+    let policy = ControlPolicy {
+        host_allows: input_allowed,
+        view_only: options.view_only,
+    };
+    if !policy.enabled() {
         println!("View only: mouse and keyboard stay local.");
     }
+    println!("Ctrl+Alt+Enter: full screen - Ctrl+Alt+I: statistics");
 
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
+    // No raw input: by default winit registers keyboard and mouse as raw
+    // input devices, and while a process with that registration is in the
+    // foreground Windows skips its own low-level keyboard hook — full
+    // screen would then leave Alt+Tab and the Windows key local. The viewer
+    // uses only window events, never `DeviceEvent`s.
+    event_loop.listen_device_events(DeviceEvents::Never);
     let (datagram_tx, datagram_rx) = std::sync::mpsc::channel::<Bytes>();
     let (outgoing_tx, outgoing_rx) = unbounded_channel::<ControlMessage>();
     runtime.spawn(receive_video(video, datagram_tx));
     let control = runtime.spawn(run_control(tx, rx, outgoing_rx, event_loop.create_proxy()));
 
+    let rtt_handle = handle.clone();
     let mut window = ViewerWindow::new(
-        format!("{host_name} - wshare"),
+        WindowOptions {
+            title: format!("{host_name} - wshare"),
+            fullscreen: options.fullscreen,
+            stats: options.stats,
+        },
         stream,
         datagram_rx,
+        Box::new(move || rtt_handle.rtt()),
         outgoing_tx.clone(),
-        control_input,
+        policy,
         event_loop.create_proxy(),
     );
     event_loop.run_app(&mut window)?;
@@ -101,7 +132,10 @@ pub fn run(options: ViewOptions) -> Result<()> {
     if let Some(stats) = window.stats() {
         println!(
             "Session: {} frames shown, {} lost, {} skipped, {} keyframes requested",
-            stats.frames_presented, stats.frames_lost, stats.frames_skipped, stats.keyframes_requested
+            stats.frames_presented,
+            stats.frames_lost,
+            stats.frames_skipped,
+            stats.keyframes_requested
         );
     }
     window.error().map_or(Ok(()), |e| bail!("{e}"))
@@ -122,7 +156,11 @@ async fn connect(addr: SocketAddr, pin: String) -> Result<Connected> {
         .await
         .context("the host did not answer")??;
     match answer {
-        Some(ControlMessage::Welcome { host_name, stream, input_allowed }) => Ok(Connected {
+        Some(ControlMessage::Welcome {
+            host_name,
+            stream,
+            input_allowed,
+        }) => Ok(Connected {
             host_name,
             stream,
             input_allowed,
@@ -173,6 +211,9 @@ async fn run_control(
                 }
                 Ok(Some(ControlMessage::CursorVisible(visible))) => {
                     let _ = window.send_event(UserEvent::CursorVisible(visible));
+                }
+                Ok(Some(ControlMessage::InputAllowed(allowed))) => {
+                    let _ = window.send_event(UserEvent::InputAllowed(allowed));
                 }
                 Ok(Some(_)) => {}
                 Err(e) => break format!("connection lost: {e:#}"),

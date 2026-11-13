@@ -9,6 +9,7 @@
 //! - `session`: one viewer from Hello to goodbye.
 //! - `streaming`: the capture/encode thread of a session.
 //! - `input_gate`: remote input behind the "allow input" switch.
+//! - `input_switch`: what a session does when that switch flips.
 //! - `state`: PIN, input flag and end signals shared with the handle.
 //! - `events`: delivery to the observer, rate limiting.
 //! - `console` + `interrupt`: the CLI front-end (`run`).
@@ -17,6 +18,7 @@ mod accept;
 mod console;
 mod events;
 mod input_gate;
+mod input_switch;
 mod interrupt;
 mod service;
 mod session;
@@ -100,9 +102,9 @@ impl HostHandle {
     /// Allows or forbids remote mouse/keyboard, effective immediately, also
     /// for a viewer already connected (input it sends is then ignored).
     ///
-    /// Forbidding it mid-session releases whatever the viewer holds. The
-    /// viewer learns the setting only at connect time (Welcome), so a
-    /// viewer admitted while input was forbidden typically sends none.
+    /// Forbidding it mid-session releases whatever the viewer holds. A
+    /// connected viewer is told every actual change (`InputAllowed`); a new
+    /// one learns the setting in Welcome.
     pub fn set_input_allowed(&self, allowed: bool) {
         self.service.state().set_input_allowed(allowed);
     }

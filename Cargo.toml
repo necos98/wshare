@@ -11,6 +11,7 @@ members = [
     "crates/discovery",
     "crates/input",
     "crates/app",
+    "crates/cli-shim",
 ]
 
 [workspace.package]

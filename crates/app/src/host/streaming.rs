@@ -150,6 +150,7 @@ fn stream_loop(
             width: config.width,
             height: config.height,
             fps: stream.fps,
+            encoder: encoder.name().to_string(),
         };
         anyhow::Ok((mf, source, encoder, info))
     })();

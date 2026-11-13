@@ -34,25 +34,34 @@ const DETAIL_SIZE: f32 = 12.0;
 
 pub fn show(ui: &mut Ui, state: &GuiState, drafts: &mut Drafts) -> Vec<Intent> {
     let mut intents = Vec::new();
-    egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-        sharing_section(ui, &state.sharing, &mut intents);
-        ui.add_space(GAP);
-        ui.separator();
-        ui.add_space(GAP / 2.0);
-        network_section(ui, state, drafts, &mut intents);
-        viewers_section(ui, &state.viewers, &mut intents);
-    });
+    egui::ScrollArea::vertical()
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            sharing_section(ui, &state.sharing, &mut intents);
+            ui.add_space(GAP);
+            ui.separator();
+            ui.add_space(GAP / 2.0);
+            network_section(ui, state, drafts, &mut intents);
+            viewers_section(ui, &state.viewers, &mut intents);
+        });
     intents
 }
 
 fn sharing_section(ui: &mut Ui, sharing: &Sharing, intents: &mut Vec<Intent>) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Condividi questo schermo").size(16.0).strong());
+        ui.label(
+            RichText::new("Condividi questo schermo")
+                .size(16.0)
+                .strong(),
+        );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let mut on = sharing.enabled;
-            if toggle(ui, &mut on, "Condividi questo schermo").changed() {
-                intents.push(Intent::SetSharing(on));
-            }
+            // Off but still winding down: cannot be switched on yet.
+            ui.add_enabled_ui(!sharing.stopping, |ui| {
+                if toggle(ui, &mut on, "Condividi questo schermo").changed() {
+                    intents.push(Intent::SetSharing(on));
+                }
+            });
         });
     });
     if let Some(error) = &sharing.error {
@@ -61,7 +70,14 @@ fn sharing_section(ui: &mut Ui, sharing: &Sharing, intents: &mut Vec<Intent>) {
     }
     if !sharing.enabled {
         ui.add_space(4.0);
-        ui.weak("Attivalo per far vedere e controllare questo PC da un altro computer in rete.");
+        if sharing.stopping {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.weak(sharing.off_line());
+            });
+        } else {
+            ui.weak(sharing.off_line());
+        }
         return;
     }
     ui.add_space(GAP / 2.0);
@@ -69,11 +85,17 @@ fn sharing_section(ui: &mut Ui, sharing: &Sharing, intents: &mut Vec<Intent>) {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.weak("PIN");
-                let pin = sharing.pin.as_deref().map_or_else(|| "– – –".to_string(), format_pin);
+                let pin = sharing
+                    .pin
+                    .as_deref()
+                    .map_or_else(|| "– – –".to_string(), format_pin);
                 ui.label(RichText::new(pin).monospace().size(34.0).strong());
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.add_enabled(sharing.listening, egui::Button::new("Nuovo PIN")).clicked() {
+                if ui
+                    .add_enabled(sharing.listening, egui::Button::new("Nuovo PIN"))
+                    .clicked()
+                {
                     intents.push(Intent::NewPin);
                 }
             });
@@ -84,7 +106,11 @@ fn sharing_section(ui: &mut Ui, sharing: &Sharing, intents: &mut Vec<Intent>) {
             if sharing.listening {
                 status_dot(
                     ui,
-                    if connected { ok_color(ui) } else { ui.visuals().weak_text_color() },
+                    if connected {
+                        ok_color(ui)
+                    } else {
+                        ui.visuals().weak_text_color()
+                    },
                 );
             } else {
                 ui.spinner();
@@ -100,7 +126,10 @@ fn sharing_section(ui: &mut Ui, sharing: &Sharing, intents: &mut Vec<Intent>) {
         });
         ui.add_space(4.0);
         let mut allowed = sharing.input_allowed;
-        if ui.checkbox(&mut allowed, "Consenti controllo remoto (mouse e tastiera)").changed() {
+        if ui
+            .checkbox(&mut allowed, "Consenti controllo remoto (mouse e tastiera)")
+            .changed()
+        {
             intents.push(Intent::SetInputAllowed(allowed));
         }
         if sharing.input_blocked {
@@ -141,23 +170,41 @@ fn network_section(ui: &mut Ui, state: &GuiState, drafts: &mut Drafts, intents: 
             intents.push(Intent::SelectHost(id));
         }
         if selected {
-            let error = state.connect_error.as_deref().filter(|_| drafts.last_form == Form::Host);
+            let error = state
+                .connect_error
+                .as_deref()
+                .filter(|_| drafts.last_form == Form::Host);
             let focus = std::mem::take(&mut drafts.focus_host_pin);
             let connect = pin_form(ui, &mut drafts.host_pin, None, error, focus);
             if connect {
                 drafts.last_form = Form::Host;
                 let pin = std::mem::take(&mut drafts.host_pin);
-                intents.push(Intent::ConnectHost { id: row.id.clone(), pin });
+                intents.push(Intent::ConnectHost {
+                    id: row.id.clone(),
+                    pin,
+                });
             }
         }
     }
     ui.add_space(GAP / 2.0);
     egui::CollapsingHeader::new("Connetti a un indirizzo IP").show_unindented(ui, |ui| {
-        let error = state.connect_error.as_deref().filter(|_| drafts.last_form == Form::Address);
-        if pin_form(ui, &mut drafts.address_pin, Some(&mut drafts.address), error, false) {
+        let error = state
+            .connect_error
+            .as_deref()
+            .filter(|_| drafts.last_form == Form::Address);
+        if pin_form(
+            ui,
+            &mut drafts.address_pin,
+            Some(&mut drafts.address),
+            error,
+            false,
+        ) {
             drafts.last_form = Form::Address;
             let pin = std::mem::take(&mut drafts.address_pin);
-            intents.push(Intent::ConnectAddress { address: drafts.address.clone(), pin });
+            intents.push(Intent::ConnectAddress {
+                address: drafts.address.clone(),
+                pin,
+            });
         }
     });
 }
@@ -167,14 +214,20 @@ fn host_row(ui: &mut Ui, row: &HostRow, selected: bool) -> Response {
     let enabled = row.connectable();
     // Reserve the background so it is painted below the text.
     let background = ui.painter().add(egui::Shape::Noop);
-    let inner = Frame::NONE.inner_margin(Margin::symmetric(8, 6)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        let name = RichText::new(&row.name).strong();
-        ui.label(if enabled { name } else { name.weak() });
-        ui.label(RichText::new(row.details()).size(DETAIL_SIZE).weak());
-    });
+    let inner = Frame::NONE
+        .inner_margin(Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let name = RichText::new(&row.name).strong();
+            ui.label(if enabled { name } else { name.weak() });
+            ui.label(RichText::new(row.details()).size(DETAIL_SIZE).weak());
+        });
     let rect = inner.response.rect;
-    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
     let response = ui.interact(rect, ui.make_persistent_id(&row.id), sense);
     let visuals = ui.visuals();
     let fill = if selected {
@@ -206,8 +259,11 @@ fn pin_form(
         ui.add_space(8.0);
         let has_address = address.is_some();
         if let Some(address) = address {
-            let field = ui
-                .add(TextEdit::singleline(address).hint_text("192.168.1.20").desired_width(130.0));
+            let field = ui.add(
+                TextEdit::singleline(address)
+                    .hint_text("192.168.1.20")
+                    .desired_width(130.0),
+            );
             submit |= enter_pressed(ui, &field);
         }
         let field = ui.add(
@@ -221,13 +277,19 @@ fn pin_form(
         }
         submit |= enter_pressed(ui, &field);
         let ready = !pin.trim().is_empty();
-        submit |= ui.add_enabled(ready, egui::Button::new("Connetti")).clicked();
+        submit |= ui
+            .add_enabled(ready, egui::Button::new("Connetti"))
+            .clicked();
         submit &= ready;
     });
     if let Some(error) = error {
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            ui.label(RichText::new(error).size(DETAIL_SIZE).color(error_color(ui)));
+            ui.label(
+                RichText::new(error)
+                    .size(DETAIL_SIZE)
+                    .color(error_color(ui)),
+            );
         });
     }
     ui.add_space(4.0);
@@ -302,7 +364,8 @@ fn ok_color(ui: &Ui) -> Color32 {
 fn status_dot(ui: &mut Ui, color: Color32) {
     let size = ui.spacing().interact_size.y;
     let (rect, _) = ui.allocate_exact_size(vec2(size * 0.6, size), Sense::hover());
-    ui.painter().circle_filled(rect.center(), size * 0.22, color);
+    ui.painter()
+        .circle_filled(rect.center(), size * 0.22, color);
 }
 
 /// An on/off switch.
@@ -318,11 +381,21 @@ fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
         let how_on = ui.ctx().animate_bool_responsive(response.id, *on);
         let visuals = ui.style().interact_selectable(&response, *on);
         let radius = 0.5 * rect.height();
-        let fill = if *on { ui.visuals().selection.bg_fill } else { visuals.bg_fill };
-        ui.painter().rect(rect, radius, fill, visuals.bg_stroke, StrokeKind::Inside);
+        let fill = if *on {
+            ui.visuals().selection.bg_fill
+        } else {
+            visuals.bg_fill
+        };
+        ui.painter()
+            .rect(rect, radius, fill, visuals.bg_stroke, StrokeKind::Inside);
         let x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), how_on);
-        let knob = if *on { Color32::WHITE } else { visuals.fg_stroke.color };
-        ui.painter().circle_filled(pos2(x, rect.center().y), 0.72 * radius, knob);
+        let knob = if *on {
+            Color32::WHITE
+        } else {
+            visuals.fg_stroke.color
+        };
+        ui.painter()
+            .circle_filled(pos2(x, rect.center().y), 0.72 * radius, knob);
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }

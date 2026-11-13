@@ -7,6 +7,8 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta};
 use winit::keyboard::PhysicalKey;
 use winit::platform::scancode::PhysicalKeyExtScancode;
 
+use super::key_router::RawKey;
+
 /// Touchpads report pixels; this many pixels count as one wheel notch.
 const PIXELS_PER_NOTCH: f64 = 40.0;
 
@@ -26,7 +28,9 @@ pub fn normalize_pointer(
     // Pixel centres: the first pixel maps to 0.5/w, the last to (w-0.5)/w,
     // so the host's floor(x * width) lands on the same pixel.
     let axis = |pos: f64, start: i32, len: i32| {
-        let pixel = (pos - f64::from(start)).floor().clamp(0.0, f64::from(len - 1));
+        let pixel = (pos - f64::from(start))
+            .floor()
+            .clamp(0.0, f64::from(len - 1));
         ((pixel + 0.5) / f64::from(len)) as f32
     };
     Some((
@@ -58,16 +62,22 @@ pub fn map_wheel(delta: MouseScrollDelta) -> Option<InputEvent> {
     (delta_x != 0 || delta_y != 0).then_some(InputEvent::MouseWheel { delta_x, delta_y })
 }
 
-/// A key press/release by scan code. winit encodes extended keys with an
-/// 0xE0 prefix byte (e.g. Right Ctrl = 0xE01D); the wire splits it out.
-pub fn map_key(key: PhysicalKey, state: ElementState) -> Option<InputEvent> {
+/// A window key event as a scan-code [`RawKey`] for the [`KeyRouter`].
+/// winit encodes extended keys with an 0xE0 prefix byte (e.g. Right Ctrl =
+/// 0xE01D); it is split out here.
+///
+/// [`KeyRouter`]: super::key_router::KeyRouter
+pub fn raw_key(key: PhysicalKey, state: ElementState) -> Option<RawKey> {
     let code = key.to_scancode()?;
     let extended = code & 0xFF00 == 0xE000;
-    let scancode = (code & 0xFF) as u16;
-    if scancode == 0 || (code > 0xFF && !extended) {
+    if code & 0xFF == 0 || (code > 0xFF && !extended) {
         return None; // unknown, or a prefix we cannot express (e.g. Pause's 0xE1)
     }
-    Some(InputEvent::Key { scancode, extended, pressed: state.is_pressed() })
+    Some(RawKey {
+        scan: code & 0xFF,
+        extended,
+        pressed: state.is_pressed(),
+    })
 }
 
 #[cfg(test)]
@@ -96,7 +106,10 @@ mod tests {
         let (_, y) = normalize_pointer((500.0, 999.0), window, FULL_HD).unwrap();
         assert!(y > 0.999, "bottom bar clamps to the bottom edge, got {y}");
         let (x, y) = normalize_pointer((500.0, 500.0), window, FULL_HD).unwrap();
-        assert!((x - 0.5).abs() < 0.002 && (y - 0.5).abs() < 0.002, "{x},{y}");
+        assert!(
+            (x - 0.5).abs() < 0.002 && (y - 0.5).abs() < 0.002,
+            "{x},{y}"
+        );
     }
 
     #[test]
@@ -107,7 +120,10 @@ mod tests {
     #[test]
     fn buttons() {
         assert_eq!(map_button(MouseButton::Left), Some(RemoteButton::Left));
-        assert_eq!(map_button(MouseButton::Forward), Some(RemoteButton::Forward));
+        assert_eq!(
+            map_button(MouseButton::Forward),
+            Some(RemoteButton::Forward)
+        );
         assert_eq!(map_button(MouseButton::Other(9)), None);
     }
 
@@ -115,29 +131,70 @@ mod tests {
     fn wheel_lines_and_pixels() {
         assert_eq!(
             map_wheel(MouseScrollDelta::LineDelta(0.0, -1.0)),
-            Some(InputEvent::MouseWheel { delta_x: 0, delta_y: -120 })
+            Some(InputEvent::MouseWheel {
+                delta_x: 0,
+                delta_y: -120
+            })
         );
         assert_eq!(
             map_wheel(MouseScrollDelta::LineDelta(0.5, 0.0)),
-            Some(InputEvent::MouseWheel { delta_x: 60, delta_y: 0 })
+            Some(InputEvent::MouseWheel {
+                delta_x: 60,
+                delta_y: 0
+            })
         );
         assert_eq!(
-            map_wheel(MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 40.0))),
-            Some(InputEvent::MouseWheel { delta_x: 0, delta_y: 120 })
+            map_wheel(MouseScrollDelta::PixelDelta(PhysicalPosition::new(
+                0.0, 40.0
+            ))),
+            Some(InputEvent::MouseWheel {
+                delta_x: 0,
+                delta_y: 120
+            })
         );
         assert_eq!(map_wheel(MouseScrollDelta::LineDelta(0.0, 0.001)), None);
     }
 
     #[test]
     fn plain_and_extended_keys() {
-        let a = map_key(PhysicalKey::Code(KeyCode::KeyA), ElementState::Pressed);
-        assert_eq!(a, Some(InputEvent::Key { scancode: 0x1E, extended: false, pressed: true }));
-        let right_ctrl = map_key(PhysicalKey::Code(KeyCode::ControlRight), ElementState::Released);
+        let a = raw_key(PhysicalKey::Code(KeyCode::KeyA), ElementState::Pressed);
+        assert_eq!(
+            a,
+            Some(RawKey {
+                scan: 0x1E,
+                extended: false,
+                pressed: true
+            })
+        );
+        let right_ctrl = raw_key(
+            PhysicalKey::Code(KeyCode::ControlRight),
+            ElementState::Released,
+        );
         assert_eq!(
             right_ctrl,
-            Some(InputEvent::Key { scancode: 0x1D, extended: true, pressed: false })
+            Some(RawKey {
+                scan: 0x1D,
+                extended: true,
+                pressed: false
+            })
         );
-        let up = map_key(PhysicalKey::Code(KeyCode::ArrowUp), ElementState::Pressed);
-        assert_eq!(up, Some(InputEvent::Key { scancode: 0x48, extended: true, pressed: true }));
+        let up = raw_key(PhysicalKey::Code(KeyCode::ArrowUp), ElementState::Pressed);
+        assert_eq!(
+            up,
+            Some(RawKey {
+                scan: 0x48,
+                extended: true,
+                pressed: true
+            })
+        );
+        let enter = raw_key(PhysicalKey::Code(KeyCode::Enter), ElementState::Pressed);
+        assert_eq!(
+            enter,
+            Some(RawKey {
+                scan: 0x1C,
+                extended: false,
+                pressed: true
+            })
+        );
     }
 }

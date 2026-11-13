@@ -86,10 +86,6 @@ impl SharedState {
         pin
     }
 
-    pub(super) fn input_allowed(&self) -> bool {
-        *self.input_allowed.borrow()
-    }
-
     /// Changes the input permission; sessions watching it are woken only on
     /// an actual change.
     pub(super) fn set_input_allowed(&self, allowed: bool) {
@@ -174,7 +170,7 @@ mod tests {
         state.set_input_allowed(false);
         assert!(watcher.has_changed().unwrap());
         assert!(!*watcher.borrow_and_update());
-        assert!(!state.input_allowed());
+        assert!(!*state.watch_input().borrow());
     }
 
     #[test]

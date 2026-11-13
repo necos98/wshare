@@ -26,6 +26,7 @@ fn welcome() -> ControlMessage {
             width: 1920,
             height: 1080,
             fps: 60,
+            encoder: "Test Encoder".into(),
         },
         input_allowed: true,
     }

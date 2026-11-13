@@ -9,6 +9,7 @@
 //!   viewer -> host  RequestKeyframe
 //!   viewer -> host  Input(event)            (ignored by view-only hosts)
 //!   host -> viewer  Cursor(shape) / CursorVisible(bool)
+//!   host -> viewer  InputAllowed(bool)      (remote control switched mid-session)
 //!   either          Bye
 
 use serde::{Deserialize, Serialize};
@@ -17,7 +18,8 @@ use crate::ProtocolError;
 use crate::input::{CursorShape, InputEvent};
 
 /// 2: remote control (Input, Cursor, CursorVisible; Welcome.input_allowed).
-pub const PROTOCOL_VERSION: u16 = 2;
+/// 3: InputAllowed; StreamInfo.encoder.
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// Upper bound for one control message; protects against garbage lengths.
 /// Sized for the largest cursor image (256x256 RGBA = 256 KiB) plus margin.
@@ -38,6 +40,9 @@ pub struct StreamInfo {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    /// Human-readable encoder name (e.g. "Intel Quick Sync H.264 Encoder
+    /// MFT"), shown in the viewer's statistics.
+    pub encoder: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -62,6 +67,8 @@ pub enum ControlMessage {
     /// The host pointer is hidden (e.g. a fullscreen video) or shown again.
     CursorVisible(bool),
     Bye,
+    /// The host allowed or forbade remote mouse/keyboard during the session.
+    InputAllowed(bool),
 }
 
 /// Serializes `msg` as one length-prefixed frame.
@@ -155,6 +162,7 @@ mod tests {
                     width: 2560,
                     height: 1440,
                     fps: 60,
+                    encoder: "Test Encoder".into(),
                 },
                 input_allowed: true,
             },
@@ -174,6 +182,7 @@ mod tests {
                 rgba: vec![1, 2, 3, 4, 5, 6, 7, 8],
             }),
             ControlMessage::CursorVisible(false),
+            ControlMessage::InputAllowed(true),
             ControlMessage::Rejected {
                 reason: "bad pin".into(),
             },

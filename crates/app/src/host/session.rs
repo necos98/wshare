@@ -19,6 +19,7 @@ use tokio::sync::watch;
 use super::HostEvent;
 use super::events::EventSink;
 use super::input_gate::InputGate;
+use super::input_switch::InputSwitch;
 use super::state::{Cancelled, SharedState};
 use super::streaming::{StreamEnd, StreamingThread};
 use crate::cli::StreamOptions;
@@ -188,7 +189,11 @@ async fn serve_admitted(
         let _ = streaming.stop().await;
         return;
     }
-    let welcome = welcome(&ctx.host_name, info, ctx.state.input_allowed());
+    // Subscribed before reading the flag for Welcome, so a change made
+    // right after it is not missed.
+    let mut allowed = ctx.state.watch_input();
+    let told = *allowed.borrow_and_update();
+    let welcome = welcome(&ctx.host_name, info, told);
     if let Err(e) = tx.send(&welcome).await {
         let reason = format!("viewer left before Welcome: {e:#}");
         ctx.events
@@ -209,7 +214,8 @@ async fn serve_admitted(
         cursor: &mut cursor_rx,
         streaming: &streaming,
         gate: &mut gate,
-        allowed: ctx.state.watch_input(),
+        allowed,
+        switch: InputSwitch::new(told),
         cancel: &mut cancel,
         handle: &viewer.handle,
         events: &ctx.events,
@@ -283,6 +289,7 @@ struct ControlLoop<'a> {
     streaming: &'a StreamingThread,
     gate: &'a mut InputGate<RemoteInput>,
     allowed: watch::Receiver<bool>,
+    switch: InputSwitch,
     cancel: &'a mut Cancelled,
     handle: &'a SessionHandle,
     events: &'a EventSink,
@@ -305,8 +312,13 @@ impl ControlLoop<'_> {
                 },
                 Some(update) = self.cursor.recv() => self.tx.send(&update).await?,
                 Ok(()) = self.allowed.changed() => {
-                    if !*self.allowed.borrow_and_update() {
+                    let allowed = *self.allowed.borrow_and_update();
+                    let actions = self.switch.update(allowed);
+                    if actions.release {
                         self.report(|gate, now| gate.release_all(now));
+                    }
+                    if let Some(message) = actions.notify {
+                        self.tx.send(&message).await?;
                     }
                 }
                 () = self.cancel.wait() => {
@@ -389,6 +401,7 @@ mod tests {
             width: 1920,
             height: 1080,
             fps: 60,
+            encoder: "Test Encoder".into(),
         };
         let ControlMessage::Welcome {
             input_allowed,

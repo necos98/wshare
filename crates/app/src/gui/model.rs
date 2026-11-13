@@ -27,6 +27,9 @@ pub struct ConnectedViewer {
 pub struct Sharing {
     /// Position of the toggle.
     pub enabled: bool,
+    /// Switched off, the service is still winding down: the toggle cannot
+    /// be switched on again yet.
+    pub stopping: bool,
     /// The service reported `Listening`.
     pub listening: bool,
     pub pin: Option<String>,
@@ -45,6 +48,7 @@ impl Default for Sharing {
     fn default() -> Self {
         Self {
             enabled: false,
+            stopping: false,
             listening: false,
             pin: None,
             viewer: None,
@@ -59,26 +63,57 @@ impl Default for Sharing {
 impl Sharing {
     /// Switches the toggle on (the service is starting).
     pub fn started(&mut self) {
-        *self = Self { enabled: true, input_allowed: self.input_allowed, ..Self::default() };
+        *self = Self {
+            enabled: true,
+            input_allowed: self.input_allowed,
+            ..Self::default()
+        };
     }
 
     /// Switches the toggle off, keeping the preferences; `error` says why.
     pub fn stopped(&mut self, error: Option<String>) {
-        *self = Self { input_allowed: self.input_allowed, error, ..Self::default() };
+        *self = Self {
+            input_allowed: self.input_allowed,
+            error,
+            ..Self::default()
+        };
+    }
+
+    /// Switches the toggle off while the service winds down in the
+    /// background (until [`Self::stop_finished`]).
+    pub fn begin_stopping(&mut self) {
+        *self = Self {
+            input_allowed: self.input_allowed,
+            stopping: true,
+            ..Self::default()
+        };
+    }
+
+    /// The background stop is over: the toggle can be switched on again.
+    pub fn stop_finished(&mut self) {
+        self.stopping = false;
     }
 
     /// Applies an event of the running service. Returns the id this PC
     /// announces on the LAN when it becomes known.
     pub fn apply(&mut self, event: HostEvent) -> Option<String> {
         match event {
-            HostEvent::Listening { pin, fingerprint, .. } => {
+            HostEvent::Listening {
+                pin, fingerprint, ..
+            } => {
                 self.listening = true;
                 self.pin = Some(pin);
                 return Some(fingerprint.chars().take(HOST_ID_LEN).collect());
             }
             HostEvent::PinChanged { pin } => self.pin = Some(pin),
-            HostEvent::ViewerConnected { viewer_name, address } => {
-                self.viewer = Some(ConnectedViewer { name: viewer_name, address });
+            HostEvent::ViewerConnected {
+                viewer_name,
+                address,
+            } => {
+                self.viewer = Some(ConnectedViewer {
+                    name: viewer_name,
+                    address,
+                });
                 self.input_blocked = false;
                 self.notice = None;
             }
@@ -99,6 +134,15 @@ impl Sharing {
             HostEvent::Stopped { error } => self.stopped(error),
         }
         None
+    }
+
+    /// The line under the toggle while sharing is off.
+    pub fn off_line(&self) -> &'static str {
+        if self.stopping {
+            "Arresto in corso…"
+        } else {
+            "Attivalo per far vedere e controllare questo PC da un altro computer in rete."
+        }
     }
 
     /// The status line under the PIN.
@@ -186,7 +230,11 @@ pub enum ViewerUpdate {
     /// The handshake succeeded and its window is open.
     Connected,
     /// The process ended. `stderr` is everything it wrote there.
-    Exited { success: bool, code: Option<i32>, stderr: String },
+    Exited {
+        success: bool,
+        code: Option<i32>,
+        stderr: String,
+    },
 }
 
 /// Everything the window shows.
@@ -245,7 +293,11 @@ impl GuiState {
                 }
             }
             ViewerUpdate::Exited { success: true, .. } => self.viewers.retain(|v| v.id != id),
-            ViewerUpdate::Exited { success: false, code, stderr } => {
+            ViewerUpdate::Exited {
+                success: false,
+                code,
+                stderr,
+            } => {
                 if let Some(viewer) = self.viewer_mut(id) {
                     viewer.status = ViewerStatus::Failed(viewer_error::describe(&stderr, code));
                 }
@@ -255,7 +307,9 @@ impl GuiState {
 
     /// A viewer already open (or opening) on `address`.
     pub fn active_viewer_for(&self, address: SocketAddr) -> Option<&ViewerSession> {
-        self.viewers.iter().find(|v| v.address == address && v.is_active())
+        self.viewers
+            .iter()
+            .find(|v| v.address == address && v.is_active())
     }
 
     /// Text of the tray icon's tooltip.
@@ -265,6 +319,7 @@ impl GuiState {
             (Some(v), _, _) => format!("wshare - connesso: {}", v.name),
             (None, true, Some(pin)) => format!("wshare - in attesa (PIN {})", format_pin(pin)),
             (None, true, None) => "wshare - avvio condivisione…".to_string(),
+            (None, false, _) if s.stopping => "wshare - arresto condivisione…".to_string(),
             (None, false, _) => "wshare - condivisione disattivata".to_string(),
         }
     }
@@ -331,7 +386,9 @@ pub(crate) mod tests {
         let mut s = Sharing::default();
         s.started();
         s.apply(listening("111111", "ff"));
-        s.apply(HostEvent::PinChanged { pin: "222222".into() });
+        s.apply(HostEvent::PinChanged {
+            pin: "222222".into(),
+        });
         assert_eq!(s.pin.as_deref(), Some("222222"));
     }
 
@@ -368,22 +425,33 @@ pub(crate) mod tests {
             stats: Default::default(),
             error: Some("encoder failed".into()),
         });
-        assert_eq!(s.notice.as_deref(), Some("Sessione terminata: encoder failed"));
+        assert_eq!(
+            s.notice.as_deref(),
+            Some("Sessione terminata: encoder failed")
+        );
         s.apply(HostEvent::ViewerRejected {
             address: addr("10.0.0.2:1"),
             reason: "wrong PIN".into(),
         });
-        assert_eq!(s.notice.as_deref(), Some("Connessione rifiutata da 10.0.0.2: PIN errato"));
+        assert_eq!(
+            s.notice.as_deref(),
+            Some("Connessione rifiutata da 10.0.0.2: PIN errato")
+        );
         s.apply(HostEvent::Warning("annuncio fallito".into()));
         assert_eq!(s.notice.as_deref(), Some("annuncio fallito"));
     }
 
     #[test]
     fn stopped_resets_but_keeps_preference() {
-        let mut s = Sharing { input_allowed: false, ..Sharing::default() };
+        let mut s = Sharing {
+            input_allowed: false,
+            ..Sharing::default()
+        };
         s.started();
         s.apply(listening("111111", "ff"));
-        s.apply(HostEvent::Stopped { error: Some("capture lost".into()) });
+        s.apply(HostEvent::Stopped {
+            error: Some("capture lost".into()),
+        });
         assert!(!s.enabled);
         assert_eq!(s.pin, None);
         assert!(!s.input_allowed);
@@ -391,6 +459,25 @@ pub(crate) mod tests {
         s.started();
         assert_eq!(s.error, None, "starting again clears the error");
         assert!(!s.input_allowed);
+    }
+
+    #[test]
+    fn stopping_blocks_restart_until_finished() {
+        let mut s = Sharing {
+            input_allowed: false,
+            ..Sharing::default()
+        };
+        s.started();
+        s.apply(listening("111111", "ff"));
+        s.begin_stopping();
+        assert!(!s.enabled);
+        assert!(s.stopping);
+        assert_eq!(s.pin, None);
+        assert!(!s.input_allowed, "preference kept");
+        assert_eq!(s.off_line(), "Arresto in corso…");
+        s.stop_finished();
+        assert!(!s.stopping);
+        assert!(s.off_line().starts_with("Attivalo"));
     }
 
     #[test]
@@ -403,7 +490,12 @@ pub(crate) mod tests {
             PROTOCOL_VERSION,
         ));
         state.apply_discovery(found("bbbb", "Ufficio", "192.168.1.3", PROTOCOL_VERSION));
-        state.apply_discovery(found("aaaa", "Vecchio", "192.168.1.4", PROTOCOL_VERSION + 1));
+        state.apply_discovery(found(
+            "aaaa",
+            "Vecchio",
+            "192.168.1.4",
+            PROTOCOL_VERSION + 1,
+        ));
         assert_eq!(state.host_rows().len(), 3, "own id unknown yet");
 
         state.apply_host_event(listening("1", "0123456789abcdef99"));
@@ -451,15 +543,25 @@ pub(crate) mod tests {
             address,
             status: ViewerStatus::Connecting,
         });
-        assert_eq!(state.viewers[0].status_line(), "Connessione a Ufficio in corso…");
+        assert_eq!(
+            state.viewers[0].status_line(),
+            "Connessione a Ufficio in corso…"
+        );
         assert!(state.active_viewer_for(address).is_some());
         state.apply_viewer_update(1, ViewerUpdate::Connected);
         assert_eq!(state.viewers[0].status_line(), "Connesso a Ufficio");
         state.apply_viewer_update(
             1,
-            ViewerUpdate::Exited { success: true, code: Some(0), stderr: String::new() },
+            ViewerUpdate::Exited {
+                success: true,
+                code: Some(0),
+                stderr: String::new(),
+            },
         );
-        assert!(state.viewers.is_empty(), "a window closed normally disappears");
+        assert!(
+            state.viewers.is_empty(),
+            "a window closed normally disappears"
+        );
     }
 
     #[test]
@@ -480,7 +582,10 @@ pub(crate) mod tests {
                 stderr: "error: the host refused: wrong PIN\n".into(),
             },
         );
-        assert_eq!(state.viewers[0].status, ViewerStatus::Failed("PIN errato.".into()));
+        assert_eq!(
+            state.viewers[0].status,
+            ViewerStatus::Failed("PIN errato.".into())
+        );
         assert!(state.active_viewer_for(address).is_none());
     }
 
@@ -496,6 +601,8 @@ pub(crate) mod tests {
             address: addr("192.168.1.7:5"),
         });
         assert_eq!(state.tray_tooltip(), "wshare - connesso: PORTATILE");
+        state.sharing.begin_stopping();
+        assert_eq!(state.tray_tooltip(), "wshare - arresto condivisione…");
     }
 
     #[test]

@@ -2168,6 +2168,7 @@ dependencies = [
  "gpu",
  "pipeline",
  "windows",
+ "windows-numerics",
 ]
 
 [[package]]
@@ -3360,6 +3361,10 @@ dependencies = [
  "winit",
  "winresource",
 ]
+
+[[package]]
+name = "wshare-cli"
+version = "0.1.0"
 
 [[package]]
 name = "x11-dl"

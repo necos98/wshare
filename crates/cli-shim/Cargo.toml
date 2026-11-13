@@ -1,0 +1,11 @@
+[package]
+name = "wshare-cli"
+version.workspace = true
+edition.workspace = true
+description = "Console front for wshare.exe: lets terminals wait for wshare commands"
+
+[[bin]]
+name = "wshare-cli"
+path = "src/main.rs"
+
+[dependencies]

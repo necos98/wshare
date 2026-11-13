@@ -27,8 +27,12 @@ impl Tray {
         let open = MenuItem::new("Apri wshare", true, None);
         let sharing_item = CheckMenuItem::new("Condivisione attiva", true, false, None);
         let quit = MenuItem::new("Esci", true, None);
-        let menu =
-            Menu::with_items(&[&open, &sharing_item, &PredefinedMenuItem::separator(), &quit])?;
+        let menu = Menu::with_items(&[
+            &open,
+            &sharing_item,
+            &PredefinedMenuItem::separator(),
+            &quit,
+        ])?;
 
         let actions: Vec<(MenuId, TrayAction)> = vec![
             (open.id().clone(), TrayAction::Open),
@@ -56,7 +60,11 @@ impl Tray {
             .with_menu_on_left_click(false)
             .build()
             .context("creating tray icon")?;
-        Ok(Self { icon, sharing_item, tooltip })
+        Ok(Self {
+            icon,
+            sharing_item,
+            tooltip,
+        })
     }
 
     /// Mirrors the state on the icon (only touching what changed).
@@ -68,16 +76,22 @@ impl Tray {
         }
         // Clicking a check item toggles it by itself: always re-assert.
         self.sharing_item.set_checked(state.sharing.enabled);
+        self.sharing_item.set_enabled(!state.sharing.stopping);
     }
 }
 
 /// A left click (on release) or a double click opens the window.
 fn opens_window(event: &TrayIconEvent) -> bool {
     match event {
-        TrayIconEvent::Click { button: MouseButton::Left, button_state, .. } => {
-            *button_state == MouseButtonState::Up
-        }
-        TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => true,
+        TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state,
+            ..
+        } => *button_state == MouseButtonState::Up,
+        TrayIconEvent::DoubleClick {
+            button: MouseButton::Left,
+            ..
+        } => true,
         _ => false,
     }
 }

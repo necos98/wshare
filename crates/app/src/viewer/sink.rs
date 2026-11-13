@@ -14,12 +14,32 @@ pub struct ViewSink {
 
 impl ViewSink {
     pub fn new(renderer: Renderer) -> Self {
-        Self { renderer, last: None }
+        Self {
+            renderer,
+            last: None,
+        }
     }
 
     /// Resizes the swap chain and redraws the last picture, if any.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         self.renderer.resize(width, height)?;
+        self.redraw()
+    }
+
+    /// Shows (`Some`) or hides the text overlay, redrawing right away: on a
+    /// static screen no new frame would come to carry the change.
+    pub fn set_overlay(&mut self, lines: Option<Vec<String>>) -> Result<()> {
+        self.renderer.set_overlay(lines);
+        self.redraw()
+    }
+
+    /// Sets the full-screen control bar (`None`: windowed), redrawing at once.
+    pub fn set_toolbar(&mut self, view: Option<render::ToolbarView>) -> Result<()> {
+        self.renderer.set_toolbar(view);
+        self.redraw()
+    }
+
+    fn redraw(&mut self) -> Result<()> {
         match &self.last {
             Some(frame) => self.renderer.present(frame),
             None => Ok(()),

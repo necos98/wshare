@@ -1,7 +1,14 @@
 //! wshare — LAN screen sharing. See `cli::USAGE`.
+//!
+//! A "windows" subsystem program: double-clicking opens the interface
+//! without a console window; command-line commands attach to the console
+//! of the terminal that started them (see `gui::platform`).
+
+#![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod bench;
 mod cli;
+mod gui;
 mod handshake;
 mod host;
 mod paths;
@@ -18,8 +25,17 @@ use cli::Command;
 /// is declared in the embedded manifest, see build.rs.
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Err(e) = cli::parse(&args).and_then(run) {
-        eprintln!("error: {e:#}");
+    let command = cli::parse(&args);
+    let is_gui = matches!(command, Ok(Command::Gui));
+    if !is_gui {
+        gui::platform::attach_parent_console();
+    }
+    if let Err(e) = command.and_then(run) {
+        if is_gui {
+            gui::platform::error_box(&format!("wshare non riesce ad aprire la finestra:\n{e:#}"));
+        } else {
+            eprintln!("error: {e:#}");
+        }
         std::process::exit(1);
     }
 }
@@ -31,6 +47,7 @@ fn run(command: Command) -> Result<()> {
         Command::Bench(options) => bench::run(options),
         Command::Host(options) => host::run(options),
         Command::View(options) => viewer::run(options),
+        Command::Gui => gui::run(),
         Command::Help => {
             println!("{}", cli::USAGE);
             Ok(())

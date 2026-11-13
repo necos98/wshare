@@ -29,6 +29,10 @@ use crate::cli::{DEFAULT_PORT, ViewOptions};
 use crate::target::{self, parse_target};
 use window::{UserEvent, ViewerWindow};
 
+/// Environment variable holding the PIN when `--pin` is absent (used by
+/// the desktop interface, so the PIN is not visible on the command line).
+pub const PIN_ENV: &str = "WSHARE_PIN";
+
 const DISCOVERY_WAIT: Duration = Duration::from_secs(3);
 const WELCOME_TIMEOUT: Duration = Duration::from_secs(10);
 /// Time given to the Bye message to leave before the connection closes.
@@ -52,7 +56,7 @@ pub fn run(options: ViewOptions) -> Result<()> {
         println!("Searching the LAN for hosts...");
     }
     let (addr, label) = target::resolve(&target, DISCOVERY_WAIT)?;
-    let pin = match options.pin {
+    let pin = match given_pin(options.pin, std::env::var(PIN_ENV).ok()) {
         Some(pin) => pin,
         None => prompt(&format!("PIN shown on {label}: "))?,
     };
@@ -188,3 +192,33 @@ fn prompt(question: &str) -> Result<String> {
 
 /// Shared with the render thread so the window can request keyframes.
 pub type Outgoing = UnboundedSender<ControlMessage>;
+
+/// The PIN from `--pin`, else from [`PIN_ENV`]; `None`: ask the user.
+fn given_pin(flag: Option<String>, env: Option<String>) -> Option<String> {
+    flag.or_else(|| env.filter(|pin| !pin.trim().is_empty()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(text: &str) -> Option<String> {
+        Some(text.to_string())
+    }
+
+    #[test]
+    fn pin_flag_wins_over_environment() {
+        assert_eq!(given_pin(s("111111"), s("222222")), s("111111"));
+    }
+
+    #[test]
+    fn pin_from_environment_when_flag_absent() {
+        assert_eq!(given_pin(None, s("222222")), s("222222"));
+    }
+
+    #[test]
+    fn prompt_as_last_resort() {
+        assert_eq!(given_pin(None, None), None);
+        assert_eq!(given_pin(None, s("  ")), None);
+    }
+}

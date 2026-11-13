@@ -1,0 +1,258 @@
+//! `wshare host` in a terminal: runs the service and prints its events, one
+//! line each, until it stops or the user presses Ctrl+C.
+
+use std::sync::mpsc::{Sender, channel};
+
+use anyhow::{Result, anyhow};
+
+use super::{HostEvent, HostHandle, HostObserver, interrupt};
+use crate::cli::HostOptions;
+
+/// Where a printed line goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Output {
+    Stdout,
+    Stderr,
+}
+
+/// What the main thread waits for.
+enum Signal {
+    Event(HostEvent),
+    Interrupt,
+}
+
+/// Hands events to the main thread, which owns the terminal.
+struct Forward(Sender<Signal>);
+
+impl HostObserver for Forward {
+    fn on_event(&self, event: HostEvent) {
+        let _ = self.0.send(Signal::Event(event));
+    }
+}
+
+pub(super) fn run(options: HostOptions) -> Result<()> {
+    let (tx, signals) = channel();
+    let on_interrupt = tx.clone();
+    // Installed before starting, so even an early Ctrl+C stops cleanly.
+    if let Err(e) = interrupt::install(move || {
+        let _ = on_interrupt.send(Signal::Interrupt);
+    }) {
+        eprintln!("warning: {e:#}; Ctrl+C will not release the viewer's keys");
+    }
+    let mut handle = Some(HostHandle::start(options, Forward(tx))?);
+
+    for signal in &signals {
+        match signal {
+            // Reported by `main` as the command's error.
+            Signal::Event(HostEvent::Stopped { error: Some(error) }) => return Err(anyhow!(error)),
+            Signal::Event(event) => {
+                print(&event);
+                if matches!(event, HostEvent::Stopped { .. }) {
+                    return Ok(());
+                }
+            }
+            Signal::Interrupt => {
+                if let Some(handle) = handle.take() {
+                    println!("Stopping...");
+                    // Blocks until done; `Stopped` is then waiting in `signals`.
+                    handle.stop();
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print(event: &HostEvent) {
+    for (output, line) in describe(event) {
+        match output {
+            Output::Stdout => println!("{line}"),
+            Output::Stderr => eprintln!("{line}"),
+        }
+    }
+}
+
+/// The terminal lines for an event. Pure, so the wording is unit-tested.
+/// `Stopped` with an error prints nothing: it becomes the command's error.
+pub(super) fn describe(event: &HostEvent) -> Vec<(Output, String)> {
+    use Output::{Stderr, Stdout};
+    match event {
+        HostEvent::Listening {
+            computer_name,
+            port,
+            pin,
+            fingerprint,
+            monitor,
+            width,
+            height,
+        } => vec![
+            (
+                Stdout,
+                format!(
+                    "Sharing {monitor} ({width}x{height}) as \"{computer_name}\" on UDP port {port}"
+                ),
+            ),
+            (Stdout, format!("PIN: {pin}")),
+            (Stdout, format!("Host fingerprint: {fingerprint}")),
+            (
+                Stdout,
+                "Waiting for a viewer... (Ctrl+C to stop)".to_string(),
+            ),
+        ],
+        HostEvent::PinChanged { pin } => vec![(Stdout, format!("New PIN: {pin}"))],
+        HostEvent::ViewerConnected {
+            viewer_name,
+            address,
+        } => {
+            vec![(Stdout, format!("{address}: \"{viewer_name}\" connected"))]
+        }
+        HostEvent::ViewerRejected { address, reason } => {
+            vec![(Stdout, format!("{address}: rejected ({reason})"))]
+        }
+        HostEvent::ViewerDisconnected {
+            address,
+            stats,
+            error: None,
+        } => vec![(
+            Stdout,
+            format!(
+                "{address} disconnected: {} frames sent ({} keyframes), {:.1} MB",
+                stats.frames_sent,
+                stats.keyframes_sent,
+                stats.bytes_sent as f64 / 1e6
+            ),
+        )],
+        HostEvent::ViewerDisconnected {
+            address,
+            error: Some(error),
+            ..
+        } => {
+            vec![(
+                Stderr,
+                format!("{address}: session ended with error: {error}"),
+            )]
+        }
+        HostEvent::InputBlocked => vec![(
+            Stdout,
+            "Remote input blocked by Windows (elevated window, UAC or lock screen); \
+             it resumes when a normal window has focus"
+                .to_string(),
+        )],
+        HostEvent::Warning(warning) => vec![(Stderr, format!("warning: {warning}"))],
+        HostEvent::Stopped { error: None } => vec![(Stdout, "Stopped sharing.".to_string())],
+        HostEvent::Stopped { error: Some(_) } => vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+
+    use pipeline::HostStats;
+
+    use super::Output::{Stderr, Stdout};
+    use super::*;
+
+    fn address() -> SocketAddr {
+        "192.168.1.20:50000".parse().unwrap()
+    }
+
+    fn texts(event: HostEvent) -> Vec<String> {
+        describe(&event).into_iter().map(|(_, text)| text).collect()
+    }
+
+    #[test]
+    fn listening_shows_where_pin_and_fingerprint() {
+        let lines = texts(HostEvent::Listening {
+            computer_name: "DESK".into(),
+            port: 7420,
+            pin: "123456".into(),
+            fingerprint: "ab:cd".into(),
+            monitor: "DISPLAY1".into(),
+            width: 2560,
+            height: 1440,
+        });
+        assert_eq!(
+            lines,
+            [
+                "Sharing DISPLAY1 (2560x1440) as \"DESK\" on UDP port 7420",
+                "PIN: 123456",
+                "Host fingerprint: ab:cd",
+                "Waiting for a viewer... (Ctrl+C to stop)",
+            ]
+        );
+    }
+
+    #[test]
+    fn viewer_lifecycle_lines() {
+        assert_eq!(
+            texts(HostEvent::ViewerConnected {
+                viewer_name: "laptop".into(),
+                address: address()
+            }),
+            ["192.168.1.20:50000: \"laptop\" connected"]
+        );
+        assert_eq!(
+            texts(HostEvent::ViewerRejected {
+                address: address(),
+                reason: "wrong PIN".into()
+            }),
+            ["192.168.1.20:50000: rejected (wrong PIN)"]
+        );
+        let stats = HostStats {
+            frames_sent: 600,
+            keyframes_sent: 3,
+            bytes_sent: 12_345_678,
+            ..HostStats::default()
+        };
+        assert_eq!(
+            texts(HostEvent::ViewerDisconnected {
+                address: address(),
+                stats,
+                error: None
+            }),
+            ["192.168.1.20:50000 disconnected: 600 frames sent (3 keyframes), 12.3 MB"]
+        );
+    }
+
+    #[test]
+    fn problems_go_to_stderr() {
+        let failed = HostEvent::ViewerDisconnected {
+            address: address(),
+            stats: HostStats::default(),
+            error: Some("encoder lost".into()),
+        };
+        assert_eq!(
+            describe(&failed),
+            [(
+                Stderr,
+                "192.168.1.20:50000: session ended with error: encoder lost".to_string()
+            )]
+        );
+        assert_eq!(
+            describe(&HostEvent::Warning("LAN announcement failed".into())),
+            [(Stderr, "warning: LAN announcement failed".to_string())]
+        );
+    }
+
+    #[test]
+    fn every_other_event_is_one_line() {
+        assert_eq!(
+            texts(HostEvent::PinChanged {
+                pin: "654321".into()
+            }),
+            ["New PIN: 654321"]
+        );
+        assert_eq!(describe(&HostEvent::InputBlocked).len(), 1);
+        assert_eq!(
+            describe(&HostEvent::Stopped { error: None }),
+            [(Stdout, "Stopped sharing.".to_string())]
+        );
+        assert!(
+            describe(&HostEvent::Stopped {
+                error: Some("boom".into())
+            })
+            .is_empty()
+        );
+    }
+}

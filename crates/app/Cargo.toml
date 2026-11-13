@@ -26,6 +26,10 @@ render.workspace = true
 bytes = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 winit = "0.30.13"
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts"] }
+tray-icon = { version = "0.26.1", default-features = false }
 windows = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_UI_WindowsAndMessaging",
 ] }

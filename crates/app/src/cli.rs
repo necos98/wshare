@@ -66,10 +66,12 @@ pub enum Command {
     Host(HostOptions),
     View(ViewOptions),
     Help,
+    /// No arguments (e.g. double-click): the desktop interface.
+    Gui,
 }
 
 pub const USAGE: &str = "\
-wshare - LAN screen sharing
+wshare - LAN screen sharing (no arguments: open the window)
 
   wshare host  [--monitor N] [--fps F] [--mbps B] [--codec h264|hevc] [--port P] [--pin PIN]
                [--view-only]
@@ -80,7 +82,7 @@ wshare - LAN screen sharing
 
 pub fn parse(args: &[String]) -> Result<Command> {
     let Some((command, rest)) = args.split_first() else {
-        return Ok(Command::Help);
+        return Ok(Command::Gui);
     };
     match command.as_str() {
         "monitors" => no_args(rest, Command::Monitors),
@@ -209,8 +211,15 @@ mod tests {
     }
 
     #[test]
-    fn no_arguments_shows_help() {
-        assert_eq!(parse(&[]).unwrap(), Command::Help);
+    fn no_arguments_opens_the_interface() {
+        assert_eq!(parse(&[]).unwrap(), Command::Gui);
+    }
+
+    #[test]
+    fn help_still_prints_usage() {
+        for line in ["help", "--help", "-h"] {
+            assert_eq!(parse(&args(line)).unwrap(), Command::Help, "{line}");
+        }
     }
 
     #[test]

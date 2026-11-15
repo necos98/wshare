@@ -10,10 +10,12 @@
 //! - main thread: the window (winit requires it);
 //! - tokio runtime: control channel and datagram reception;
 //! - render thread: owns the GPU objects, runs `ViewerStreamer`
-//!   (reassemble -> decode -> present).
+//!   (reassemble -> decode -> present), fed through a bounded queue
+//!   (see `feed`).
 
 mod cursor;
 pub mod failure;
+mod feed;
 mod input_map;
 mod key_log;
 mod key_router;
@@ -34,7 +36,6 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
-use bytes::Bytes;
 use discovery::computer_name;
 use net::{ControlReceiver, ControlSender, Fingerprint, SessionHandle, VideoChannel};
 use protocol::control::{ControlMessage, PROTOCOL_VERSION, RejectReason, StreamInfo};
@@ -132,9 +133,9 @@ pub fn run(options: ViewOptions) -> Result<()> {
     // screen would then leave Alt+Tab and the Windows key local. The viewer
     // uses only window events, never `DeviceEvent`s.
     event_loop.listen_device_events(DeviceEvents::Never);
-    let (datagram_tx, datagram_rx) = std::sync::mpsc::channel::<Bytes>();
+    let (datagram_tx, datagram_rx) = feed::queue();
     let (outgoing_tx, outgoing_rx) = unbounded_channel::<ControlMessage>();
-    runtime.spawn(receive_video(video, datagram_tx));
+    runtime.spawn(feed::forward(video, datagram_tx));
     let control = runtime.spawn(run_control(tx, rx, outgoing_rx, event_loop.create_proxy()));
 
     let rtt_handle = handle.clone();
@@ -160,10 +161,12 @@ pub fn run(options: ViewOptions) -> Result<()> {
     });
     if let Some(stats) = window.stats() {
         println!(
-            "Session: {} frames shown, {} lost, {} skipped, {} keyframes requested",
+            "Session: {} frames shown, {} lost, {} skipped, \
+             {} passed over to catch up, {} keyframes requested",
             stats.frames_presented,
             stats.frames_lost,
             stats.frames_skipped,
+            stats.frames_superseded,
             stats.keyframes_requested
         );
     }
@@ -277,15 +280,6 @@ async fn connect(addr: SocketAddr, pairing: &Pairing, pin: Option<String>) -> Re
         Some(ControlMessage::Rejected { reason }) => Err(ViewerFailure::Rejected(reason).into()),
         Some(other) => bail!("unexpected answer from the host: {other:?}"),
         None => Err(ViewerFailure::HostLeft.into()),
-    }
-}
-
-/// Moves datagrams from the network to the render thread.
-async fn receive_video(video: VideoChannel, out: std::sync::mpsc::Sender<Bytes>) {
-    while let Ok(datagram) = video.recv().await {
-        if out.send(datagram).is_err() {
-            break; // render thread is gone
-        }
     }
 }
 

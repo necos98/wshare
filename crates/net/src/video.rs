@@ -1,13 +1,25 @@
 //! Video channel: unreliable QUIC datagrams.
 //!
-//! Datagrams are congestion-controlled but never retransmitted; when the
-//! send buffer is full quinn drops the oldest queued ones, which is the
-//! right policy for live video (fresh data beats stale data).
+//! Datagrams are congestion-controlled but never retransmitted. The host
+//! reads the queue with [`DatagramSink::backlog_bytes`] and stops encoding
+//! while it is over a few frames (`pipeline::backlog`), so video does not
+//! pile up when the network is slower than the stream; should the queue
+//! still overflow, quinn drops the oldest queued datagrams, the right
+//! policy for live video (fresh data beats stale data).
+//!
+//! Control messages share the connection: quinn fills each packet with
+//! queued datagrams before stream data, so a host -> viewer message (a
+//! cursor shape, `InputAllowed`, `Bye`) waits behind whatever video is
+//! queued. With the backlog bounded, that is at most the backlog limit plus
+//! the last frame admitted, i.e. a few frame times at the stream rate, not
+//! seconds.
 
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use pipeline::traits::DatagramSink;
 use quinn::{Connection, SendDatagramError};
+
+use crate::transport::DATAGRAM_SEND_BUFFER;
 
 /// Used when the connection cannot report a limit (e.g. datagrams not
 /// negotiated); the QUIC minimum MTU minus headers fits in it comfortably.
@@ -61,5 +73,12 @@ impl DatagramSink for VideoChannel {
             ),
             Err(e) => Err(e).context("sending video datagram"),
         }
+    }
+
+    /// The part of the send buffer in use. quinn also counts a few dozen
+    /// bytes of bookkeeping per datagram (and one entry's worth even when
+    /// empty), negligible against the backlog limits in use.
+    fn backlog_bytes(&self) -> usize {
+        DATAGRAM_SEND_BUFFER.saturating_sub(self.conn.datagram_send_buffer_space())
     }
 }

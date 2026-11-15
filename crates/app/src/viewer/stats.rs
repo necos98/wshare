@@ -117,6 +117,7 @@ pub fn overlay_lines(
             stats.frames_skipped,
             stats.keyframes_requested,
         ),
+        row(text::STAT_SUPERSEDED, stats.frames_superseded.to_string()),
         row(text::STAT_ENCODER, stream.encoder.clone()),
         row(text::STAT_DECODER, labels.decoder.to_string()),
         text::STATS_HOTKEYS.to_string(),
@@ -192,6 +193,7 @@ mod tests {
         let stats = ViewerStats {
             frames_lost: 2,
             frames_skipped: 3,
+            frames_superseded: 4,
             ..Default::default()
         };
         let lines = overlay_lines(
@@ -216,6 +218,7 @@ mod tests {
             "1.5 ms",
             "Persi 2",
             "Scartati 3",
+            "Non mostrati 4",
             "Intel QSV",
             "MS H264",
         ] {

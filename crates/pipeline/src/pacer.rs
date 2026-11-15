@@ -7,6 +7,8 @@
 //!   faster, intermediate images are skipped and the latest one is sent at
 //!   the next slot (the latest image is never lost, only delayed to its slot).
 //! - The very first frame may be sent immediately.
+//! - A due slot can be given up (e.g. the network is congested): the image
+//!   stays pending and is retried one interval later, never in a busy loop.
 //!
 //! Time is passed in explicitly so the logic is deterministic in tests.
 
@@ -15,7 +17,7 @@ use std::time::{Duration, Instant};
 pub struct FramePacer {
     interval: Duration,
     dirty: bool,
-    last_submit: Option<Instant>,
+    last_slot: Option<Instant>,
 }
 
 impl FramePacer {
@@ -25,7 +27,7 @@ impl FramePacer {
         Self {
             interval: Duration::from_secs(1) / fps,
             dirty: false,
-            last_submit: None,
+            last_slot: None,
         }
     }
 
@@ -62,13 +64,20 @@ impl FramePacer {
 
     /// Records that a frame was submitted at `now`; clears the dirty flag.
     pub fn on_submitted(&mut self, now: Instant) {
-        self.last_submit = Some(now);
+        self.last_slot = Some(now);
         self.dirty = false;
+    }
+
+    /// Records that the slot due at `now` was given up without submitting:
+    /// the next attempt waits one interval, and the dirty flag stays so the
+    /// latest image is still sent once a slot is used.
+    pub fn on_skipped(&mut self, now: Instant) {
+        self.last_slot = Some(now);
     }
 
     /// Earliest time the next frame may be submitted (`None`: right away).
     fn next_slot(&self) -> Option<Instant> {
-        self.last_submit.map(|last| last + self.interval)
+        self.last_slot.map(|last| last + self.interval)
     }
 }
 
@@ -130,6 +139,18 @@ mod tests {
         assert!(p.should_submit(t0 + 20 * MS));
         p.on_submitted(t0 + 20 * MS);
         assert!(!p.should_submit(t0 + 40 * MS));
+    }
+
+    #[test]
+    fn skipped_slot_keeps_image_pending_for_next_slot() {
+        let t0 = Instant::now();
+        let mut p = FramePacer::new(50);
+        p.mark_dirty();
+        p.on_skipped(t0);
+        assert!(p.is_dirty());
+        assert!(!p.should_submit(t0 + 19 * MS));
+        assert_eq!(p.capture_timeout(t0 + 5 * MS), 15 * MS);
+        assert!(p.should_submit(t0 + 20 * MS));
     }
 
     #[test]

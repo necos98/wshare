@@ -17,6 +17,7 @@ use render::{Renderer, ToolbarView};
 use windows::Win32::Foundation::HWND;
 
 use super::Outgoing;
+use super::feed::next_batch;
 use super::notice::{Notice, NoticeBoard};
 use super::sink::ViewSink;
 use super::stall::StallWatch;
@@ -173,27 +174,26 @@ fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
     let mut stall = StallWatch::new(started);
     let mut board = NoticeBoard::default();
     board.show(Notice::Shortcuts, started);
+    let mut batch = Vec::new();
 
     while !stop.load(Ordering::Relaxed) {
-        let action =
-            match input
-                .datagrams
-                .recv_timeout(if toolbar.active() { TOOLBAR_TICK } else { TICK })
-            {
-                Ok(datagram) => {
-                    let (received, shown) = (Instant::now(), streamer.stats().frames_presented);
-                    stall.on_datagram(received);
-                    let action = streamer.on_datagram(&datagram, received)?;
-                    overlay.on_datagram(
-                        datagram.len(),
-                        streamer.stats().frames_presented > shown,
-                        received,
-                    );
-                    action
-                }
-                Err(RecvTimeoutError::Timeout) => streamer.on_tick(Instant::now()),
-                Err(RecvTimeoutError::Disconnected) => break,
-            };
+        let timeout = if toolbar.active() { TOOLBAR_TICK } else { TICK };
+        let action = match next_batch(&input.datagrams, timeout, &mut batch) {
+            Ok(()) => {
+                let (received, shown) = (Instant::now(), streamer.stats().frames_presented);
+                stall.on_datagram(received);
+                let action =
+                    streamer.on_datagrams(batch.iter().map(|datagram| &datagram[..]), received)?;
+                overlay.on_batch(
+                    batch.iter().map(Bytes::len).sum(),
+                    streamer.stats().frames_presented > shown,
+                    received,
+                );
+                action
+            }
+            Err(RecvTimeoutError::Timeout) => streamer.on_tick(Instant::now()),
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
         let now = Instant::now();
         let silence = stall.check(now);
         if action == ViewerAction::RequestKeyframe || silence.probe {
@@ -249,9 +249,9 @@ impl StatsOverlay {
         }
     }
 
-    /// presented: the datagram completed a frame that is now on screen;
-    /// the time since started is then its decode + present time.
-    fn on_datagram(&mut self, len: usize, presented: bool, started: Instant) {
+    /// presented: the batch of `len` bytes put a new frame on screen; the
+    /// time since started is then its decode + present time.
+    fn on_batch(&mut self, len: usize, presented: bool, started: Instant) {
         self.bytes_received += len as u64;
         if presented {
             self.frame_time.record(started.elapsed());

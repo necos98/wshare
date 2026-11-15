@@ -5,6 +5,7 @@
 //! capture, Media Foundation codecs, D3D11 renderer, QUIC transport) live in
 //! other crates and implement these traits (Dependency Inversion).
 
+pub mod backlog;
 pub mod host;
 pub mod pacer;
 pub mod traits;

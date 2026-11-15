@@ -170,7 +170,7 @@ fn stream_loop(
         });
     }
 
-    let mut streamer = HostStreamer::new(source, encoder, video, stream.fps);
+    let mut streamer = HostStreamer::new(source, encoder, video, stream.fps, stream.bitrate_bps());
     let mut error = None;
     while !control.stop.load(Ordering::Relaxed) {
         let step = (|| {

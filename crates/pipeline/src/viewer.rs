@@ -1,8 +1,11 @@
 //! Viewer loop: datagrams -> reassemble -> decode -> present.
 //!
-//! The app's network task receives datagrams and hands them to
-//! [`ViewerStreamer::on_datagram`]; the returned action tells it whether to
-//! send a keyframe request on the control channel.
+//! The app hands every datagram waiting for the render loop, as one batch,
+//! to [`ViewerStreamer::on_datagrams`]; the returned action tells it whether
+//! to send a keyframe request on the control channel. Every complete frame
+//! of a batch is decoded (the decoder needs each one as a reference), but
+//! only the newest picture is presented: after a hiccup the viewer jumps to
+//! the present instead of replaying what it missed.
 
 use std::time::{Duration, Instant};
 
@@ -34,6 +37,9 @@ pub struct ViewerStats {
     pub frames_lost: u64,
     /// Complete frames thrown away because they depend on a lost frame.
     pub frames_skipped: u64,
+    /// Decoded pictures never shown because a newer one arrived in the same
+    /// batch (the viewer was catching up).
+    pub frames_superseded: u64,
     pub keyframes_requested: u64,
 }
 
@@ -65,27 +71,46 @@ where
         }
     }
 
-    /// Feeds one datagram. Complete frames are decoded and presented
-    /// immediately. Returns [`ViewerAction::RequestKeyframe`] when frames
-    /// were lost (or we are still waiting for a keyframe) and the
-    /// [`KeyframeRequester`] allows a new request at `now`.
+    /// Feeds a batch of datagrams, in arrival order. Every frame they
+    /// complete is decoded; only the last decoded picture is presented, the
+    /// earlier ones count as [`ViewerStats::frames_superseded`]. Returns
+    /// [`ViewerAction::RequestKeyframe`] when frames were lost (or we are
+    /// still waiting for a keyframe) and the [`KeyframeRequester`] allows a
+    /// new request at `now`.
     ///
     /// Malformed datagrams are ignored (a single corrupt datagram must not
     /// end the session); errors come only from the decoder or the sink.
-    pub fn on_datagram(&mut self, datagram: &[u8], now: Instant) -> Result<ViewerAction> {
-        let Ok(events) = self.reassembler.push(datagram) else {
-            return Ok(ViewerAction::None);
-        };
+    pub fn on_datagrams<'a>(
+        &mut self,
+        datagrams: impl IntoIterator<Item = &'a [u8]>,
+        now: Instant,
+    ) -> Result<ViewerAction> {
+        let mut latest = None;
         let mut lost_any = false;
-        for event in events {
-            match event {
-                ReassemblyEvent::Frame(frame) => self.decode_and_present(&frame)?,
-                ReassemblyEvent::Lost { .. } => {
-                    self.stats.frames_lost += 1;
-                    lost_any = true;
+        for datagram in datagrams {
+            let Ok(events) = self.reassembler.push(datagram) else {
+                continue;
+            };
+            for event in events {
+                match event {
+                    ReassemblyEvent::Frame(frame) => {
+                        if let Some(picture) = self.decode(&frame)?
+                            && latest.replace(picture).is_some()
+                        {
+                            self.stats.frames_superseded += 1;
+                        }
+                    }
+                    ReassemblyEvent::Lost { .. } => {
+                        self.stats.frames_lost += 1;
+                        lost_any = true;
+                    }
+                    ReassemblyEvent::Skipped { .. } => self.stats.frames_skipped += 1,
                 }
-                ReassemblyEvent::Skipped { .. } => self.stats.frames_skipped += 1,
             }
+        }
+        if let Some(picture) = latest {
+            self.sink.present(&picture)?;
+            self.stats.frames_presented += 1;
         }
         Ok(self.request_keyframe_if(lost_any || self.reassembler.awaiting_keyframe(), now))
     }
@@ -106,13 +131,12 @@ where
         &self.stats
     }
 
-    fn decode_and_present(&mut self, frame: &ReassembledFrame) -> Result<()> {
-        if let Some(picture) = self.decoder.decode(&frame.data, frame.timestamp)? {
+    fn decode(&mut self, frame: &ReassembledFrame) -> Result<Option<Dec::Frame>> {
+        let picture = self.decoder.decode(&frame.data, frame.timestamp)?;
+        if picture.is_some() {
             self.stats.frames_decoded += 1;
-            self.sink.present(&picture)?;
-            self.stats.frames_presented += 1;
         }
-        Ok(())
+        Ok(picture)
     }
 
     fn request_keyframe_if(&mut self, needed: bool, now: Instant) -> ViewerAction {
@@ -204,7 +228,7 @@ mod tests {
             let now = self.at(ms);
             datagrams
                 .iter()
-                .map(|d| self.viewer.on_datagram(d, now).unwrap())
+                .map(|d| self.viewer.on_datagrams([d.as_slice()], now).unwrap())
                 .collect()
         }
 
@@ -300,7 +324,7 @@ mod tests {
         let mut h = harness();
         h.send(b"key", true, 0);
         assert_eq!(
-            h.viewer.on_datagram(&[1, 2, 3], h.at(10)).unwrap(),
+            h.viewer.on_datagrams([&[1, 2, 3][..]], h.at(10)).unwrap(),
             ViewerAction::None
         );
         assert_eq!(h.viewer.stats().frames_lost, 0);
@@ -310,6 +334,63 @@ mod tests {
     fn decoder_error_is_propagated() {
         let mut h = harness();
         let packets = h.packets(b"boom", true, 0);
-        assert!(h.viewer.on_datagram(&packets[0], h.at(0)).is_err());
+        assert!(
+            h.viewer
+                .on_datagrams([packets[0].as_slice()], h.at(0))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn backlog_is_decoded_whole_but_only_the_latest_frame_is_presented() {
+        let mut h = harness();
+        h.send(b"key", true, 0);
+        let mut backlog = Vec::new();
+        for (ts, data) in [(1, &b"d1"[..]), (2, b"d2"), (3, b"d3")] {
+            backlog.extend(h.packets(data, false, ts));
+        }
+        let action = h
+            .viewer
+            .on_datagrams(backlog.iter().map(Vec::as_slice), h.at(50))
+            .unwrap();
+        assert_eq!(action, ViewerAction::None);
+        // Each frame is a reference for the next: all of them are decoded.
+        assert_eq!(*h.decoded.borrow(), [&b"key"[..], b"d1", b"d2", b"d3"]);
+        assert_eq!(
+            *h.presented.borrow(),
+            vec![(b"key".to_vec(), 0), (b"d3".to_vec(), 3)]
+        );
+        let stats = h.viewer.stats();
+        assert_eq!(stats.frames_decoded, 4);
+        assert_eq!(stats.frames_presented, 2);
+        assert_eq!(stats.frames_superseded, 2);
+    }
+
+    #[test]
+    fn batch_completing_no_frame_presents_nothing() {
+        let mut h = harness();
+        h.send(b"key", true, 0);
+        let partial = h.packets(b"split frame", false, 1);
+        let action = h.viewer.on_datagrams([partial[0].as_slice()], h.at(10));
+        assert_eq!(action.unwrap(), ViewerAction::None);
+        assert_eq!(h.presented.borrow().len(), 1);
+        assert_eq!(h.viewer.stats().frames_superseded, 0);
+        assert_eq!(
+            h.viewer.on_datagrams([], h.at(20)).unwrap(),
+            ViewerAction::None
+        );
+    }
+
+    #[test]
+    fn loss_inside_a_batch_requests_a_keyframe() {
+        let mut h = harness();
+        h.send(b"key", true, 0);
+        let lost = h.packets(b"lost frame", false, 1);
+        let next = h.packets(b"next", false, 2);
+        let batch = [lost[0].as_slice(), next[0].as_slice()];
+        let action = h.viewer.on_datagrams(batch, h.at(300)).unwrap();
+        assert_eq!(action, ViewerAction::RequestKeyframe);
+        assert_eq!(h.viewer.stats().frames_lost, 1);
+        assert_eq!(h.presented.borrow().len(), 1, "nothing decodable arrived");
     }
 }

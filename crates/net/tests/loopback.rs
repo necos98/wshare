@@ -159,6 +159,34 @@ async fn datagram_roundtrip_including_max_size() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn send_backlog_is_reported_and_drains() {
+    /// What quinn counts for an empty queue: bookkeeping only.
+    const IDLE_BACKLOG: usize = 1024;
+    /// Datagrams queued in a tight loop: the connection driver cannot send
+    /// each one before the next is queued, so some backlog must show.
+    const BURST: usize = 2_000;
+    let c = connected().await;
+    let host_video = &c.host.2;
+    assert!(DatagramSink::backlog_bytes(host_video) < IDLE_BACKLOG);
+
+    let max = DatagramSink::max_datagram_size(host_video);
+    let mut peak = 0;
+    for _ in 0..BURST {
+        DatagramSink::send(host_video, vec![0; max]).unwrap();
+        peak = peak.max(DatagramSink::backlog_bytes(host_video));
+    }
+    assert!(peak > max, "backlog peaked at {peak} bytes");
+
+    timeout(TIMEOUT, async {
+        while DatagramSink::backlog_bytes(host_video) >= IDLE_BACKLOG {
+            let _ = c.viewer.2.recv().await;
+        }
+    })
+    .await
+    .expect("the send queue never drained");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn oversized_datagram_errors() {
     let c = connected().await;
     let max = DatagramSink::max_datagram_size(&c.host.2);

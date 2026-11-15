@@ -121,9 +121,11 @@ pub(super) fn describe(event: &HostEvent) -> Vec<(Output, String)> {
         } => vec![(
             Stdout,
             format!(
-                "{address} disconnected: {} frames sent ({} keyframes), {:.1} MB",
+                "{address} disconnected: {} frames sent ({} keyframes), \
+                 {} skipped by a slow network, {:.1} MB",
                 stats.frames_sent,
                 stats.keyframes_sent,
+                stats.frames_skipped,
                 stats.bytes_sent as f64 / 1e6
             ),
         )],
@@ -211,6 +213,7 @@ mod tests {
         let stats = HostStats {
             frames_sent: 600,
             keyframes_sent: 3,
+            frames_skipped: 7,
             bytes_sent: 12_345_678,
             ..HostStats::default()
         };
@@ -220,7 +223,9 @@ mod tests {
                 stats,
                 error: None
             }),
-            ["192.168.1.20:50000 disconnected: 600 frames sent (3 keyframes), 12.3 MB"]
+            [
+                "192.168.1.20:50000 disconnected: 600 frames sent (3 keyframes), 7 skipped by a slow network, 12.3 MB"
+            ]
         );
     }
 

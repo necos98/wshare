@@ -4,6 +4,8 @@ use codec::Codec;
 
 pub const DEFAULT_PORT: u16 = 7420;
 
+const BITS_PER_MEGABIT: u32 = 1_000_000;
+
 /// Encoding settings shared by `host` and `bench`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamOptions {
@@ -14,13 +16,18 @@ pub struct StreamOptions {
 }
 
 impl StreamOptions {
+    /// The target bitrate in bit/s (`mbps` saturates at `u32::MAX`).
+    pub fn bitrate_bps(&self) -> u32 {
+        self.mbps.saturating_mul(BITS_PER_MEGABIT)
+    }
+
     pub fn encoder_config(&self, width: u32, height: u32) -> codec::EncoderConfig {
         codec::EncoderConfig {
             codec: self.codec,
             width,
             height,
             fps: self.fps,
-            bitrate_bps: self.mbps.saturating_mul(1_000_000),
+            bitrate_bps: self.bitrate_bps(),
         }
     }
 }
@@ -44,4 +51,18 @@ pub struct HostOptions {
     pub pin: Option<String>,
     /// Refuse remote mouse/keyboard: viewers can only watch.
     pub view_only: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bitrate_follows_megabits_and_saturates() {
+        let mut stream = StreamOptions::default();
+        assert_eq!(stream.bitrate_bps(), 20_000_000);
+        assert_eq!(stream.encoder_config(64, 64).bitrate_bps, 20_000_000);
+        stream.mbps = u32::MAX;
+        assert_eq!(stream.bitrate_bps(), u32::MAX);
+    }
 }

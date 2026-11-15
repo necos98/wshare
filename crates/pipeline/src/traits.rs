@@ -55,6 +55,11 @@ pub trait DatagramSink {
 
     /// Sends one datagram. May silently drop it under congestion.
     fn send(&self, datagram: Vec<u8>) -> Result<()>;
+
+    /// Bytes handed to [`Self::send`] that are still waiting to leave. It
+    /// grows while the network is slower than the stream, so the sender can
+    /// stop producing instead of queueing stale video.
+    fn backlog_bytes(&self) -> usize;
 }
 
 /// Synchronous video decoder (viewer side).

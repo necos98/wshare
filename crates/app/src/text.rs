@@ -307,6 +307,8 @@ pub const STAT_RTT: &str = "RTT rete";
 pub const STAT_DECODE: &str = "Decodifica";
 pub const STAT_ENCODER: &str = "Encoder";
 pub const STAT_DECODER: &str = "Decoder";
+/// Frames decoded but not shown because a newer one was already there.
+pub const STAT_SUPERSEDED: &str = "Non mostrati";
 pub const STATS_HOTKEYS: &str = "Ctrl+Alt+I nascondi - Ctrl+Alt+Invio schermo intero";
 
 pub fn stats_losses(lost: u64, skipped: u64, keyframes: u64) -> String {

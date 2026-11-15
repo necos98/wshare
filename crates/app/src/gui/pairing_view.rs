@@ -3,6 +3,7 @@
 
 use eframe::egui::{self, Align, Layout, RichText, Ui};
 
+use crate::text;
 use crate::trust::{AuthorizedDevice, Timestamp};
 
 use super::controller::Intent;
@@ -22,9 +23,9 @@ pub(super) fn authorized_devices(
     }
     ui.add_space(6.0);
     ui.separator();
-    ui.label(RichText::new("Dispositivi autorizzati").strong());
+    ui.label(RichText::new(text::AUTHORIZED_DEVICES).strong());
     ui.label(
-        RichText::new("Si connettono senza PIN. Rimuovendoli, la prossima volta servirà il PIN.")
+        RichText::new(text::AUTHORIZED_HINT)
             .size(DETAIL_SIZE)
             .weak(),
     );
@@ -35,13 +36,13 @@ pub(super) fn authorized_devices(
                     ui.label(&device.name);
                     let last = elapsed::ago(device.last_access, now);
                     ui.label(
-                        RichText::new(format!("Ultimo accesso: {last}"))
+                        RichText::new(text::last_access(&last))
                             .size(DETAIL_SIZE)
                             .weak(),
                     );
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("Rimuovi").clicked() {
+                    if ui.button(text::REMOVE).clicked() {
                         intents.push(Intent::RemoveDevice(device.fingerprint));
                     }
                 });
@@ -62,16 +63,16 @@ pub(super) fn remembered_form(ui: &mut Ui, error: Option<&str>) -> Option<Rememb
     let mut action = None;
     ui.horizontal(|ui| {
         ui.add_space(8.0);
-        ui.weak("Accesso memorizzato");
+        ui.weak(text::HOST_REMEMBERED);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui
-                .button("Dimentica")
-                .on_hover_text("La prossima volta servirà di nuovo il PIN.")
+                .button(text::FORGET)
+                .on_hover_text(text::FORGET_HINT)
                 .clicked()
             {
                 action = Some(RememberedAction::Forget);
             }
-            if ui.add(egui::Button::new("Connetti")).clicked() {
+            if ui.add(egui::Button::new(text::CONNECT)).clicked() {
                 action = Some(RememberedAction::Connect);
             }
         });

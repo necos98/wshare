@@ -3,8 +3,10 @@
 
 use net::Fingerprint;
 
+use crate::host::HostFailure;
 use crate::options::{DEFAULT_PORT, HostOptions, StreamOptions};
 use crate::target::{Target, parse_target};
+use crate::text;
 
 use super::model::{GuiState, ViewerId, ViewerSession, ViewerStatus, ViewerUpdate};
 use super::ports::{
@@ -170,8 +172,7 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore> Controller<S, L, 
                 self.state.apply_discovery(event);
             }
             AppEvent::DiscoveryFailed(error) => {
-                self.state.discovery_error =
-                    Some(format!("Ricerca in rete non disponibile: {error}"));
+                self.state.discovery_error = Some(text::discovery_unavailable(&error));
             }
             AppEvent::Viewer { id, update } => {
                 let connected = update == ViewerUpdate::Connected;
@@ -247,13 +248,12 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore> Controller<S, L, 
 
     fn connect_host(&mut self, id: &str, pin: &str) {
         let Some(row) = self.state.host_row(id) else {
-            self.state.connect_error = Some("Il computer non è più in rete.".into());
+            self.state.connect_error = Some(text::HOST_GONE.into());
             return;
         };
         let pin = non_empty(pin);
         if pin.is_none() && !row.remembered {
-            self.state.connect_error =
-                Some("Inserisci il PIN mostrato sull'altro computer.".into());
+            self.state.connect_error = Some(text::PIN_MISSING.into());
             return;
         }
         match row.address {
@@ -268,17 +268,16 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore> Controller<S, L, 
                 self.launch(row.name, request);
             }
             Some(_) => {
-                self.state.connect_error =
-                    Some("Versione di wshare diversa: aggiorna entrambi i computer.".into());
+                self.state.connect_error = Some(text::HOST_VERSION_DIFFERS.into());
             }
-            None => self.state.connect_error = Some("Nessun indirizzo raggiungibile.".into()),
+            None => self.state.connect_error = Some(text::HOST_NO_ADDRESS.into()),
         }
     }
 
     /// Any PIN is optional here: an address may belong to a host that
     /// remembers this PC; if not, the viewer reports that a PIN is needed.
-    fn connect_address(&mut self, text: &str, pin: &str) {
-        match parse_target(Some(text.trim()), DEFAULT_PORT) {
+    fn connect_address(&mut self, address: &str, pin: &str) {
+        match parse_target(Some(address.trim()), DEFAULT_PORT) {
             Target::Address(target) => {
                 let label = if target.port() == DEFAULT_PORT {
                     target.ip().to_string()
@@ -293,8 +292,7 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore> Controller<S, L, 
                 self.launch(label, request);
             }
             _ => {
-                self.state.connect_error =
-                    Some("Indirizzo non valido: scrivi un IP, ad esempio 192.168.1.20".into());
+                self.state.connect_error = Some(text::ADDRESS_INVALID.into());
             }
         }
     }
@@ -302,17 +300,14 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore> Controller<S, L, 
     fn launch(&mut self, label: String, request: LaunchRequest) {
         let address = request.target;
         if self.state.active_viewer_for(address).is_some() {
-            self.state.connect_error =
-                Some("Una finestra per questo computer è già aperta.".into());
+            self.state.connect_error = Some(text::VIEWER_ALREADY_OPEN.into());
             return;
         }
         let id = self.next_viewer;
         self.next_viewer += 1;
         let status = match self.launcher.launch(id, &request) {
             Ok(()) => ViewerStatus::Connecting,
-            Err(e) => {
-                ViewerStatus::Failed(format!("impossibile avviare il visualizzatore ({e:#})"))
-            }
+            Err(e) => ViewerStatus::Failed(text::viewer_start_failed(&format!("{e:#}"))),
         };
         self.state.viewers.retain(|v| v.address != address);
         self.state.viewers.push(ViewerSession {
@@ -335,7 +330,7 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore> Controller<S, L, 
         self.reload_known_hosts();
         self.state.connect_error = forgotten
             .err()
-            .map(|e| format!("Impossibile dimenticare il computer: {e:#}"));
+            .map(|e| text::forget_failed(&format!("{e:#}")));
     }
 
     fn reload_known_hosts(&mut self) {
@@ -352,20 +347,7 @@ fn non_empty(pin: &str) -> Option<String> {
 
 /// A setup failure of the sharing service, for the user.
 fn setup_error(error: &anyhow::Error) -> String {
-    let text = format!("{error:#}");
-    let lower = text.to_ascii_lowercase();
-    if lower.contains("10048")
-        || lower.contains("address already in use")
-        || lower.contains("binding udp")
-    {
-        format!(
-            "Impossibile condividere: la porta {DEFAULT_PORT} è già in uso (un altro wshare è aperto?)."
-        )
-    } else if lower.contains("monitor") && lower.contains("not found") {
-        "Impossibile condividere: monitor non trovato.".into()
-    } else {
-        format!("Impossibile condividere: {text}")
-    }
+    text::sharing_failed(&HostFailure::of(error))
 }
 
 #[cfg(test)]

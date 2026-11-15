@@ -19,12 +19,12 @@ use discovery::{Advertiser, HostAnnouncement, computer_name};
 use net::{HostEndpoint, Identity};
 use protocol::control::PROTOCOL_VERSION;
 
-use super::HostEvent;
 use super::accept::accept_viewers;
 use super::devices::Devices;
 use super::events::EventSink;
 use super::session::SessionContext;
 use super::state::SharedState;
+use super::{HostEvent, HostFailure, HostWarning};
 use crate::handshake::generate_pin;
 use crate::options::HostOptions;
 use crate::paths;
@@ -149,17 +149,11 @@ fn service_thread(options: &HostOptions, shared: &Shared, setup: &Sender<Result<
     }));
     let error = match outcome {
         Ok(Exit::SetupFailed) => return,
-        Ok(Exit::Ended(result)) => result.err().map(|e| format!("{e:#}")),
-        Err(panic) if listening => Some(format!(
-            "the sharing service crashed: {}",
-            panic_message(&*panic)
-        )),
+        Ok(Exit::Ended(result)) => result.err().map(|e| HostFailure::of(&e)),
+        Err(panic) if listening => Some(HostFailure::Crashed(panic_message(&*panic).to_string())),
         Err(panic) => {
-            let message = format!(
-                "the sharing service crashed during setup: {}",
-                panic_message(&*panic)
-            );
-            let _ = setup.send(Err(anyhow!(message)));
+            let crash = HostFailure::Crashed(panic_message(&*panic).to_string());
+            let _ = setup.send(Err(crash.into()));
             return;
         }
     };
@@ -203,15 +197,15 @@ fn serve(
         *listening = true;
         let _ = setup.send(Ok(()));
         if let Some(e) = &host.announcement_error {
-            events.emit(HostEvent::Warning(format!(
-                "LAN announcement failed: {e:#}"
+            events.emit(HostEvent::Warning(HostWarning::LanAnnouncementFailed(
+                format!("{e:#}"),
             )));
         }
         devices.announce();
         if let Some(warning) = load_warning {
-            events.emit(HostEvent::Warning(format!(
-                "every viewer needs the PIN again: {warning}"
-            )));
+            events.emit(HostEvent::Warning(
+                HostWarning::AuthorizedDevicesUnreadable(warning.clone()),
+            ));
         }
 
         let context = SessionContext {
@@ -250,7 +244,7 @@ impl Host {
         let name = computer_name();
         let identity = Identity::load_or_create(&paths::config_dir()?, &name)?;
         let endpoint = HostEndpoint::bind_any(options.port, &identity)
-            .with_context(|| format!("listening on UDP port {}", options.port))?;
+            .map_err(|e| HostFailure::from_bind(e, options.port))?;
         let port = endpoint.local_addr()?.port();
         let fingerprint = identity.fingerprint();
         let announcement = HostAnnouncement {
@@ -295,7 +289,7 @@ fn find_monitor(index: usize) -> Result<MonitorInfo> {
     capture::list_monitors()?
         .into_iter()
         .nth(index)
-        .with_context(|| format!("monitor {index} not found"))
+        .ok_or_else(|| HostFailure::MonitorNotFound { index }.into())
 }
 
 fn panic_message(panic: &(dyn Any + Send)) -> &str {

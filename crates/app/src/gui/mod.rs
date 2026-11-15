@@ -26,7 +26,6 @@ mod remembered;
 mod sharing;
 mod tray;
 mod view;
-mod viewer_error;
 
 use std::sync::Arc;
 use std::sync::mpsc::channel;

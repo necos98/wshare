@@ -7,14 +7,14 @@ use anyhow::{Result, bail};
 use net::Fingerprint;
 
 use super::*;
-use crate::host::HostEvent;
+use crate::host::{HostEvent, HostFailure};
 use crate::trust::KnownHost;
 
 /// Shared log of what the fakes were asked to do.
 #[derive(Default)]
 pub(super) struct Log {
     pub(super) calls: Vec<String>,
-    pub(super) fail_start: Option<&'static str>,
+    pub(super) fail_start: Option<HostFailure>,
     pub(super) fail_launch: bool,
     pub(super) started: Vec<(HostOptions, u64)>,
     pub(super) launched: Vec<(ViewerId, LaunchRequest)>,
@@ -34,8 +34,8 @@ pub(super) struct FakeKnownHosts(Shared);
 impl SharingService for FakeService {
     fn start(&mut self, options: HostOptions, generation: u64) -> Result<Box<dyn SharingControl>> {
         let mut log = self.0.borrow_mut();
-        if let Some(error) = log.fail_start {
-            bail!("{error}");
+        if let Some(failure) = log.fail_start.clone() {
+            return Err(failure.into());
         }
         log.started.push((options, generation));
         Ok(Box::new(FakeControl(self.0.clone())))

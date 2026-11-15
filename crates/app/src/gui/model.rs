@@ -8,17 +8,14 @@ use net::Fingerprint;
 use protocol::control::PROTOCOL_VERSION;
 
 use crate::host::HostEvent;
+use crate::text;
 use crate::trust::AuthorizedDevice;
-use crate::viewer::failure::FailureKind;
+use crate::viewer::report::FailureCause;
 
 use super::remembered::RememberedHosts;
-use super::viewer_error;
 
 /// Identifies a viewer process launched by the interface.
 pub type ViewerId = u64;
-
-/// Shown under a remembered host that refused to connect without a PIN.
-pub const PIN_AGAIN: &str = "Questo computer richiede di nuovo il PIN.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectedViewer {
@@ -126,20 +123,18 @@ impl Sharing {
                 self.notice = None;
             }
             HostEvent::ViewerRejected { address, reason } => {
-                self.notice = Some(format!(
-                    "Connessione rifiutata da {}: {}",
-                    address.ip(),
-                    viewer_error::reason_text(&reason)
-                ));
+                self.notice = Some(text::viewer_rejected(address.ip(), &reason));
             }
             HostEvent::ViewerDisconnected { error, .. } => {
                 self.viewer = None;
                 self.input_blocked = false;
-                self.notice = error.map(|e| format!("Sessione terminata: {e}"));
+                self.notice = error.map(|e| text::session_ended(&e));
             }
             HostEvent::InputBlocked => self.input_blocked = true,
-            HostEvent::Warning(warning) => self.notice = Some(warning),
-            HostEvent::Stopped { error } => self.stopped(error),
+            HostEvent::Warning(warning) => self.notice = Some(text::host_warning(&warning)),
+            HostEvent::Stopped { error } => {
+                self.stopped(error.map(|failure| text::sharing_failed(&failure)));
+            }
         }
         None
     }
@@ -147,18 +142,18 @@ impl Sharing {
     /// The line under the toggle while sharing is off.
     pub fn off_line(&self) -> &'static str {
         if self.stopping {
-            "Arresto in corso…"
+            text::SHARING_STOPPING
         } else {
-            "Attivalo per far vedere e controllare questo PC da un altro computer in rete."
+            text::SHARING_OFF_HINT
         }
     }
 
     /// The status line under the PIN.
     pub fn status_line(&self) -> String {
         match (&self.viewer, self.listening) {
-            (Some(v), _) => format!("Connesso: {} ({})", v.name, v.address.ip()),
-            (None, true) => "In attesa di connessioni…".to_string(),
-            (None, false) => "Avvio in corso…".to_string(),
+            (Some(v), _) => text::sharing_connected(&v.name, v.address.ip()),
+            (None, true) => text::SHARING_WAITING.to_string(),
+            (None, false) => text::SHARING_STARTING.to_string(),
         }
     }
 }
@@ -196,17 +191,9 @@ impl HostRow {
     /// Second line of the row.
     pub fn details(&self) -> String {
         if !self.compatible {
-            return "Versione di wshare diversa: non compatibile".to_string();
+            return text::HOST_INCOMPATIBLE.to_string();
         }
-        let line = match self.address {
-            Some(address) => format!("{} · {address}", self.resolution),
-            None => format!("{} · nessun indirizzo raggiungibile", self.resolution),
-        };
-        if self.remembered {
-            format!("{line} · Accesso memorizzato")
-        } else {
-            line
-        }
+        text::host_details(&self.resolution, self.address, self.remembered)
     }
 }
 
@@ -235,9 +222,9 @@ impl ViewerSession {
 
     pub fn status_line(&self) -> String {
         match &self.status {
-            ViewerStatus::Connecting => format!("Connessione a {} in corso…", self.label),
-            ViewerStatus::Connected => format!("Connesso a {}", self.label),
-            ViewerStatus::Failed(message) => format!("{}: {message}", self.label),
+            ViewerStatus::Connecting => text::viewer_connecting(&self.label),
+            ViewerStatus::Connected => text::viewer_connected(&self.label),
+            ViewerStatus::Failed(message) => text::viewer_failed(&self.label, message),
         }
     }
 }
@@ -247,11 +234,12 @@ impl ViewerSession {
 pub enum ViewerUpdate {
     /// The handshake succeeded and its window is open.
     Connected,
-    /// The process ended. `stderr` is everything it wrote there.
+    /// The process ended. `cause` is why it failed, from its status line or
+    /// else from its exit code; `None` when it said nothing.
     Exited {
         success: bool,
         code: Option<i32>,
-        stderr: String,
+        cause: Option<FailureCause>,
     },
 }
 
@@ -320,17 +308,22 @@ impl GuiState {
             ViewerUpdate::Exited {
                 success: false,
                 code,
-                stderr,
+                cause,
             } => {
                 let Some(viewer) = self.viewer_mut(id) else {
                     return;
                 };
-                let failure = viewer_error::describe(&stderr, code);
-                match (failure.kind, viewer.host_id.clone()) {
-                    (Some(FailureKind::PinRequired), Some(host_id)) => {
-                        self.ask_pin_again(id, host_id)
+                match (cause, viewer.host_id.clone()) {
+                    (Some(FailureCause::PinRequired), Some(host_id)) => {
+                        self.ask_pin_again(id, host_id);
                     }
-                    _ => viewer.status = ViewerStatus::Failed(failure.message),
+                    (Some(cause), _) => {
+                        viewer.status = ViewerStatus::Failed(text::viewer_failure(&cause));
+                    }
+                    (None, _) => {
+                        viewer.status =
+                            ViewerStatus::Failed(text::viewer_exited_unexpectedly(code));
+                    }
                 }
             }
         }
@@ -342,7 +335,7 @@ impl GuiState {
         self.viewers.retain(|v| v.id != viewer);
         self.remembered.pin_required(&host_id);
         self.selected_host = Some(host_id);
-        self.connect_error = Some(PIN_AGAIN.to_string());
+        self.connect_error = Some(text::PIN_AGAIN.to_string());
     }
 
     /// A viewer already open (or opening) on `address`.
@@ -356,11 +349,11 @@ impl GuiState {
     pub fn tray_tooltip(&self) -> String {
         let s = &self.sharing;
         match (&s.viewer, s.enabled, &s.pin) {
-            (Some(v), _, _) => format!("wshare - connesso: {}", v.name),
-            (None, true, Some(pin)) => format!("wshare - in attesa (PIN {})", format_pin(pin)),
-            (None, true, None) => "wshare - avvio condivisione…".to_string(),
-            (None, false, _) if s.stopping => "wshare - arresto condivisione…".to_string(),
-            (None, false, _) => "wshare - condivisione disattivata".to_string(),
+            (Some(v), _, _) => text::tray_connected(&v.name),
+            (None, true, Some(pin)) => text::tray_waiting(&format_pin(pin)),
+            (None, true, None) => text::TRAY_STARTING.to_string(),
+            (None, false, _) if s.stopping => text::TRAY_STOPPING.to_string(),
+            (None, false, _) => text::TRAY_OFF.to_string(),
         }
     }
 }
@@ -381,6 +374,7 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::gui::remembered::tests::known;
+    use crate::host::{HostFailure, HostWarning, SessionFailure};
 
     pub fn listening(pin: &str, fingerprint: &str) -> HostEvent {
         HostEvent::Listening {
@@ -465,7 +459,7 @@ pub(crate) mod tests {
         s.apply(HostEvent::ViewerDisconnected {
             address: addr("10.0.0.2:1"),
             stats: Default::default(),
-            error: Some("encoder failed".into()),
+            error: Some(SessionFailure("encoder failed".into())),
         });
         assert_eq!(
             s.notice.as_deref(),
@@ -479,8 +473,15 @@ pub(crate) mod tests {
             s.notice.as_deref(),
             Some("Connessione rifiutata da 10.0.0.2: PIN errato")
         );
-        s.apply(HostEvent::Warning("annuncio fallito".into()));
-        assert_eq!(s.notice.as_deref(), Some("annuncio fallito"));
+        s.apply(HostEvent::Warning(HostWarning::LanAnnouncementFailed(
+            "no route".into(),
+        )));
+        assert_eq!(
+            s.notice.as_deref(),
+            Some(
+                text::host_warning(&HostWarning::LanAnnouncementFailed("no route".into())).as_str()
+            )
+        );
     }
 
     #[test]
@@ -492,12 +493,17 @@ pub(crate) mod tests {
         s.started();
         s.apply(listening("111111", "ff"));
         s.apply(HostEvent::Stopped {
-            error: Some("capture lost".into()),
+            error: Some(HostFailure::PortInUse { port: 7420 }),
         });
         assert!(!s.enabled);
         assert_eq!(s.pin, None);
         assert!(!s.input_allowed);
-        assert_eq!(s.error.as_deref(), Some("capture lost"));
+        assert_eq!(
+            s.error.as_deref(),
+            Some(
+                "Impossibile condividere: la porta 7420 è già in uso (un altro wshare è aperto?)."
+            )
+        );
         s.started();
         assert_eq!(s.error, None, "starting again clears the error");
         assert!(!s.input_allowed);
@@ -598,7 +604,7 @@ pub(crate) mod tests {
             ViewerUpdate::Exited {
                 success: true,
                 code: Some(0),
-                stderr: String::new(),
+                cause: None,
             },
         );
         assert!(
@@ -618,7 +624,7 @@ pub(crate) mod tests {
             host_id: None,
             status: ViewerStatus::Connecting,
         });
-        state.apply_viewer_update(4, failed_with(FailureKind::WrongPin));
+        state.apply_viewer_update(4, failed_with(FailureCause::WrongPin));
         assert_eq!(
             state.viewers[0].status,
             ViewerStatus::Failed("PIN errato.".into())
@@ -626,11 +632,11 @@ pub(crate) mod tests {
         assert!(state.active_viewer_for(address).is_none());
     }
 
-    fn failed_with(kind: FailureKind) -> ViewerUpdate {
+    fn failed_with(cause: FailureCause) -> ViewerUpdate {
         ViewerUpdate::Exited {
             success: false,
-            code: Some(kind.exit_code()),
-            stderr: "error: the host refused\n".into(),
+            code: Some(cause.exit_code()),
+            cause: Some(cause),
         }
     }
 
@@ -665,10 +671,10 @@ pub(crate) mod tests {
     #[test]
     fn pin_required_brings_back_the_pin_field() {
         let (mut state, id) = remembered_office();
-        state.apply_viewer_update(7, failed_with(FailureKind::PinRequired));
+        state.apply_viewer_update(7, failed_with(FailureCause::PinRequired));
         assert!(!state.host_row(&id).unwrap().remembered, "PIN field shown");
         assert_eq!(state.selected_host.as_deref(), Some(id.as_str()));
-        assert_eq!(state.connect_error.as_deref(), Some(PIN_AGAIN));
+        assert_eq!(state.connect_error.as_deref(), Some(text::PIN_AGAIN));
         assert!(
             state.viewers.is_empty(),
             "the row says it, not a failed line"
@@ -695,7 +701,7 @@ pub(crate) mod tests {
             host_id: None,
             status: ViewerStatus::Connecting,
         });
-        state.apply_viewer_update(2, failed_with(FailureKind::PinRequired));
+        state.apply_viewer_update(2, failed_with(FailureCause::PinRequired));
         assert_eq!(
             state.viewers[0].status_line(),
             "10.0.0.5: Questo computer richiede il PIN."
@@ -705,7 +711,7 @@ pub(crate) mod tests {
     #[test]
     fn a_changed_identity_is_reported_on_the_viewer_line() {
         let (mut state, id) = remembered_office();
-        state.apply_viewer_update(7, failed_with(FailureKind::HostChanged));
+        state.apply_viewer_update(7, failed_with(FailureCause::HostChanged));
         let ViewerStatus::Failed(message) = &state.viewers[0].status else {
             panic!()
         };

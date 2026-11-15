@@ -9,6 +9,8 @@ use anyhow::{Context, Result};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
+use crate::text;
+
 use super::model::GuiState;
 use super::ports::{AppEvent, Inbox, TrayAction};
 
@@ -24,9 +26,9 @@ pub struct Tray {
 impl Tray {
     /// Creates the icon; must run on the UI thread (it owns the event loop).
     pub fn new(inbox: &Inbox) -> Result<Self> {
-        let open = MenuItem::new("Apri wshare", true, None);
-        let sharing_item = CheckMenuItem::new("Condivisione attiva", true, false, None);
-        let quit = MenuItem::new("Esci", true, None);
+        let open = MenuItem::new(text::TRAY_OPEN, true, None);
+        let sharing_item = CheckMenuItem::new(text::TRAY_SHARING, true, false, None);
+        let quit = MenuItem::new(text::TRAY_QUIT, true, None);
         let menu = Menu::with_items(&[
             &open,
             &sharing_item,

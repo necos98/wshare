@@ -5,11 +5,10 @@ use protocol::control::PROTOCOL_VERSION;
 
 use super::fakes::{Shared, TestController, calls, controller, controller_knowing, host, short};
 use super::*;
-use crate::gui::model::PIN_AGAIN;
 use crate::gui::model::tests::{found, listening};
 use crate::gui::remembered::tests::known;
 use crate::trust::KnownHost;
-use crate::viewer::failure::FailureKind;
+use crate::viewer::report::FailureCause;
 
 const OFFICE_IP: &str = "192.168.1.3";
 
@@ -27,11 +26,11 @@ fn with_remembered_office() -> (TestController, Shared, KnownHost, String) {
     (c, log, office, id)
 }
 
-fn exited(kind: FailureKind) -> ViewerUpdate {
+fn exited(cause: FailureCause) -> ViewerUpdate {
     ViewerUpdate::Exited {
         success: false,
-        code: Some(kind.exit_code()),
-        stderr: "error: the host refused\n".into(),
+        code: Some(cause.exit_code()),
+        cause: Some(cause),
     }
 }
 
@@ -77,11 +76,11 @@ fn pin_required_shows_the_pin_field_and_the_pin_reconnects() {
     });
     c.on_event(AppEvent::Viewer {
         id: 1,
-        update: exited(FailureKind::PinRequired),
+        update: exited(FailureCause::PinRequired),
     });
     assert!(!c.state().host_row(&id).unwrap().remembered);
     assert_eq!(c.state().selected_host.as_deref(), Some(id.as_str()));
-    assert_eq!(c.state().connect_error.as_deref(), Some(PIN_AGAIN));
+    assert_eq!(c.state().connect_error.as_deref(), Some(text::PIN_AGAIN));
 
     c.handle(Intent::ConnectHost {
         id: id.clone(),
@@ -171,7 +170,7 @@ fn an_address_connects_with_or_without_a_pin() {
     assert_eq!(request.host_id, None);
     c.on_event(AppEvent::Viewer {
         id: 1,
-        update: exited(FailureKind::PinRequired),
+        update: exited(FailureCause::PinRequired),
     });
     assert_eq!(
         c.state().viewers[0].status_line(),

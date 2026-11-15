@@ -13,10 +13,12 @@
 //! - `input_gate`: remote input behind the "allow input" switch.
 //! - `input_switch`: what a session does when that switch flips.
 //! - `state`: PIN, input flag and end signals shared with the handle.
+//! - `cause`: the typed reasons of failures and warnings.
 //! - `events`: delivery to the observer, rate limiting.
 //! - `console` + `interrupt`: the CLI front-end (`run`).
 
 mod accept;
+mod cause;
 mod console;
 mod devices;
 mod events;
@@ -36,6 +38,8 @@ use anyhow::Result;
 use net::Fingerprint;
 use pipeline::HostStats;
 use protocol::control::RejectReason;
+
+pub use cause::{HostFailure, HostWarning, SessionFailure};
 
 use crate::options::HostOptions;
 use crate::trust::AuthorizedDevice;
@@ -72,15 +76,15 @@ pub enum HostEvent {
     ViewerDisconnected {
         address: SocketAddr,
         stats: HostStats,
-        error: Option<String>,
+        error: Option<SessionFailure>,
     },
     /// Windows refused injected input (elevated window, UAC, lock screen).
     /// Sent once per blocked stretch.
     InputBlocked,
-    /// Something non-fatal worth showing (e.g. LAN announcement failed).
-    Warning(String),
+    /// Something non-fatal worth showing.
+    Warning(HostWarning),
     /// The service ended; `error` explains why if it was not asked to stop.
-    Stopped { error: Option<String> },
+    Stopped { error: Option<HostFailure> },
 }
 
 /// Receives the service's events. Called from the service's own threads,

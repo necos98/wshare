@@ -46,7 +46,7 @@ mod transport;
 pub mod video;
 
 pub use control::{ControlReceiver, ControlSender};
-pub use endpoint::{HostEndpoint, IdentityMismatch, connect};
+pub use endpoint::{ConnectError, HostEndpoint, IdentityMismatch, connect};
 pub use identity::{Fingerprint, Identity};
 pub use session::{Session, SessionHandle};
 pub use video::VideoChannel;

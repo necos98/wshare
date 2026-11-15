@@ -86,6 +86,7 @@ pub(super) mod recording {
 mod tests {
     use super::recording::recorder;
     use super::*;
+    use crate::host::HostWarning;
 
     #[test]
     fn every_clone_of_the_sink_reaches_the_observer_in_order() {
@@ -93,11 +94,18 @@ mod tests {
         let sink = EventSink::new(observer);
         let clone = sink.clone();
         sink.emit(HostEvent::InputBlocked);
-        std::thread::spawn(move || clone.emit(HostEvent::Warning("w".into())))
-            .join()
-            .unwrap();
+        std::thread::spawn(move || {
+            clone.emit(HostEvent::Warning(HostWarning::LanAnnouncementFailed(
+                "w".into(),
+            )))
+        })
+        .join()
+        .unwrap();
         assert_eq!(events.try_recv().unwrap(), HostEvent::InputBlocked);
-        assert_eq!(events.try_recv().unwrap(), HostEvent::Warning("w".into()));
+        assert_eq!(
+            events.try_recv().unwrap(),
+            HostEvent::Warning(HostWarning::LanAnnouncementFailed("w".into()))
+        );
         assert!(events.try_recv().is_err());
     }
 

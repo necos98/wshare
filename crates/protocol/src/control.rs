@@ -77,12 +77,15 @@ pub enum RejectReason {
     UnsupportedVersion {
         host: u16,
     },
-    /// Anything else, as text for people (e.g. the host cannot stream).
+    /// The host could not start streaming its screen; the text is why.
+    CannotStream(String),
+    /// Anything else, as text for people.
     Other(String),
 }
 
 const PIN_REQUIRED_TEXT: &str = "PIN required";
 const WRONG_PIN_TEXT: &str = "wrong PIN";
+const CANNOT_STREAM_TEXT_PREFIX: &str = "host cannot stream:";
 /// Protocol 3 hosts wrote "protocol version V not supported (host uses H)";
 /// both forms start and end the same way.
 const VERSION_TEXT_PREFIX: &str = "protocol version";
@@ -99,6 +102,7 @@ impl fmt::Display for RejectReason {
                     "{VERSION_TEXT_PREFIX} not supported {VERSION_TEXT_HOST}{host})"
                 )
             }
+            Self::CannotStream(cause) => write!(f, "{CANNOT_STREAM_TEXT_PREFIX} {cause}"),
             Self::Other(text) => f.write_str(text),
         }
     }
@@ -117,7 +121,10 @@ impl From<String> for RejectReason {
             WRONG_PIN_TEXT => Self::WrongPin,
             _ => match unsupported_version_host(&text) {
                 Some(host) => Self::UnsupportedVersion { host },
-                None => Self::Other(text),
+                None => match text.strip_prefix(CANNOT_STREAM_TEXT_PREFIX) {
+                    Some(cause) => Self::CannotStream(cause.trim().to_string()),
+                    None => Self::Other(text),
+                },
             },
         }
     }
@@ -308,7 +315,7 @@ mod tests {
                 reason: RejectReason::UnsupportedVersion { host: 4 },
             },
             ControlMessage::Rejected {
-                reason: RejectReason::Other("host cannot stream: no encoder".into()),
+                reason: RejectReason::CannotStream("no encoder".into()),
             },
             ControlMessage::RequestKeyframe,
             ControlMessage::Bye,
@@ -346,6 +353,7 @@ mod tests {
             RejectReason::PinRequired,
             RejectReason::WrongPin,
             RejectReason::UnsupportedVersion { host: 4 },
+            RejectReason::CannotStream("no encoder".into()),
             RejectReason::Other("busy".into()),
         ] {
             assert_eq!(RejectReason::from(reason.to_string()), reason);
@@ -524,6 +532,10 @@ mod tests {
             (
                 RejectReason::UnsupportedVersion { host: 4 },
                 "protocol version not supported (host uses 4)",
+            ),
+            (
+                RejectReason::CannotStream("no encoder".into()),
+                "host cannot stream: no encoder",
             ),
             (RejectReason::Other("busy".into()), "busy"),
         ] {

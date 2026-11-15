@@ -114,6 +114,46 @@ impl fmt::Display for IdentityMismatch {
 
 impl std::error::Error for IdentityMismatch {}
 
+/// The QUIC connection to the host could not be established. Returned
+/// (inside the `anyhow::Error`) by [`connect`], so callers tell a host that
+/// never answered from one that refused without reading the message.
+#[derive(Debug)]
+pub enum ConnectError {
+    /// Nothing answered in time: host off, wrong address or a firewall.
+    TimedOut { addr: SocketAddr },
+    Failed {
+        addr: SocketAddr,
+        source: quinn::ConnectionError,
+    },
+}
+
+impl ConnectError {
+    fn new(addr: SocketAddr, source: quinn::ConnectionError) -> Self {
+        match source {
+            quinn::ConnectionError::TimedOut => Self::TimedOut { addr },
+            source => Self::Failed { addr, source },
+        }
+    }
+}
+
+impl fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TimedOut { addr } => write!(f, "connecting to {addr}: timed out"),
+            Self::Failed { addr, source } => write!(f, "connecting to {addr}: {source}"),
+        }
+    }
+}
+
+impl std::error::Error for ConnectError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::TimedOut { .. } => None,
+            Self::Failed { source, .. } => Some(source),
+        }
+    }
+}
+
 /// Connects a viewer to the host at `addr`.
 ///
 /// - `expected = Some(fp)`: the handshake fails unless the host certificate
@@ -156,7 +196,7 @@ pub async fn connect(
             if let (Some(expected), Some(actual)) = (expected, verifier.mismatch()) {
                 return Err(IdentityMismatch { expected, actual }.into());
             }
-            return Err(e).with_context(|| format!("connecting to {addr}"));
+            return Err(ConnectError::new(addr, e).into());
         }
     };
 
@@ -174,4 +214,29 @@ fn peer_fingerprint(conn: &Connection) -> Option<Fingerprint> {
         .downcast::<Vec<CertificateDer<'static>>>()
         .ok()?;
     certs.first().map(|leaf| Fingerprint::of_cert(leaf))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ADDR: &str = "10.0.0.9:7420";
+
+    #[test]
+    fn a_quic_timeout_is_told_apart_from_other_failures() {
+        let addr: SocketAddr = ADDR.parse().unwrap();
+        let timed_out = ConnectError::new(addr, quinn::ConnectionError::TimedOut);
+        assert!(matches!(timed_out, ConnectError::TimedOut { .. }));
+        assert_eq!(
+            timed_out.to_string(),
+            "connecting to 10.0.0.9:7420: timed out"
+        );
+        let reset = ConnectError::new(addr, quinn::ConnectionError::Reset);
+        assert!(matches!(reset, ConnectError::Failed { .. }));
+        assert!(
+            reset
+                .to_string()
+                .starts_with("connecting to 10.0.0.9:7420: ")
+        );
+    }
 }

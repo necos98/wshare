@@ -1,6 +1,7 @@
 //! "How long ago", in Italian, for the last access of an authorized device.
 //! Relative, so it needs no time zone. Pure.
 
+use crate::text::{self, AgoUnit};
 use crate::trust::Timestamp;
 
 const MINUTE: u64 = 60;
@@ -11,16 +12,12 @@ const DAY: u64 = 24 * HOUR;
 pub fn ago(then: Timestamp, now: Timestamp) -> String {
     let seconds = then.seconds_until(now);
     match seconds {
-        s if s < MINUTE => "adesso".to_string(),
-        s if s < HOUR => count(s / MINUTE, "minuto", "minuti"),
-        s if s < DAY => count(s / HOUR, "ora", "ore"),
-        s if s < 2 * DAY => "ieri".to_string(),
-        s => count(s / DAY, "giorno", "giorni"),
+        s if s < MINUTE => text::AGO_NOW.to_string(),
+        s if s < HOUR => text::ago_count(s / MINUTE, AgoUnit::Minutes),
+        s if s < DAY => text::ago_count(s / HOUR, AgoUnit::Hours),
+        s if s < 2 * DAY => text::AGO_YESTERDAY.to_string(),
+        s => text::ago_count(s / DAY, AgoUnit::Days),
     }
-}
-
-fn count(n: u64, one: &str, many: &str) -> String {
-    format!("{n} {} fa", if n == 1 { one } else { many })
 }
 
 #[cfg(test)]

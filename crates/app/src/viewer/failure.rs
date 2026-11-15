@@ -1,24 +1,32 @@
-//! Why `wshare view` could not connect, also as an exit code, so the
-//! desktop interface (which runs the viewer as a child process) reacts to
-//! the cause itself rather than to the wording of an error message.
+//! The errors of `wshare view` that the caller may act on, created where
+//! they happen (connect, the host's refusal, the end of the session), and
+//! the [`FailureCause`] each one reports. Their `Display` is the English
+//! text for terminals; nothing reads it back.
 
 use std::fmt;
 
-use net::IdentityMismatch;
+use net::{ConnectError, IdentityMismatch};
 use protocol::control::RejectReason;
 
-/// Exit code of any other failure.
-pub const GENERIC_EXIT_CODE: i32 = 1;
+use super::report::FailureCause;
 
-/// A connection failure the caller may act on.
+/// A failure of the viewer with a known cause.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConnectFailure {
+pub enum ViewerFailure {
     Rejected(RejectReason),
     /// The remembered host answered with another certificate.
     HostChanged(IdentityMismatch),
+    /// Nothing answered in time; the text says where.
+    TimedOut(String),
+    /// The connection could not be established; the text says why.
+    Unreachable(String),
+    /// The host stopped sharing or closed the connection.
+    HostLeft,
+    /// The connection broke during the session; the text says how.
+    ConnectionLost(String),
 }
 
-impl fmt::Display for ConnectFailure {
+impl fmt::Display for ViewerFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Rejected(reason) => write!(f, "the host refused: {reason}"),
@@ -27,64 +35,62 @@ impl fmt::Display for ConnectFailure {
                 "{mismatch}. Another computer may be answering at this address; if the \
                  host was reinstalled, forget it in wshare and connect again with the PIN"
             ),
+            Self::TimedOut(text) | Self::Unreachable(text) => f.write_str(text),
+            Self::HostLeft => f.write_str("the host stopped sharing"),
+            Self::ConnectionLost(text) => write!(f, "connection lost: {text}"),
         }
     }
 }
 
-impl std::error::Error for ConnectFailure {}
+impl std::error::Error for ViewerFailure {}
 
-impl ConnectFailure {
-    pub fn kind(&self) -> Option<FailureKind> {
+impl ViewerFailure {
+    /// The host did not answer our `Hello`.
+    pub fn no_answer() -> Self {
+        Self::TimedOut("the host did not answer".to_string())
+    }
+
+    pub fn cause(&self) -> FailureCause {
         match self {
-            Self::Rejected(RejectReason::PinRequired) => Some(FailureKind::PinRequired),
-            Self::Rejected(RejectReason::WrongPin) => Some(FailureKind::WrongPin),
+            Self::Rejected(RejectReason::PinRequired) => FailureCause::PinRequired,
+            Self::Rejected(RejectReason::WrongPin) => FailureCause::WrongPin,
             Self::Rejected(RejectReason::UnsupportedVersion { .. }) => {
-                Some(FailureKind::UnsupportedVersion)
+                FailureCause::UnsupportedVersion
             }
-            Self::Rejected(RejectReason::Other(_)) => None,
-            Self::HostChanged(_) => Some(FailureKind::HostChanged),
+            Self::Rejected(RejectReason::CannotStream(cause)) => {
+                FailureCause::HostCannotStream(cause.clone())
+            }
+            Self::Rejected(RejectReason::Other(text)) => FailureCause::Other(text.clone()),
+            Self::HostChanged(_) => FailureCause::HostChanged,
+            Self::TimedOut(_) => FailureCause::TimedOut,
+            Self::Unreachable(_) => FailureCause::Unreachable,
+            Self::HostLeft => FailureCause::HostLeft,
+            Self::ConnectionLost(_) => FailureCause::ConnectionLost,
         }
     }
 }
 
-/// The failures that have their own exit code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FailureKind {
-    PinRequired,
-    WrongPin,
-    UnsupportedVersion,
-    HostChanged,
-}
-
-impl FailureKind {
-    const ALL: [Self; 4] = [
-        Self::PinRequired,
-        Self::WrongPin,
-        Self::UnsupportedVersion,
-        Self::HostChanged,
-    ];
-
-    /// Distinct from 0 (success), [`GENERIC_EXIT_CODE`] and 101 (panic).
-    pub fn exit_code(self) -> i32 {
-        match self {
-            Self::PinRequired => 10,
-            Self::WrongPin => 11,
-            Self::UnsupportedVersion => 12,
-            Self::HostChanged => 13,
-        }
-    }
-
-    pub fn from_exit_code(code: i32) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.exit_code() == code)
+/// Types the error of `net::connect`: a pinned host that presented another
+/// certificate, a connection that timed out, or one that could not be
+/// established. Anything else (a local problem) passes through.
+pub fn connect_failure(error: anyhow::Error) -> anyhow::Error {
+    let error = match error.downcast::<IdentityMismatch>() {
+        Ok(mismatch) => return ViewerFailure::HostChanged(mismatch).into(),
+        Err(error) => error,
+    };
+    match error.downcast_ref::<ConnectError>() {
+        Some(ConnectError::TimedOut { .. }) => ViewerFailure::TimedOut(error.to_string()).into(),
+        Some(ConnectError::Failed { .. }) => ViewerFailure::Unreachable(error.to_string()).into(),
+        None => error,
     }
 }
 
-/// The exit code `wshare view` ends with for `error`.
-pub fn exit_code(error: &anyhow::Error) -> i32 {
-    error
-        .downcast_ref::<ConnectFailure>()
-        .and_then(ConnectFailure::kind)
-        .map_or(GENERIC_EXIT_CODE, FailureKind::exit_code)
+/// Why `wshare view` ended with `error`.
+pub fn cause_of(error: &anyhow::Error) -> FailureCause {
+    error.downcast_ref::<ViewerFailure>().map_or_else(
+        || FailureCause::Other(format!("{error:#}")),
+        ViewerFailure::cause,
+    )
 }
 
 #[cfg(test)]
@@ -94,59 +100,117 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn exit_codes_roundtrip_and_are_distinct() {
-        for kind in FailureKind::ALL {
-            assert_eq!(FailureKind::from_exit_code(kind.exit_code()), Some(kind));
-            assert_ne!(kind.exit_code(), GENERIC_EXIT_CODE);
+    fn mismatch() -> IdentityMismatch {
+        IdentityMismatch {
+            expected: Fingerprint([1; 32]),
+            actual: Fingerprint([2; 32]),
         }
-        assert_eq!(FailureKind::from_exit_code(0), None);
-        assert_eq!(FailureKind::from_exit_code(GENERIC_EXIT_CODE), None);
-        assert_eq!(FailureKind::from_exit_code(101), None);
+    }
+
+    fn rejected(reason: RejectReason) -> anyhow::Error {
+        ViewerFailure::Rejected(reason).into()
     }
 
     #[test]
-    fn errors_map_to_exit_codes() {
-        let rejected = |reason| anyhow::Error::new(ConnectFailure::Rejected(reason));
-        assert_eq!(exit_code(&rejected(RejectReason::PinRequired)), 10);
-        assert_eq!(exit_code(&rejected(RejectReason::WrongPin)), 11);
+    fn rejections_map_to_their_causes() {
+        let cases = [
+            (RejectReason::PinRequired, FailureCause::PinRequired),
+            (RejectReason::WrongPin, FailureCause::WrongPin),
+            (
+                RejectReason::UnsupportedVersion { host: 4 },
+                FailureCause::UnsupportedVersion,
+            ),
+            (
+                RejectReason::CannotStream("no encoder".into()),
+                FailureCause::HostCannotStream("no encoder".into()),
+            ),
+            (
+                RejectReason::Other("busy".into()),
+                FailureCause::Other("busy".into()),
+            ),
+        ];
+        for (reason, cause) in cases {
+            assert_eq!(cause_of(&rejected(reason)), cause);
+        }
+    }
+
+    #[test]
+    fn the_wording_of_a_rejection_decides_nothing() {
+        let tricky = rejected(RejectReason::Other("wrong PIN".into()));
+        assert_eq!(cause_of(&tricky), FailureCause::Other("wrong PIN".into()));
+    }
+
+    #[test]
+    fn session_and_connection_failures_map_to_their_causes() {
+        let cases = [
+            (
+                ViewerFailure::HostChanged(mismatch()),
+                FailureCause::HostChanged,
+            ),
+            (ViewerFailure::no_answer(), FailureCause::TimedOut),
+            (
+                ViewerFailure::Unreachable("refused".into()),
+                FailureCause::Unreachable,
+            ),
+            (ViewerFailure::HostLeft, FailureCause::HostLeft),
+            (
+                ViewerFailure::ConnectionLost("reset".into()),
+                FailureCause::ConnectionLost,
+            ),
+        ];
+        for (failure, cause) in cases {
+            assert_eq!(cause_of(&failure.into()), cause);
+        }
+    }
+
+    #[test]
+    fn untyped_errors_are_other_with_their_text() {
         assert_eq!(
-            exit_code(&rejected(RejectReason::UnsupportedVersion { host: 4 })),
-            12
+            cause_of(&anyhow!("timed out")),
+            FailureCause::Other("timed out".into())
         );
-        assert_eq!(
-            exit_code(&rejected(RejectReason::Other("busy".into()))),
-            GENERIC_EXIT_CODE
-        );
-        let changed = ConnectFailure::HostChanged(IdentityMismatch {
-            expected: Fingerprint([1; 32]),
-            actual: Fingerprint([2; 32]),
-        });
-        assert_eq!(exit_code(&anyhow::Error::new(changed)), 13);
-        assert_eq!(exit_code(&anyhow!("timed out")), GENERIC_EXIT_CODE);
     }
 
     #[test]
     fn context_does_not_hide_the_cause() {
-        let error = anyhow::Error::new(ConnectFailure::Rejected(RejectReason::PinRequired))
-            .context("connecting to UFFICIO");
-        assert_eq!(exit_code(&error), 10);
+        let error = rejected(RejectReason::PinRequired).context("connecting to UFFICIO");
+        assert_eq!(cause_of(&error), FailureCause::PinRequired);
+    }
+
+    #[test]
+    fn connect_errors_are_typed_at_the_source() {
+        let addr = "10.0.0.9:7420".parse().unwrap();
+        let timed_out = anyhow::Error::new(ConnectError::TimedOut { addr });
+        assert_eq!(
+            cause_of(&connect_failure(timed_out)),
+            FailureCause::TimedOut
+        );
+        assert_eq!(
+            cause_of(&connect_failure(anyhow::Error::new(mismatch()))),
+            FailureCause::HostChanged
+        );
+        let local = connect_failure(anyhow!("building QUIC client crypto"));
+        assert!(local.downcast_ref::<ViewerFailure>().is_none());
     }
 
     #[test]
     fn messages_for_terminals() {
         assert_eq!(
-            ConnectFailure::Rejected(RejectReason::WrongPin).to_string(),
+            ViewerFailure::Rejected(RejectReason::WrongPin).to_string(),
             "the host refused: wrong PIN"
         );
-        let changed = ConnectFailure::HostChanged(IdentityMismatch {
-            expected: Fingerprint([1; 32]),
-            actual: Fingerprint([2; 32]),
-        });
         assert!(
-            changed
+            ViewerFailure::HostChanged(mismatch())
                 .to_string()
                 .starts_with("the host's identity changed")
+        );
+        assert_eq!(
+            ViewerFailure::HostLeft.to_string(),
+            "the host stopped sharing"
+        );
+        assert_eq!(
+            ViewerFailure::ConnectionLost("reset".into()).to_string(),
+            "connection lost: reset"
         );
     }
 }

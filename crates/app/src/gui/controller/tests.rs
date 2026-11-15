@@ -7,8 +7,8 @@ use protocol::control::PROTOCOL_VERSION;
 use super::fakes::{calls, controller, host};
 use super::*;
 use crate::gui::model::tests::{found, listening};
-use crate::host::HostEvent;
-use crate::viewer::failure::FailureKind;
+use crate::host::{HostEvent, HostFailure};
+use crate::viewer::report::FailureCause;
 
 #[test]
 fn toggle_on_and_off() {
@@ -45,7 +45,7 @@ fn toggle_on_and_off() {
 #[test]
 fn setup_error_resets_toggle() {
     let (mut c, log) = controller();
-    log.borrow_mut().fail_start = Some("binding UDP 0.0.0.0:7420: os error 10048");
+    log.borrow_mut().fail_start = Some(HostFailure::PortInUse { port: 7420 });
     c.handle(Intent::SetSharing(true));
     let sharing = &c.state().sharing;
     assert!(!sharing.enabled);
@@ -64,6 +64,26 @@ fn setup_error_resets_toggle() {
 }
 
 #[test]
+fn setup_errors_are_worded_by_their_cause() {
+    let cases = [
+        (
+            HostFailure::MonitorNotFound { index: 1 },
+            "Impossibile condividere: monitor non trovato.",
+        ),
+        (
+            HostFailure::Crashed("boom".into()),
+            "Il servizio di condivisione si è bloccato: boom",
+        ),
+    ];
+    for (failure, message) in cases {
+        let (mut c, log) = controller();
+        log.borrow_mut().fail_start = Some(failure);
+        c.handle(Intent::SetSharing(true));
+        assert_eq!(c.state().sharing.error.as_deref(), Some(message));
+    }
+}
+
+#[test]
 fn service_stopping_by_itself_turns_toggle_off() {
     let (mut c, log) = controller();
     c.handle(Intent::SetSharing(true));
@@ -71,11 +91,14 @@ fn service_stopping_by_itself_turns_toggle_off() {
     c.on_event(host(
         1,
         HostEvent::Stopped {
-            error: Some("capture failed".into()),
+            error: Some(HostFailure::Failed("capture failed".into())),
         },
     ));
     assert!(!c.state().sharing.enabled);
-    assert_eq!(c.state().sharing.error.as_deref(), Some("capture failed"));
+    assert_eq!(
+        c.state().sharing.error.as_deref(),
+        Some("Impossibile condividere: capture failed")
+    );
     assert_eq!(calls(&log), ["stop"], "the finished service is joined");
 }
 
@@ -225,8 +248,8 @@ fn viewer_failure_message_and_dismiss() {
         id: 1,
         update: ViewerUpdate::Exited {
             success: false,
-            code: Some(FailureKind::WrongPin.exit_code()),
-            stderr: "error: the host refused: wrong PIN".into(),
+            code: Some(FailureCause::WrongPin.exit_code()),
+            cause: Some(FailureCause::WrongPin),
         },
     });
     assert_eq!(c.state().viewers[0].status_line(), "10.0.0.5: PIN errato.");
@@ -246,7 +269,7 @@ fn retry_replaces_the_failed_entry() {
         update: ViewerUpdate::Exited {
             success: false,
             code: Some(1),
-            stderr: String::new(),
+            cause: None,
         },
     });
     c.handle(Intent::ConnectAddress {
@@ -399,7 +422,7 @@ fn late_events_of_the_stopping_run_are_ignored() {
     c.on_event(host(
         1,
         HostEvent::Stopped {
-            error: Some("late".into()),
+            error: Some(HostFailure::Failed("late".into())),
         },
     ));
     let sharing = &c.state().sharing;

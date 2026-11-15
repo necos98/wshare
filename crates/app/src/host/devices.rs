@@ -7,8 +7,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use net::Fingerprint;
 
-use super::HostEvent;
 use super::events::EventSink;
+use super::{HostEvent, HostWarning};
 use crate::trust::{AuthorizedDevices, Timestamp};
 
 pub(super) struct Devices {
@@ -37,9 +37,10 @@ impl Devices {
         let saved = store.record_access(fingerprint, name, Timestamp::now());
         self.report(
             &store,
-            saved
-                .err()
-                .map(|e| format!("cannot remember \"{name}\": {e:#}")),
+            saved.err().map(|e| HostWarning::DeviceNotRemembered {
+                name: name.to_string(),
+                detail: format!("{e:#}"),
+            }),
         );
     }
 
@@ -50,7 +51,10 @@ impl Devices {
         match store.remove(fingerprint) {
             Ok(false) => {}
             Ok(true) => self.report(&store, None),
-            Err(e) => self.report(&store, Some(format!("cannot save the removal: {e:#}"))),
+            Err(e) => self.report(
+                &store,
+                Some(HostWarning::DeviceRemovalNotSaved(format!("{e:#}"))),
+            ),
         }
     }
 
@@ -59,7 +63,7 @@ impl Devices {
         self.report(&self.lock(), None);
     }
 
-    fn report(&self, store: &AuthorizedDevices, warning: Option<String>) {
+    fn report(&self, store: &AuthorizedDevices, warning: Option<HostWarning>) {
         self.events
             .emit(HostEvent::AuthorizedDevices(store.list().to_vec()));
         if let Some(warning) = warning {
@@ -125,10 +129,12 @@ mod tests {
             events.try_recv().unwrap(),
             HostEvent::AuthorizedDevices(_)
         ));
-        let HostEvent::Warning(warning) = events.try_recv().unwrap() else {
+        let HostEvent::Warning(HostWarning::DeviceNotRemembered { name, .. }) =
+            events.try_recv().unwrap()
+        else {
             panic!("expected a warning")
         };
-        assert!(warning.contains("PORTATILE"), "{warning}");
+        assert_eq!(name, "PORTATILE");
         assert!(
             devices.is_authorized(&laptop),
             "trusted for this run anyway"

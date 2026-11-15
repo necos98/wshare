@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 use render::{ToolbarGeometry, ToolbarHit, ToolbarView};
 
+use crate::text;
+
 /// The bar collapses this long after the pointer left it.
 pub const COLLAPSE_DELAY: Duration = Duration::from_millis(700);
 /// Height (device-independent px) of the top-edge reveal strip.
@@ -29,9 +31,9 @@ pub enum BarAction {
 
 /// Buttons, left to right: label and what they do.
 pub const BUTTONS: [(&str, BarAction); 3] = [
-    ("Finestra", BarAction::LeaveFullscreen),
-    ("Statistiche", BarAction::ToggleStats),
-    ("Disconnetti", BarAction::Disconnect),
+    (text::BAR_WINDOWED, BarAction::LeaveFullscreen),
+    (text::BAR_STATS, BarAction::ToggleStats),
+    (text::BAR_DISCONNECT, BarAction::Disconnect),
 ];
 
 /// Result of feeding one input event to the bar.

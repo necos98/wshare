@@ -6,6 +6,7 @@ use eframe::egui::{
     StrokeKind, TextEdit, Ui, WidgetInfo, pos2, vec2,
 };
 
+use crate::text;
 use crate::trust::Timestamp;
 
 use super::controller::Intent;
@@ -52,16 +53,12 @@ pub fn show(ui: &mut Ui, state: &GuiState, drafts: &mut Drafts) -> Vec<Intent> {
 
 fn sharing_section(ui: &mut Ui, sharing: &Sharing, intents: &mut Vec<Intent>) {
     ui.horizontal(|ui| {
-        ui.label(
-            RichText::new("Condividi questo schermo")
-                .size(16.0)
-                .strong(),
-        );
+        ui.label(RichText::new(text::SHARE_THIS_SCREEN).size(16.0).strong());
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let mut on = sharing.enabled;
             // Off but still winding down: cannot be switched on yet.
             ui.add_enabled_ui(!sharing.stopping, |ui| {
-                if toggle(ui, &mut on, "Condividi questo schermo").changed() {
+                if toggle(ui, &mut on, text::SHARE_THIS_SCREEN).changed() {
                     intents.push(Intent::SetSharing(on));
                 }
             });
@@ -96,7 +93,7 @@ fn sharing_section(ui: &mut Ui, sharing: &Sharing, intents: &mut Vec<Intent>) {
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
-                    .add_enabled(sharing.listening, egui::Button::new("Nuovo PIN"))
+                    .add_enabled(sharing.listening, egui::Button::new(text::NEW_PIN))
                     .clicked()
                 {
                     intents.push(Intent::NewPin);
@@ -121,7 +118,7 @@ fn sharing_section(ui: &mut Ui, sharing: &Sharing, intents: &mut Vec<Intent>) {
             ui.label(sharing.status_line());
             if connected {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("Disconnetti").clicked() {
+                    if ui.button(text::DISCONNECT).clicked() {
                         intents.push(Intent::DisconnectViewer);
                     }
                 });
@@ -130,18 +127,16 @@ fn sharing_section(ui: &mut Ui, sharing: &Sharing, intents: &mut Vec<Intent>) {
         ui.add_space(4.0);
         let mut allowed = sharing.input_allowed;
         if ui
-            .checkbox(&mut allowed, "Consenti controllo remoto (mouse e tastiera)")
+            .checkbox(&mut allowed, text::ALLOW_REMOTE_CONTROL)
             .changed()
         {
             intents.push(Intent::SetInputAllowed(allowed));
         }
         if sharing.input_blocked {
             ui.label(
-                RichText::new(
-                    "Input bloccato da Windows (finestra amministratore o schermata protetta).",
-                )
-                .size(DETAIL_SIZE)
-                .color(ui.visuals().warn_fg_color),
+                RichText::new(text::INPUT_BLOCKED)
+                    .size(DETAIL_SIZE)
+                    .color(ui.visuals().warn_fg_color),
             );
         }
         if let Some(notice) = &sharing.notice {
@@ -154,7 +149,11 @@ fn sharing_section(ui: &mut Ui, sharing: &Sharing, intents: &mut Vec<Intent>) {
 fn network_section(ui: &mut Ui, state: &GuiState, drafts: &mut Drafts, intents: &mut Vec<Intent>) {
     let rows = state.host_rows();
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Computer in rete").size(16.0).strong());
+        ui.label(
+            RichText::new(text::COMPUTERS_ON_NETWORK)
+                .size(16.0)
+                .strong(),
+        );
         if rows.is_empty() && state.discovery_error.is_none() {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.spinner());
         }
@@ -163,7 +162,7 @@ fn network_section(ui: &mut Ui, state: &GuiState, drafts: &mut Drafts, intents: 
     if let Some(error) = &state.discovery_error {
         ui.colored_label(error_color(ui), error);
     } else if rows.is_empty() {
-        ui.weak("Ricerca in corso… Sull'altro computer apri wshare e attiva la condivisione.");
+        ui.weak(text::SEARCHING);
     }
     for row in &rows {
         let selected = state.selected_host.as_deref() == Some(row.id.as_str());
@@ -179,13 +178,13 @@ fn network_section(ui: &mut Ui, state: &GuiState, drafts: &mut Drafts, intents: 
     }
     if let Some(warning) = state.remembered.warning() {
         ui.label(
-            RichText::new(format!("Computer memorizzati non disponibili: {warning}"))
+            RichText::new(text::remembered_unavailable(warning))
                 .size(DETAIL_SIZE)
                 .weak(),
         );
     }
     ui.add_space(GAP / 2.0);
-    egui::CollapsingHeader::new("Connetti a un indirizzo IP").show_unindented(ui, |ui| {
+    egui::CollapsingHeader::new(text::CONNECT_TO_ADDRESS).show_unindented(ui, |ui| {
         let error = state
             .connect_error
             .as_deref()
@@ -322,7 +321,7 @@ fn pin_form(
             !pin.trim().is_empty()
         };
         submit |= ui
-            .add_enabled(ready, egui::Button::new("Connetti"))
+            .add_enabled(ready, egui::Button::new(text::CONNECT))
             .clicked();
         submit &= ready;
     });
@@ -369,7 +368,7 @@ fn viewers_section(ui: &mut Ui, viewers: &[ViewerSession], intents: &mut Vec<Int
                         let text = RichText::new(viewer.status_line()).color(error_color(ui));
                         ui.add(egui::Label::new(text).wrap());
                     });
-                    if ui.small_button("×").on_hover_text("Chiudi").clicked() {
+                    if ui.small_button("×").on_hover_text(text::CLOSE).clicked() {
                         intents.push(Intent::DismissViewer(viewer.id));
                     }
                 });

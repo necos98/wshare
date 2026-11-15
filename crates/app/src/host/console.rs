@@ -3,7 +3,7 @@
 
 use std::sync::mpsc::{Sender, channel};
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 
 use super::{HostEvent, HostHandle, HostObserver, interrupt};
 use crate::options::HostOptions;
@@ -44,7 +44,7 @@ pub(super) fn run(options: HostOptions) -> Result<()> {
     for signal in &signals {
         match signal {
             // Reported by `main` as the command's error.
-            Signal::Event(HostEvent::Stopped { error: Some(error) }) => return Err(anyhow!(error)),
+            Signal::Event(HostEvent::Stopped { error: Some(error) }) => return Err(error.into()),
             Signal::Event(event) => {
                 print(&event);
                 if matches!(event, HostEvent::Stopped { .. }) {
@@ -159,6 +159,7 @@ mod tests {
 
     use super::Output::{Stderr, Stdout};
     use super::*;
+    use crate::host::{HostFailure, HostWarning, SessionFailure};
     use crate::trust::{AuthorizedDevice, Timestamp};
 
     fn address() -> SocketAddr {
@@ -228,7 +229,7 @@ mod tests {
         let failed = HostEvent::ViewerDisconnected {
             address: address(),
             stats: HostStats::default(),
-            error: Some("encoder lost".into()),
+            error: Some(SessionFailure("encoder lost".into())),
         };
         assert_eq!(
             describe(&failed),
@@ -238,8 +239,13 @@ mod tests {
             )]
         );
         assert_eq!(
-            describe(&HostEvent::Warning("LAN announcement failed".into())),
-            [(Stderr, "warning: LAN announcement failed".to_string())]
+            describe(&HostEvent::Warning(HostWarning::LanAnnouncementFailed(
+                "no multicast".into()
+            ))),
+            [(
+                Stderr,
+                "warning: LAN announcement failed: no multicast".to_string()
+            )]
         );
     }
 
@@ -269,7 +275,7 @@ mod tests {
         );
         assert!(
             describe(&HostEvent::Stopped {
-                error: Some("boom".into())
+                error: Some(HostFailure::Failed("boom".into()))
             })
             .is_empty()
         );

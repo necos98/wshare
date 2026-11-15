@@ -20,6 +20,7 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 use super::Outgoing;
 use super::cursor::CursorCache;
+use super::failure::ViewerFailure;
 use super::key_log;
 use super::key_router::Hotkey;
 use super::keyboard_hook::KeyboardHook;
@@ -35,7 +36,7 @@ const MAX_INITIAL: (f64, f64) = (1280.0, 800.0);
 
 #[derive(Debug)]
 pub enum UserEvent {
-    HostLeft(String),
+    HostLeft(ViewerFailure),
     RenderFailed(String),
     Cursor(CursorShape),
     CursorVisible(bool),
@@ -91,6 +92,8 @@ pub struct ViewerWindow {
     render: Option<RenderThread>,
     stats: Option<ViewerStats>,
     error: Option<String>,
+    /// The host went away on its own (see [`Self::host_left`]).
+    host_left: Option<ViewerFailure>,
 }
 
 impl ViewerWindow {
@@ -123,6 +126,7 @@ impl ViewerWindow {
             render: None,
             stats: None,
             error: None,
+            host_left: None,
         }
     }
 
@@ -132,6 +136,12 @@ impl ViewerWindow {
 
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    /// Set when the host stopped sharing or the connection broke, as
+    /// opposed to the user closing the window.
+    pub fn host_left(&self) -> Option<&ViewerFailure> {
+        self.host_left.as_ref()
     }
 
     fn open(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
@@ -368,8 +378,9 @@ impl ApplicationHandler<UserEvent> for ViewerWindow {
             }
             UserEvent::InputAllowed(allowed) => self.set_host_allows(allowed),
             UserEvent::Hotkey(hotkey) => self.run_hotkey(hotkey),
-            UserEvent::HostLeft(reason) => {
-                println!("{reason}");
+            UserEvent::HostLeft(failure) => {
+                println!("{failure}");
+                self.host_left = Some(failure);
                 self.close(event_loop);
             }
             UserEvent::RenderFailed(reason) => {

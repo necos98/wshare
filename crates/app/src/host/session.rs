@@ -22,13 +22,13 @@ use protocol::control::{ControlMessage, RejectReason, StreamInfo};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::sync::watch;
 
-use super::HostEvent;
 use super::devices::Devices;
 use super::events::EventSink;
 use super::input_gate::InputGate;
 use super::input_switch::InputSwitch;
 use super::state::{Cancelled, SharedState};
 use super::streaming::{StreamEnd, StreamingThread};
+use super::{HostEvent, SessionFailure};
 use crate::handshake::{HelloVerdict, ViewerTrust, check_hello, unsupported_version};
 use crate::options::StreamOptions;
 
@@ -194,8 +194,7 @@ async fn serve_admitted(
         video,
     } = channels;
     let address = viewer.address;
-    let refuse = async |tx: &mut ControlSender, reason: String| {
-        let reason = RejectReason::Other(reason);
+    let refuse = async |tx: &mut ControlSender, reason: RejectReason| {
         send_rejection(tx, reason.clone()).await;
         ctx.events
             .emit(HostEvent::ViewerRejected { address, reason });
@@ -213,13 +212,17 @@ async fn serve_admitted(
     let (input, streaming, info) = match prepared.await {
         Ok(parts) => parts,
         Err(e) => {
-            refuse(&mut tx, format!("host cannot stream: {e:#}")).await;
+            refuse(&mut tx, RejectReason::CannotStream(format!("{e:#}"))).await;
             farewell(&viewer.handle, &mut cancel).await;
             return;
         }
     };
     if cancel.is_cancelled() {
-        refuse(&mut tx, "the host stopped sharing".into()).await;
+        refuse(
+            &mut tx,
+            RejectReason::Other("the host stopped sharing".into()),
+        )
+        .await;
         let _ = streaming.stop().await;
         return;
     }
@@ -306,12 +309,16 @@ async fn farewell(handle: &SessionHandle, cancel: &mut Cancelled) {
 }
 
 /// Whether the session ended abnormally on our side, and why.
-fn session_error(ended: Result<SessionEnd>, stream_error: Option<anyhow::Error>) -> Option<String> {
+fn session_error(
+    ended: Result<SessionEnd>,
+    stream_error: Option<anyhow::Error>,
+) -> Option<SessionFailure> {
+    let failure = |e: anyhow::Error| SessionFailure(format!("{e:#}"));
     match (ended, stream_error) {
-        (Err(e), _) => Some(format!("{e:#}")),
+        (Err(e), _) => Some(failure(e)),
         // Sends fail once the viewer has gone: that is a normal end.
         (Ok(SessionEnd::ViewerLeft), _) | (Ok(_), None) => None,
-        (Ok(SessionEnd::StreamStopped | SessionEnd::HostEnded), Some(e)) => Some(format!("{e:#}")),
+        (Ok(SessionEnd::StreamStopped | SessionEnd::HostEnded), Some(e)) => Some(failure(e)),
     }
 }
 
@@ -417,15 +424,15 @@ mod tests {
     #[test]
     fn stream_failures_while_the_viewer_watches_are_errors() {
         let error = session_error(Ok(SessionEnd::StreamStopped), Some(anyhow!("encoder lost")));
-        assert_eq!(error.as_deref(), Some("encoder lost"));
+        assert_eq!(error, Some(SessionFailure("encoder lost".into())));
         let error = session_error(Ok(SessionEnd::HostEnded), Some(anyhow!("encoder lost")));
-        assert_eq!(error.as_deref(), Some("encoder lost"));
+        assert_eq!(error, Some(SessionFailure("encoder lost".into())));
     }
 
     #[test]
     fn control_channel_errors_win() {
         let error = session_error(Err(anyhow!("reset")), Some(anyhow!("encoder lost")));
-        assert_eq!(error.as_deref(), Some("reset"));
+        assert_eq!(error, Some(SessionFailure("reset".into())));
     }
 
     #[test]

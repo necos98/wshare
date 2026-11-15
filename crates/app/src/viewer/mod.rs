@@ -21,6 +21,7 @@ mod keyboard_hook;
 mod pairing;
 mod remote;
 mod render_thread;
+pub mod report;
 mod sink;
 mod stats;
 mod toolbar;
@@ -30,12 +31,10 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use bytes::Bytes;
 use discovery::computer_name;
-use net::{
-    ControlReceiver, ControlSender, Fingerprint, IdentityMismatch, SessionHandle, VideoChannel,
-};
+use net::{ControlReceiver, ControlSender, Fingerprint, SessionHandle, VideoChannel};
 use protocol::control::{ControlMessage, PROTOCOL_VERSION, RejectReason, StreamInfo};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -44,8 +43,9 @@ use winit::event_loop::{DeviceEvents, EventLoop, EventLoopProxy};
 use crate::cli::ViewOptions;
 use crate::options::DEFAULT_PORT;
 use crate::target::{self, Resolved, parse_target};
-use failure::ConnectFailure;
+use failure::ViewerFailure;
 use pairing::Pairing;
+use report::{REPORT_ENV, ViewerReport};
 use window::{ControlPolicy, UserEvent, ViewerWindow, WindowOptions};
 
 /// Environment variable holding the PIN when `--pin` is absent (used by
@@ -81,6 +81,7 @@ pub fn run(options: ViewOptions) -> Result<()> {
     } = target::resolve(&target, DISCOVERY_WAIT)?;
     let mut pairing = Pairing::load(options.host_id.as_deref().or(host_id.as_deref()));
     let given = given_pin(options.pin, std::env::var(PIN_ENV).ok());
+    let reporting = report::reporting_enabled(std::env::var(REPORT_ENV).ok().as_deref());
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -99,6 +100,15 @@ pub fn run(options: ViewOptions) -> Result<()> {
     // Before the "Connected" line: the desktop interface re-reads the known
     // hosts when it sees that line.
     pairing.remember(fingerprint, &host_name);
+    if reporting {
+        println!(
+            "{}",
+            ViewerReport::Connected {
+                host_name: host_name.clone(),
+            }
+            .to_line()
+        );
+    }
     println!(
         "Connected to \"{host_name}\" ({addr}) - {}x{} @ {} fps {:?}",
         stream.width, stream.height, stream.fps, stream.codec
@@ -155,7 +165,25 @@ pub fn run(options: ViewOptions) -> Result<()> {
             stats.keyframes_requested
         );
     }
-    window.error().map_or(Ok(()), |e| bail!("{e}"))
+    if let Some(e) = window.error() {
+        bail!("{e}");
+    }
+    // A terminal user closes the window or sees the message; the interface
+    // needs to know why the viewer ended.
+    match window.host_left() {
+        Some(failure) if reporting => Err(failure.clone().into()),
+        _ => Ok(()),
+    }
+}
+
+/// The exit code of `wshare view` that ended with `error`. When the desktop
+/// interface asks for it, the cause is also written as a status line.
+pub fn exit_code_for(error: &anyhow::Error) -> i32 {
+    let cause = failure::cause_of(error);
+    if report::reporting_enabled(std::env::var(REPORT_ENV).ok().as_deref()) {
+        println!("{}", ViewerReport::Failed(cause.clone()).to_line());
+    }
+    cause.exit_code()
 }
 
 /// What the first connection attempt sends.
@@ -204,8 +232,8 @@ fn authenticate(
 }
 
 fn is_pin_required(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<ConnectFailure>()
-        == Some(&ConnectFailure::Rejected(RejectReason::PinRequired))
+    error.downcast_ref::<ViewerFailure>()
+        == Some(&ViewerFailure::Rejected(RejectReason::PinRequired))
 }
 
 /// One connection attempt: TLS (pinned for a remembered host, presenting
@@ -213,7 +241,7 @@ fn is_pin_required(error: &anyhow::Error) -> bool {
 async fn connect(addr: SocketAddr, pairing: &Pairing, pin: Option<String>) -> Result<Connected> {
     let session = net::connect(addr, pairing.expected(), pairing.identity())
         .await
-        .map_err(host_changed)?;
+        .map_err(failure::connect_failure)?;
     let fingerprint = session
         .peer_fingerprint()
         .ok_or_else(|| anyhow!("the host presented no certificate"))?;
@@ -227,7 +255,8 @@ async fn connect(addr: SocketAddr, pairing: &Pairing, pin: Option<String>) -> Re
     .await?;
     let answer = tokio::time::timeout(WELCOME_TIMEOUT, rx.recv())
         .await
-        .context("the host did not answer")??;
+        .map_err(|_| ViewerFailure::no_answer())?
+        .map_err(|e| ViewerFailure::ConnectionLost(format!("{e:#}")))?;
     match answer {
         Some(ControlMessage::Welcome {
             host_name,
@@ -243,18 +272,9 @@ async fn connect(addr: SocketAddr, pairing: &Pairing, pin: Option<String>) -> Re
             video,
             handle,
         }),
-        Some(ControlMessage::Rejected { reason }) => Err(ConnectFailure::Rejected(reason).into()),
+        Some(ControlMessage::Rejected { reason }) => Err(ViewerFailure::Rejected(reason).into()),
         Some(other) => bail!("unexpected answer from the host: {other:?}"),
-        None => bail!("the host closed the connection"),
-    }
-}
-
-/// A pinned host that presented another certificate is a
-/// [`ConnectFailure`]; other connection errors pass through.
-fn host_changed(error: anyhow::Error) -> anyhow::Error {
-    match error.downcast::<IdentityMismatch>() {
-        Ok(mismatch) => ConnectFailure::HostChanged(mismatch).into(),
-        Err(error) => error,
+        None => Err(ViewerFailure::HostLeft.into()),
     }
 }
 
@@ -279,15 +299,15 @@ async fn run_control(
             message = outgoing.recv() => {
                 let Some(message) = message else { return };
                 let is_bye = message == ControlMessage::Bye;
-                if tx.send(&message).await.is_err() {
-                    break "connection lost".to_string();
+                if let Err(e) = tx.send(&message).await {
+                    break ViewerFailure::ConnectionLost(format!("{e:#}"));
                 }
                 if is_bye {
                     return;
                 }
             }
             incoming = rx.recv() => match incoming {
-                Ok(Some(ControlMessage::Bye) | None) => break "the host stopped sharing".to_string(),
+                Ok(Some(ControlMessage::Bye) | None) => break ViewerFailure::HostLeft,
                 Ok(Some(ControlMessage::Cursor(shape))) => {
                     let _ = window.send_event(UserEvent::Cursor(shape));
                 }
@@ -298,7 +318,7 @@ async fn run_control(
                     let _ = window.send_event(UserEvent::InputAllowed(allowed));
                 }
                 Ok(Some(_)) => {}
-                Err(e) => break format!("connection lost: {e:#}"),
+                Err(e) => break ViewerFailure::ConnectionLost(format!("{e:#}")),
             }
         }
     };
@@ -372,24 +392,9 @@ mod tests {
 
     #[test]
     fn only_pin_required_triggers_the_prompt() {
-        let failure = |reason| anyhow::Error::new(ConnectFailure::Rejected(reason));
+        let failure = |reason| anyhow::Error::new(ViewerFailure::Rejected(reason));
         assert!(is_pin_required(&failure(RejectReason::PinRequired)));
         assert!(!is_pin_required(&failure(RejectReason::WrongPin)));
         assert!(!is_pin_required(&anyhow!("PIN required")));
-    }
-
-    #[test]
-    fn identity_mismatch_becomes_host_changed() {
-        let mismatch = IdentityMismatch {
-            expected: Fingerprint([1; 32]),
-            actual: Fingerprint([2; 32]),
-        };
-        let error = host_changed(anyhow::Error::new(mismatch));
-        assert_eq!(
-            error.downcast_ref::<ConnectFailure>(),
-            Some(&ConnectFailure::HostChanged(mismatch))
-        );
-        let other = host_changed(anyhow!("timed out"));
-        assert!(other.downcast_ref::<ConnectFailure>().is_none());
     }
 }

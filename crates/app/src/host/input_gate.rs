@@ -11,8 +11,8 @@ use anyhow::Result;
 use input::{DesktopMetrics, InputBackend, Outcome, RemoteInput};
 use protocol::input::InputEvent;
 
-use super::HostEvent;
 use super::events::Throttle;
+use super::{HostEvent, HostWarning};
 
 /// At most one "input failed" warning per this interval.
 const WARNING_INTERVAL: Duration = Duration::from_secs(5);
@@ -76,11 +76,10 @@ impl<I: Injector> InputGate<I> {
             Ok(Outcome::Blocked { first: true }) => Some(HostEvent::InputBlocked),
             Ok(_) => None,
             Err(e) => self.warnings.admit(now).map(|suppressed| {
-                let mut message = format!("remote input failed: {e:#}");
-                if suppressed > 0 {
-                    message.push_str(&format!(" ({suppressed} similar failures not shown)"));
-                }
-                HostEvent::Warning(message)
+                HostEvent::Warning(HostWarning::InputFailed {
+                    detail: format!("{e:#}"),
+                    suppressed,
+                })
             }),
         }
     }
@@ -157,17 +156,22 @@ mod tests {
         let fail = || Err(anyhow!("SendInput failed"));
         let mut gate = InputGate::new(Fake::returning(vec![fail(), fail(), fail(), fail()]));
         let start = Instant::now();
-        let Some(HostEvent::Warning(first)) = gate.apply(true, &MOVE, start) else {
+        let Some(HostEvent::Warning(HostWarning::InputFailed { detail, suppressed })) =
+            gate.apply(true, &MOVE, start)
+        else {
             panic!()
         };
-        assert!(first.contains("SendInput failed"), "{first}");
+        assert!(detail.contains("SendInput failed"), "{detail}");
+        assert_eq!(suppressed, 0);
         assert_eq!(gate.apply(true, &MOVE, start), None);
         assert_eq!(gate.release_all(start), None);
         let later = start + WARNING_INTERVAL;
-        let Some(HostEvent::Warning(next)) = gate.apply(true, &MOVE, later) else {
+        let Some(HostEvent::Warning(HostWarning::InputFailed { suppressed, .. })) =
+            gate.apply(true, &MOVE, later)
+        else {
             panic!()
         };
-        assert!(next.contains("2 similar failures"), "{next}");
+        assert_eq!(suppressed, 2);
     }
 
     #[test]

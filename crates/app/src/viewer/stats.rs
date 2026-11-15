@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 use pipeline::ViewerStats;
 use protocol::control::StreamInfo;
 
+use crate::text;
+
 /// Cumulative counters sampled by the render loop.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Totals {
@@ -80,6 +82,14 @@ pub struct Labels<'a> {
     pub decoder: &'a str,
 }
 
+/// Width of the label column of the overlay.
+const LABEL_WIDTH: usize = 13;
+
+/// One `label  value` row, the values aligned.
+fn row(label: &str, value: String) -> String {
+    format!("{label:<LABEL_WIDTH$}{value}")
+}
+
 /// The overlay text (Italian, like the rest of the UI).
 pub fn overlay_lines(
     labels: &Labels<'_>,
@@ -95,20 +105,21 @@ pub fn overlay_lines(
             "{}x{} {:?} - max {} fps",
             stream.width, stream.height, stream.codec, stream.fps
         ),
-        format!("Frame/s      {:.0}", rates.fps),
-        format!("Bitrate      {:.1} Mbit/s", rates.mbps),
-        format!("RTT rete     {}", ms(rtt)),
-        format!(
-            "Decodifica   {}",
-            frame_time.map_or_else(|| "-".to_string(), ms)
+        row(text::STAT_FPS, format!("{:.0}", rates.fps)),
+        row(text::STAT_BITRATE, format!("{:.1} Mbit/s", rates.mbps)),
+        row(text::STAT_RTT, ms(rtt)),
+        row(
+            text::STAT_DECODE,
+            frame_time.map_or_else(|| "-".to_string(), ms),
         ),
-        format!(
-            "Persi {}  Scartati {}  Keyframe richiesti {}",
-            stats.frames_lost, stats.frames_skipped, stats.keyframes_requested
+        text::stats_losses(
+            stats.frames_lost,
+            stats.frames_skipped,
+            stats.keyframes_requested,
         ),
-        format!("Encoder  {}", stream.encoder),
-        format!("Decoder  {}", labels.decoder),
-        "Ctrl+Alt+I nascondi - Ctrl+Alt+Invio schermo intero".to_string(),
+        row(text::STAT_ENCODER, stream.encoder.clone()),
+        row(text::STAT_DECODER, labels.decoder.to_string()),
+        text::STATS_HOTKEYS.to_string(),
     ]
 }
 

@@ -15,6 +15,7 @@ mod host;
 mod options;
 mod paths;
 mod target;
+mod text;
 mod trust;
 mod viewer;
 mod wire;
@@ -36,15 +37,15 @@ fn main() {
     }
     if let Err(e) = command.and_then(run) {
         if is_gui {
-            gui::platform::error_box(&format!("wshare non riesce ad aprire la finestra:\n{e:#}"));
+            gui::platform::error_box(&text::window_failed(&format!("{e:#}")));
         } else {
             eprintln!("error: {e:#}");
         }
         // The desktop interface reads why a viewer failed from its code.
         let code = if is_view {
-            viewer::failure::exit_code(&e)
+            viewer::exit_code_for(&e)
         } else {
-            viewer::failure::GENERIC_EXIT_CODE
+            viewer::report::GENERIC_EXIT_CODE
         };
         std::process::exit(code);
     }

@@ -4,11 +4,12 @@
 //!
 //! The PIN travels in the `WSHARE_PIN` environment variable, not on the
 //! command line (visible to every process of the machine); without one the
-//! variable is removed, so the viewer never inherits a stale PIN. stdout
-//! tells when the viewer connected; the exit code (see
-//! `viewer::failure`) and stderr why it failed.
+//! variable is removed, so the viewer never inherits a stale PIN.
+//! `WSHARE_REPORT` asks the viewer for its status lines on stdout and the
+//! exit code (see `viewer::report`): the interface decides only from those,
+//! never from the wording of messages.
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -16,15 +17,13 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result};
 
 use crate::viewer::PIN_ENV;
+use crate::viewer::report::{FailureCause, REPORT_ENABLED, REPORT_ENV, ViewerReport};
 
 use super::model::{ViewerId, ViewerUpdate};
 use super::ports::{AppEvent, Inbox, LaunchRequest, ViewerLauncher};
 
 /// `CREATE_NO_WINDOW`: no console for the child, whatever its subsystem.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-/// What `wshare view` prints on stdout once the handshake succeeded.
-const CONNECTED_PREFIX: &str = "Connected to";
 
 pub struct ProcessLauncher {
     exe: PathBuf,
@@ -50,57 +49,110 @@ impl ViewerLauncher for ProcessLauncher {
             None => command.env_remove(PIN_ENV),
         };
         let mut child = command
+            .env(REPORT_ENV, REPORT_ENABLED)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::null())
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .context("starting the viewer")?;
         let stdout = child.stdout.take().context("viewer stdout")?;
-        let mut stderr = child.stderr.take().context("viewer stderr")?;
         let inbox = self.inbox.clone();
         std::thread::Builder::new()
             .name(format!("viewer-{id}"))
             .spawn(move || {
-                let stdout_inbox = inbox.clone();
-                let stdout_reader = std::thread::spawn(move || {
-                    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                        if is_connected_line(&line) {
-                            stdout_inbox.send(AppEvent::Viewer {
-                                id,
-                                update: ViewerUpdate::Connected,
-                            });
-                        }
+                let mut failure = None;
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    match ViewerReport::parse(&line) {
+                        Some(ViewerReport::Connected { .. }) => inbox.send(AppEvent::Viewer {
+                            id,
+                            update: ViewerUpdate::Connected,
+                        }),
+                        Some(ViewerReport::Failed(cause)) => failure = Some(cause),
+                        None => {}
                     }
-                });
-                let mut errors = Vec::new();
-                let _ = stderr.read_to_end(&mut errors);
-                let _ = stdout_reader.join();
+                }
                 let status = child.wait();
-                let update = ViewerUpdate::Exited {
-                    success: status.as_ref().is_ok_and(|s| s.success()),
-                    code: status.ok().and_then(|s| s.code()),
-                    stderr: String::from_utf8_lossy(&errors).into_owned(),
-                };
+                let update = exit_update(
+                    status.as_ref().is_ok_and(|s| s.success()),
+                    status.ok().and_then(|s| s.code()),
+                    failure,
+                );
                 inbox.send(AppEvent::Viewer { id, update });
             })?;
         Ok(())
     }
 }
 
-fn is_connected_line(line: &str) -> bool {
-    line.starts_with(CONNECTED_PREFIX)
+/// What the end of the viewer process means: the cause it reported, else
+/// the one its exit code names, else none (killed, crashed).
+fn exit_update(success: bool, code: Option<i32>, reported: Option<FailureCause>) -> ViewerUpdate {
+    let cause = reported.or_else(|| code.and_then(FailureCause::from_exit_code));
+    ViewerUpdate::Exited {
+        success,
+        code,
+        cause,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn exited(success: bool, code: Option<i32>, cause: Option<FailureCause>) -> ViewerUpdate {
+        ViewerUpdate::Exited {
+            success,
+            code,
+            cause,
+        }
+    }
+
     #[test]
-    fn recognises_the_connected_line() {
-        assert!(is_connected_line(
-            "Connected to \"UFFICIO\" (10.0.0.2:7420) - 1920x1080 @ 60 fps H264"
-        ));
-        assert!(!is_connected_line("Host fingerprint: abc"));
+    fn the_reported_cause_wins_over_the_exit_code() {
+        assert_eq!(
+            exit_update(false, Some(1), Some(FailureCause::Other("odd".into()))),
+            exited(false, Some(1), Some(FailureCause::Other("odd".into())))
+        );
+        assert_eq!(
+            exit_update(
+                false,
+                Some(11),
+                Some(FailureCause::HostCannotStream("x".into()))
+            ),
+            exited(
+                false,
+                Some(11),
+                Some(FailureCause::HostCannotStream("x".into()))
+            )
+        );
+    }
+
+    #[test]
+    fn without_a_report_the_exit_code_names_the_cause() {
+        assert_eq!(
+            exit_update(false, Some(11), None),
+            exited(false, Some(11), Some(FailureCause::WrongPin))
+        );
+        assert_eq!(
+            exit_update(false, Some(15), None),
+            exited(false, Some(15), Some(FailureCause::TimedOut))
+        );
+    }
+
+    #[test]
+    fn a_silent_failure_has_no_cause() {
+        assert_eq!(
+            exit_update(false, Some(101), None),
+            exited(false, Some(101), None)
+        );
+        assert_eq!(exit_update(false, None, None), exited(false, None, None));
+    }
+
+    #[test]
+    fn a_normal_end_has_no_cause() {
+        assert_eq!(
+            exit_update(true, Some(0), None),
+            exited(true, Some(0), None)
+        );
     }
 }

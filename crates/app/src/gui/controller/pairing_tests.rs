@@ -8,7 +8,7 @@ use super::*;
 use crate::gui::model::PIN_AGAIN;
 use crate::gui::model::tests::{found, listening};
 use crate::gui::remembered::tests::known;
-use crate::trust::{KnownHost, host_id};
+use crate::trust::KnownHost;
 use crate::viewer::failure::FailureKind;
 
 const OFFICE_IP: &str = "192.168.1.3";
@@ -16,7 +16,7 @@ const OFFICE_IP: &str = "192.168.1.3";
 /// A controller listing `UFFICIO`, which its store says remembers this PC.
 fn with_remembered_office() -> (TestController, Shared, KnownHost, String) {
     let office = known(0xab, "UFFICIO");
-    let id = host_id(&office.fingerprint);
+    let id = office.fingerprint.host_id();
     let (mut c, log) = controller_knowing(vec![office.clone()]);
     c.on_event(AppEvent::Discovery(found(
         &id,
@@ -113,7 +113,7 @@ fn pin_required_shows_the_pin_field_and_the_pin_reconnects() {
 fn known_hosts_are_reloaded_when_a_viewer_connects() {
     let (mut c, log) = controller();
     let office = known(0xcd, "UFFICIO");
-    let id = host_id(&office.fingerprint);
+    let id = office.fingerprint.host_id();
     c.on_event(AppEvent::Discovery(found(
         &id,
         "UFFICIO",

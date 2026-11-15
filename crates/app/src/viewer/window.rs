@@ -165,7 +165,7 @@ impl ViewerWindow {
             if let Err(e) = result {
                 let _ = proxy.send_event(UserEvent::RenderFailed(format!("{e:#}")));
             }
-        });
+        })?;
         if self.options.stats {
             render.toggle_stats();
         }

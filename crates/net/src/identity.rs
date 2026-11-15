@@ -17,6 +17,9 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 const CERT_FILE: &str = "cert.der";
 const KEY_FILE: &str = "key.der";
 
+/// Length of the host id announced on the LAN (see [`Fingerprint::host_id`]).
+pub const HOST_ID_LEN: usize = 16;
+
 /// SHA-256 of a certificate's DER encoding. `Display` / `FromStr` use
 /// lowercase hex (64 characters; uppercase is accepted when parsing).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -29,6 +32,23 @@ impl Fingerprint {
         let mut out = [0u8; 32];
         out.copy_from_slice(digest.as_ref());
         Self(out)
+    }
+
+    /// The id under which a host with this certificate announces itself on
+    /// the LAN: the first [`HOST_ID_LEN`] hex characters of the fingerprint.
+    pub fn host_id(&self) -> String {
+        Self::host_id_of_hex(&self.to_string())
+    }
+
+    /// [`Fingerprint::host_id`] for a fingerprint already written as hex
+    /// (as events and files carry it).
+    pub fn host_id_of_hex(hex: &str) -> String {
+        hex.chars().take(HOST_ID_LEN).collect()
+    }
+
+    /// Whether `id` is a well-formed host id (see [`Fingerprint::host_id`]).
+    pub fn is_host_id(id: &str) -> bool {
+        id.len() == HOST_ID_LEN && id.bytes().all(|b| b.is_ascii_hexdigit())
     }
 }
 
@@ -145,6 +165,25 @@ mod tests {
         assert_eq!(text, text.to_lowercase());
         assert_eq!(text.parse::<Fingerprint>().unwrap(), fp);
         assert_eq!(text.to_uppercase().parse::<Fingerprint>().unwrap(), fp);
+    }
+
+    #[test]
+    fn host_id_is_the_fingerprint_prefix() {
+        let fp = Fingerprint(core::array::from_fn(|i| i as u8));
+        let id = fp.host_id();
+        assert_eq!(id, "0001020304050607");
+        assert!(Fingerprint::is_host_id(&id));
+        assert!(Fingerprint::is_host_id(&id.to_uppercase()));
+        assert!(fp.to_string().starts_with(&id));
+    }
+
+    #[test]
+    fn is_host_id_rejects_malformed_ids() {
+        assert!(!Fingerprint::is_host_id(""));
+        assert!(!Fingerprint::is_host_id("0123456789abcde"));
+        assert!(!Fingerprint::is_host_id("0123456789abcdef0"));
+        assert!(!Fingerprint::is_host_id("0123456789abcdeg"));
+        assert!(!Fingerprint::is_host_id("zz01020304050607"));
     }
 
     #[test]

@@ -51,7 +51,14 @@ pub use identity::{Fingerprint, Identity};
 pub use session::{Session, SessionHandle};
 pub use video::VideoChannel;
 
-/// ALPN protocol identifier; bump together with breaking wire changes.
+/// ALPN protocol identifier. It stays fixed: it only says "this is wshare",
+/// so that a QUIC connection reaches the application at all. Compatibility
+/// is decided by `Hello.version` (`protocol::control::PROTOCOL_VERSION`),
+/// the first message of every session: a host that does not support the
+/// version answers `Rejected`, which the viewer can show. For that to work
+/// across versions, `Hello` and `Rejected` must remain decodable by every
+/// version (see `protocol::control`). Changing the ALPN would instead make
+/// the handshake fail with a generic TLS error and no readable reason.
 pub const ALPN: &[u8] = b"wshare/1";
 
 /// Server name the viewer puts in the TLS ClientHello. Certificates are

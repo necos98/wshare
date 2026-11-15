@@ -8,7 +8,8 @@
 //! - [`toolbar_geometry`] / [`ToolbarView`]: the full-screen control bar,
 //!   drawn by the renderer and hit-tested by the app with the same geometry.
 //!
-//! Depends only on `gpu`, not on the decoder that produces the frames.
+//! Depends on `gpu` (frame type) and `pipeline` (the [`FrameSink`] trait it
+//! implements), not on the decoder that produces the frames.
 
 mod cache;
 mod canvas;

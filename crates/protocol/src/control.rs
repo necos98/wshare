@@ -14,6 +14,15 @@
 //!   host -> viewer  Cursor(shape) / CursorVisible(bool)
 //!   host -> viewer  InputAllowed(bool)      (remote control switched mid-session)
 //!   either          Bye
+//!
+//! Compatibility: peers of different protocol versions must still understand
+//! each other's first messages, since that is how a mismatch is reported.
+//! Hence `Hello` keeps its variant index (0) and starts with the `u16`
+//! `version` in every version, and `Rejected` keeps its index (2) and its
+//! text form (see [`RejectReason`]): a host that cannot decode a `Hello`
+//! reads the version from that prefix and answers `Rejected` (see
+//! [`ProtocolError::IncompatibleHello`]). Anything after the prefix may
+//! change with [`PROTOCOL_VERSION`].
 
 use std::fmt;
 
@@ -208,9 +217,35 @@ impl FrameDecoder {
     }
 }
 
+/// The start of [`ControlMessage::Hello`] that every protocol version
+/// shares: the variant index (0) and the `u16` version. Reading only this
+/// prefix tells which version a `Hello` we cannot decode belongs to.
+#[derive(Deserialize)]
+enum HelloPrefix {
+    Hello { version: u16 },
+}
+
+/// Version announced by the `Hello` in `payload`, when its first bytes are
+/// one (whatever follows them).
+fn hello_version(payload: &[u8]) -> Option<u16> {
+    match postcard::take_from_bytes::<HelloPrefix>(payload) {
+        Ok((HelloPrefix::Hello { version }, _)) => Some(version),
+        Err(_) => None,
+    }
+}
+
 /// Decodes exactly one message from `payload`; trailing bytes are an error
-/// because they indicate a framing or version mismatch.
+/// because they indicate a framing or version mismatch. A `Hello` of
+/// another protocol version, whose later fields may have another layout,
+/// is reported as [`ProtocolError::IncompatibleHello`].
 fn decode_payload(payload: &[u8]) -> Result<ControlMessage, ProtocolError> {
+    decode_exact(payload).map_err(|error| match hello_version(payload) {
+        Some(version) if version != PROTOCOL_VERSION => ProtocolError::IncompatibleHello(version),
+        _ => error,
+    })
+}
+
+fn decode_exact(payload: &[u8]) -> Result<ControlMessage, ProtocolError> {
     let (msg, rest) = postcard::take_from_bytes::<ControlMessage>(payload)
         .map_err(|e| ProtocolError::Decode(e.to_string()))?;
     if !rest.is_empty() {
@@ -434,5 +469,135 @@ mod tests {
             Err(ProtocolError::Decode(_))
         ));
         assert_eq!(decoder.next_message().unwrap(), None);
+    }
+
+    /// The frame of a message: little-endian length, then `payload`.
+    fn frame_of(payload: &[u8]) -> Vec<u8> {
+        let mut frame = (payload.len() as u32).to_le_bytes().to_vec();
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    fn decode_one(frame: &[u8]) -> Result<Option<ControlMessage>, ProtocolError> {
+        let mut decoder = FrameDecoder::new();
+        decoder.push(frame);
+        decoder.next_message()
+    }
+
+    #[test]
+    fn hello_layout_is_stable() {
+        // Variant 0, version (varint), name (length + bytes), then the PIN
+        // as an option: 0 = none, 1 followed by a string.
+        let with_pin = encode_frame(&ControlMessage::Hello {
+            version: 4,
+            viewer_name: "pc".into(),
+            pin: Some("1234".into()),
+        });
+        assert_eq!(
+            with_pin,
+            frame_of(&[0, 4, 2, b'p', b'c', 1, 4, b'1', b'2', b'3', b'4'])
+        );
+        let without_pin = encode_frame(&ControlMessage::Hello {
+            version: 4,
+            viewer_name: "pc".into(),
+            pin: None,
+        });
+        assert_eq!(without_pin, frame_of(&[0, 4, 2, b'p', b'c', 0]));
+    }
+
+    #[test]
+    fn hello_version_is_a_varint_after_the_variant_index() {
+        let frame = encode_frame(&ControlMessage::Hello {
+            version: 300,
+            viewer_name: String::new(),
+            pin: None,
+        });
+        // 300 = 0b1_0010_1100 -> 0xAC 0x02.
+        assert_eq!(&frame[LENGTH_PREFIX..], [0, 0xAC, 0x02, 0, 0]);
+    }
+
+    #[test]
+    fn rejected_layout_is_stable() {
+        for (reason, text) in [
+            (RejectReason::PinRequired, "PIN required"),
+            (RejectReason::WrongPin, "wrong PIN"),
+            (
+                RejectReason::UnsupportedVersion { host: 4 },
+                "protocol version not supported (host uses 4)",
+            ),
+            (RejectReason::Other("busy".into()), "busy"),
+        ] {
+            let mut payload = vec![2, text.len() as u8];
+            payload.extend_from_slice(text.as_bytes());
+            assert_eq!(
+                encode_frame(&ControlMessage::Rejected { reason }),
+                frame_of(&payload)
+            );
+        }
+    }
+
+    #[test]
+    fn control_message_variant_indexes_are_stable() {
+        let index = |msg: ControlMessage| encode_frame(&msg)[LENGTH_PREFIX];
+        assert_eq!(index(samples().remove(0)), 0, "Hello");
+        assert_eq!(index(samples().remove(2)), 1, "Welcome");
+        assert_eq!(
+            index(ControlMessage::Rejected {
+                reason: RejectReason::WrongPin
+            }),
+            2
+        );
+        assert_eq!(index(ControlMessage::RequestKeyframe), 3);
+        assert_eq!(index(ControlMessage::Bye), 7);
+        assert_eq!(index(ControlMessage::InputAllowed(true)), 8);
+    }
+
+    #[test]
+    fn hello_of_protocol_3_is_reported_with_its_version() {
+        // Protocol 3: version 3, name, then the PIN as a plain string.
+        let payload = [0, 3, 2, b'p', b'c', 6, b'1', b'2', b'3', b'4', b'5', b'6'];
+        assert_eq!(
+            decode_one(&frame_of(&payload)),
+            Err(ProtocolError::IncompatibleHello(3))
+        );
+    }
+
+    #[test]
+    fn hello_of_protocol_3_that_happens_to_decode_keeps_its_version() {
+        // An empty PIN reads as "no PIN" in the current layout.
+        let payload = [0, 3, 2, b'p', b'c', 0];
+        assert_eq!(
+            decode_one(&frame_of(&payload)),
+            Ok(Some(ControlMessage::Hello {
+                version: 3,
+                viewer_name: "pc".into(),
+                pin: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn hello_of_the_current_version_with_a_bad_body_is_a_plain_decode_error() {
+        let payload = [0, PROTOCOL_VERSION as u8, 2, b'p', b'c', 9];
+        assert!(matches!(
+            decode_one(&frame_of(&payload)),
+            Err(ProtocolError::Decode(_))
+        ));
+    }
+
+    #[test]
+    fn a_hello_cut_before_its_version_is_a_plain_decode_error() {
+        assert!(matches!(
+            decode_one(&frame_of(&[0])),
+            Err(ProtocolError::Decode(_))
+        ));
+    }
+
+    #[test]
+    fn garbage_that_is_not_a_hello_is_a_plain_decode_error() {
+        assert!(matches!(
+            decode_one(&frame_of(&[200, 3, 1])),
+            Err(ProtocolError::Decode(_))
+        ));
     }
 }

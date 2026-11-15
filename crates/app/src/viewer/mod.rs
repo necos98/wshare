@@ -41,7 +41,8 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use winit::event_loop::{DeviceEvents, EventLoop, EventLoopProxy};
 
-use crate::cli::{DEFAULT_PORT, ViewOptions};
+use crate::cli::ViewOptions;
+use crate::options::DEFAULT_PORT;
 use crate::target::{self, Resolved, parse_target};
 use failure::ConnectFailure;
 use pairing::Pairing;

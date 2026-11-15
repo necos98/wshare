@@ -3,9 +3,8 @@
 
 use net::Fingerprint;
 
-use crate::cli::{DEFAULT_PORT, HostOptions, StreamOptions};
+use crate::options::{DEFAULT_PORT, HostOptions, StreamOptions};
 use crate::target::{Target, parse_target};
-use crate::trust;
 
 use super::model::{GuiState, ViewerId, ViewerSession, ViewerStatus, ViewerUpdate};
 use super::ports::{
@@ -263,7 +262,7 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore> Controller<S, L, 
                     target,
                     // Announced on the LAN, so possibly malformed: the
                     // viewer would refuse such an id.
-                    host_id: trust::is_host_id(&row.id).then_some(row.id),
+                    host_id: Fingerprint::is_host_id(&row.id).then_some(row.id),
                     pin,
                 };
                 self.launch(row.name, request);

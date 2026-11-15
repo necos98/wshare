@@ -4,10 +4,11 @@
 use std::net::SocketAddr;
 
 use discovery::{DiscoveredHost, DiscoveryEvent, HostList};
+use net::Fingerprint;
 use protocol::control::PROTOCOL_VERSION;
 
 use crate::host::HostEvent;
-use crate::trust::{AuthorizedDevice, HOST_ID_LEN};
+use crate::trust::AuthorizedDevice;
 use crate::viewer::failure::FailureKind;
 
 use super::remembered::RememberedHosts;
@@ -109,7 +110,7 @@ impl Sharing {
             } => {
                 self.listening = true;
                 self.pin = Some(pin);
-                return Some(fingerprint.chars().take(HOST_ID_LEN).collect());
+                return Some(Fingerprint::host_id_of_hex(&fingerprint));
             }
             HostEvent::PinChanged { pin } => self.pin = Some(pin),
             HostEvent::AuthorizedDevices(devices) => self.authorized = devices,
@@ -380,7 +381,6 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::gui::remembered::tests::known;
-    use crate::trust::host_id;
 
     pub fn listening(pin: &str, fingerprint: &str) -> HostEvent {
         HostEvent::Listening {
@@ -637,7 +637,7 @@ pub(crate) mod tests {
     /// The listed host `UFFICIO`, remembered, with a viewer opening on it.
     fn remembered_office() -> (GuiState, String) {
         let office = known(0xab, "UFFICIO");
-        let id = host_id(&office.fingerprint);
+        let id = office.fingerprint.host_id();
         let mut state = GuiState::default();
         state.apply_discovery(found(&id, "UFFICIO", "192.168.1.3", PROTOCOL_VERSION));
         state.remembered.set(vec![office], None);

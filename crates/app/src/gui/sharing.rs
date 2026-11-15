@@ -5,7 +5,7 @@ use std::thread::{self, JoinHandle};
 use anyhow::Result;
 use net::Fingerprint;
 
-use crate::cli::HostOptions;
+use crate::options::HostOptions;
 use crate::host::{HostEvent, HostHandle, HostObserver};
 
 use super::ports::{AppEvent, Inbox, PendingStop, SharingControl, SharingService};

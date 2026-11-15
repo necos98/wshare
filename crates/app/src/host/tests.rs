@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use super::events::recording::{next, recorder};
 use super::{HostEvent, HostHandle};
-use crate::cli::{HostOptions, StreamOptions};
+use crate::options::{HostOptions, StreamOptions};
 
 const WAIT: Duration = Duration::from_secs(10);
 

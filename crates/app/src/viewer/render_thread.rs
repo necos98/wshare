@@ -7,7 +7,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
 use codec::{HwDecoder, MediaFoundation};
 use gpu::Gpu;
@@ -58,7 +58,7 @@ impl RenderThread {
         width: u32,
         height: u32,
         on_exit: impl FnOnce(&Result<ViewerStats>) + Send + 'static,
-    ) -> Self {
+    ) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let size = Arc::new(AtomicU64::new(pack(width, height)));
         let stats_visible = Arc::new(AtomicBool::new(false));
@@ -85,15 +85,15 @@ impl RenderThread {
                     }
                     result
                 })
-                .expect("spawning the render thread")
+                .context("spawning the render thread")?
         };
-        Self {
+        Ok(Self {
             stop,
             size,
             stats_visible,
             toolbar,
             thread: Some(thread),
-        }
+        })
     }
 
     /// Shows or hides the statistics overlay; returns the new state.

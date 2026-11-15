@@ -52,7 +52,6 @@ pub(crate) mod tests {
     use net::Fingerprint;
 
     use super::*;
-    use crate::trust::host_id;
 
     pub(crate) fn known(byte: u8, name: &str) -> KnownHost {
         KnownHost {
@@ -64,7 +63,7 @@ pub(crate) mod tests {
     #[test]
     fn known_hosts_are_remembered_until_they_ask_for_the_pin() {
         let office = known(0xab, "UFFICIO");
-        let id = host_id(&office.fingerprint);
+        let id = office.fingerprint.host_id();
         let mut hosts = RememberedHosts::default();
         assert!(!hosts.is_remembered(&id));
         hosts.set(vec![office.clone()], None);

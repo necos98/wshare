@@ -10,7 +10,7 @@ use anyhow::Result;
 use discovery::DiscoveryEvent;
 use net::Fingerprint;
 
-use crate::cli::HostOptions;
+use crate::options::HostOptions;
 use crate::host::HostEvent;
 use crate::trust::KnownHost;
 

@@ -2,42 +2,10 @@
 
 use anyhow::{Context, Result, bail};
 use codec::Codec;
+use net::Fingerprint;
 
-use crate::trust;
+use crate::options::{DEFAULT_PORT, HostOptions, StreamOptions};
 
-pub const DEFAULT_PORT: u16 = 7420;
-
-/// Encoding settings shared by `host` and `bench`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StreamOptions {
-    pub monitor: usize,
-    pub fps: u32,
-    pub mbps: u32,
-    pub codec: Codec,
-}
-
-impl StreamOptions {
-    pub fn encoder_config(&self, width: u32, height: u32) -> codec::EncoderConfig {
-        codec::EncoderConfig {
-            codec: self.codec,
-            width,
-            height,
-            fps: self.fps,
-            bitrate_bps: self.mbps.saturating_mul(1_000_000),
-        }
-    }
-}
-
-impl Default for StreamOptions {
-    fn default() -> Self {
-        Self {
-            monitor: 0,
-            fps: 60,
-            mbps: 20,
-            codec: Codec::H264,
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BenchOptions {
@@ -47,21 +15,11 @@ pub struct BenchOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HostOptions {
-    pub stream: StreamOptions,
-    pub port: u16,
-    /// Fixed PIN; a random one is generated when absent.
-    pub pin: Option<String>,
-    /// Refuse remote mouse/keyboard: viewers can only watch.
-    pub view_only: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewOptions {
     /// Address, address:port, or (part of) a host name. `None`: discover.
     pub target: Option<String>,
     pub pin: Option<String>,
-    /// LAN id of the host at `target` (see `trust::host_id`), so a host
+    /// LAN id of the host at `target` (see `Fingerprint::host_id`), so a host
     /// remembered under that id is pinned and connected to without a PIN.
     /// Hosts found by name get it from discovery.
     pub host_id: Option<String>,
@@ -228,10 +186,10 @@ fn parse_view(args: &[String]) -> Result<ViewOptions> {
 }
 
 fn host_id(value: &str) -> Result<String> {
-    if !trust::is_host_id(value) {
+    if !Fingerprint::is_host_id(value) {
         bail!(
             "--host-id must be {} hex digits (the start of the host fingerprint)",
-            trust::HOST_ID_LEN
+            net::identity::HOST_ID_LEN
         );
     }
     Ok(value.to_ascii_lowercase())

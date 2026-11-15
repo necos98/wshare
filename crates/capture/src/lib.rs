@@ -13,7 +13,7 @@ pub mod pointer;
 use anyhow::{Context, Result, bail};
 pub use gpu::Gpu;
 use gpu::wide_to_string;
-pub use pointer::{PointerChanges, PointerImage};
+pub use pointer::{MAX_POINTER_SIDE, PointerChanges, PointerImage};
 use pointer::{PointerTracker, RawPointerShape, ShapeKind};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC,

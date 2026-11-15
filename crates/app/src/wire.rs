@@ -6,6 +6,11 @@ use codec::Codec;
 use protocol::control::{ControlMessage, VideoCodec};
 use protocol::input::CursorShape;
 
+// The capture side clips pointer shapes to `MAX_POINTER_SIDE`; the wire
+// accepts shapes up to `MAX_CURSOR_SIDE`. They are separate crates, so the
+// two limits are tied together here.
+const _: () = assert!(capture::MAX_POINTER_SIDE == protocol::input::MAX_CURSOR_SIDE as u32);
+
 pub fn to_wire(codec: Codec) -> VideoCodec {
     match codec {
         Codec::H264 => VideoCodec::H264,

@@ -183,6 +183,19 @@ mod tests {
     }
 
     #[test]
+    fn a_protocol_3_hello_that_decodes_is_refused_for_its_version() {
+        // Protocol 3 sent the PIN as a plain string; an empty one decodes
+        // as "no PIN" today. It must be refused for its version, not asked
+        // for a PIN it could not understand.
+        for trust in [ViewerTrust::Authorized, ViewerTrust::Unknown] {
+            assert_eq!(
+                check(&hello(3, None), trust),
+                rejected(unsupported_version())
+            );
+        }
+    }
+
+    #[test]
     fn other_first_messages_are_rejected() {
         assert_eq!(
             check(&ControlMessage::RequestKeyframe, ViewerTrust::Authorized),

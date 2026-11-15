@@ -37,7 +37,7 @@ use net::Fingerprint;
 use pipeline::HostStats;
 use protocol::control::RejectReason;
 
-use crate::cli::HostOptions;
+use crate::options::HostOptions;
 use crate::trust::AuthorizedDevice;
 
 /// Something that happened while sharing. Front-ends render these; the

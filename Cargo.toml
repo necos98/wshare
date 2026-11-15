@@ -34,5 +34,4 @@ input = { path = "crates/input" }
 [profile.release]
 lto = "thin"
 codegen-units = 1
-panic = "abort"
 strip = true

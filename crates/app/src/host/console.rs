@@ -6,7 +6,7 @@ use std::sync::mpsc::{Sender, channel};
 use anyhow::{Result, anyhow};
 
 use super::{HostEvent, HostHandle, HostObserver, interrupt};
-use crate::cli::HostOptions;
+use crate::options::HostOptions;
 
 /// Where a printed line goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -29,7 +29,7 @@ use super::input_gate::InputGate;
 use super::input_switch::InputSwitch;
 use super::state::{Cancelled, SharedState};
 use super::streaming::{StreamEnd, StreamingThread};
-use crate::cli::StreamOptions;
+use crate::options::StreamOptions;
 use crate::handshake::{HelloVerdict, ViewerTrust, check_hello, unsupported_version};
 
 /// How long a connected viewer has to send Hello.
@@ -131,9 +131,9 @@ async fn admit(
     };
     let verdict = match hello {
         Err(_) => return refused("viewer sent no Hello"),
-        // A Hello of another protocol version does not decode: tell the
+        // A Hello of another protocol version may not decode: tell the
         // viewer so (older viewers can read the answer).
-        Ok(Err(e)) if is_undecodable(&e) => HelloVerdict::Reject {
+        Ok(Err(e)) if is_incompatible_hello(&e) => HelloVerdict::Reject {
             reason: unsupported_version(),
         },
         Ok(Err(e)) => return refused(&format!("{e:#}")),
@@ -153,8 +153,11 @@ async fn admit(
     }
 }
 
-fn is_undecodable(error: &anyhow::Error) -> bool {
-    matches!(error.downcast_ref(), Some(ProtocolError::Decode(_)))
+fn is_incompatible_hello(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref(),
+        Some(ProtocolError::IncompatibleHello(_))
+    )
 }
 
 /// Sends our last message of a refused session (best effort: the viewer

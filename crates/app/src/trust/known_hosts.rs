@@ -27,7 +27,7 @@ pub struct KnownHost {
 impl KnownHost {
     /// Whether this is the host announcing itself as `id` on the LAN.
     pub fn matches_id(&self, id: &str) -> bool {
-        super::is_host_id(id) && super::host_id(&self.fingerprint).eq_ignore_ascii_case(id)
+        Fingerprint::is_host_id(id) && self.fingerprint.host_id().eq_ignore_ascii_case(id)
     }
 }
 
@@ -124,13 +124,13 @@ mod tests {
         hosts.remember(office, "UFFICIO").unwrap();
 
         let (reloaded, _) = KnownHosts::load(path);
-        let id = crate::trust::host_id(&office);
+        let id = office.host_id();
         let found = reloaded.find_by_id(&id).expect("known");
         assert_eq!(found.name, "UFFICIO");
         assert!(reloaded.find_by_id(&id.to_uppercase()).is_some());
         assert!(
             reloaded
-                .find_by_id(&crate::trust::host_id(&fingerprint()))
+                .find_by_id(&fingerprint().host_id())
                 .is_none()
         );
         assert!(

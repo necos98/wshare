@@ -129,10 +129,16 @@ impl<B: InputBackend, M: DesktopMetrics> RemoteInput<B, M> {
         if !pressed {
             return self.release(item);
         }
-        if !self.pressed.press(item) {
+        if self.pressed.is_held(item) {
             return Ok(Outcome::Ignored(Ignored::AlreadyHeld));
         }
-        self.send(&[SyntheticInput::button(button, true)])
+        // Recorded only once the press is in: a button that never went down
+        // must not be "released" later.
+        let outcome = self.send(&[SyntheticInput::button(button, true)])?;
+        if outcome == Outcome::Injected {
+            self.pressed.press(item);
+        }
+        Ok(outcome)
     }
 
     fn wheel(&mut self, delta_x: i32, delta_y: i32) -> Result<Outcome> {
@@ -377,6 +383,35 @@ mod tests {
         assert!(
             matches!(sent[1], SyntheticInput::Mouse { flags, .. } if flags == MOUSEEVENTF_LEFTUP)
         );
+    }
+
+    #[test]
+    fn blocked_button_press_is_not_recorded_as_held() {
+        let (mut r, rec) = remote(PRIMARY, PRIMARY);
+        rec.block(Some(0));
+        assert_eq!(
+            r.handle(&btn(Left, true)).unwrap(),
+            Outcome::Blocked { first: true }
+        );
+        rec.block(None);
+        // Never went down: nothing to release, and a new press is accepted.
+        assert_eq!(
+            r.handle(&btn(Left, false)).unwrap(),
+            Outcome::Ignored(Ignored::NotHeld)
+        );
+        assert_eq!(r.handle(&btn(Left, true)).unwrap(), Outcome::Injected);
+        drop(r);
+        let sent = rec.take();
+        assert_eq!(sent.len(), 2, "press, then release on drop");
+    }
+
+    #[test]
+    fn failed_button_press_is_not_recorded_as_held() {
+        let (mut r, rec) = remote(PRIMARY, PRIMARY);
+        *rec.fail.borrow_mut() = true;
+        assert!(r.handle(&btn(Left, true)).is_err());
+        *rec.fail.borrow_mut() = false;
+        assert_eq!(r.handle(&btn(Left, true)).unwrap(), Outcome::Injected);
     }
 
     #[test]

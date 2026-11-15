@@ -25,10 +25,10 @@ use super::devices::Devices;
 use super::events::EventSink;
 use super::session::SessionContext;
 use super::state::SharedState;
-use crate::cli::HostOptions;
+use crate::options::HostOptions;
 use crate::handshake::generate_pin;
 use crate::paths;
-use crate::trust::{AuthorizedDevices, host_id};
+use crate::trust::AuthorizedDevices;
 
 /// Networking is light (one viewer, a control stream); the heavy work runs
 /// on the streaming thread, so a small runtime is enough.
@@ -254,7 +254,7 @@ impl Host {
         let port = endpoint.local_addr()?.port();
         let fingerprint = identity.fingerprint();
         let announcement = HostAnnouncement {
-            id: host_id(&fingerprint),
+            id: fingerprint.host_id(),
             display_name: name.clone(),
             port,
             protocol_version: PROTOCOL_VERSION,

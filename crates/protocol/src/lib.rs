@@ -20,6 +20,11 @@ pub enum ProtocolError {
     Malformed(&'static str),
     #[error("control message too large ({0} bytes)")]
     TooLarge(usize),
+    /// A `Hello` this build cannot decode because its sender speaks another
+    /// protocol version (the version is read from the part of `Hello` that
+    /// never changes).
+    #[error("Hello of protocol version {0} cannot be decoded")]
+    IncompatibleHello(u16),
     #[error("cannot decode control message: {0}")]
     Decode(String),
 }

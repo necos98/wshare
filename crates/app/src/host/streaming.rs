@@ -17,7 +17,7 @@ use protocol::control::{ControlMessage, StreamInfo};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
-use crate::cli::StreamOptions;
+use crate::options::StreamOptions;
 use crate::wire::{pointer_messages, to_wire};
 
 /// What the streaming thread did; `error` is why it stopped early, if so.

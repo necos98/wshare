@@ -15,6 +15,7 @@
 //!   host -> viewer  InputAllowed(bool)      (remote control switched mid-session)
 //!   viewer -> host  ReceptionReport(report) (every RECEPTION_REPORT_INTERVAL)
 //!   host -> viewer  TargetBitrate { bps }   (the encoder's rate changed)
+//!   viewer -> host  Nack(nack)              (video datagrams to send again)
 //!   either          Bye
 //!
 //! Compatibility: peers of different protocol versions must still understand
@@ -33,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use crate::ProtocolError;
 use crate::feedback::ReceptionReport;
 use crate::input::{CursorShape, InputEvent};
+use crate::recovery::Nack;
 
 /// 2: remote control (Input, Cursor, CursorVisible; Welcome.input_allowed).
 /// 3: InputAllowed; StreamInfo.encoder.
@@ -42,7 +44,9 @@ use crate::input::{CursorShape, InputEvent};
 ///    a viewer that does not know them shows their text as `Other`.
 /// 5: ReceptionReport (viewer) and TargetBitrate (host): the host adapts
 ///    the encoder's bitrate to the network.
-pub const PROTOCOL_VERSION: u16 = 5;
+/// 6: Nack (viewer): lost video datagrams are sent again instead of
+///    waiting for a keyframe.
+pub const PROTOCOL_VERSION: u16 = 6;
 
 /// Upper bound for one control message; protects against garbage lengths.
 /// Sized for the largest cursor image (256x256 RGBA = 256 KiB) plus margin.
@@ -189,6 +193,9 @@ pub enum ControlMessage {
     TargetBitrate {
         bps: u32,
     },
+    /// Video datagrams the viewer missed: the host sends them again while
+    /// it still has them (see [`crate::recovery`]).
+    Nack(Nack),
 }
 
 /// Serializes `msg` as one length-prefixed frame.
@@ -293,6 +300,7 @@ fn decode_exact(payload: &[u8]) -> Result<ControlMessage, ProtocolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recovery::Missing;
 
     fn samples() -> Vec<ControlMessage> {
         vec![
@@ -339,6 +347,14 @@ mod tests {
                 frames_late: 70_000,
             }),
             ControlMessage::TargetBitrate { bps: 20_000_000 },
+            ControlMessage::Nack(Nack {
+                frame_id: 300,
+                missing: Missing::Packets(vec![1, 2]),
+            }),
+            ControlMessage::Nack(Nack {
+                frame_id: 7,
+                missing: Missing::Whole,
+            }),
             ControlMessage::Rejected {
                 reason: RejectReason::PinRequired,
             },
@@ -611,6 +627,30 @@ mod tests {
             9
         );
         assert_eq!(index(ControlMessage::TargetBitrate { bps: 0 }), 10);
+        assert_eq!(
+            index(ControlMessage::Nack(Nack {
+                frame_id: 0,
+                missing: Missing::Whole
+            })),
+            11
+        );
+    }
+
+    #[test]
+    fn nack_layout_is_stable() {
+        // Variant 11, the frame id as a varint (300 = 0xAC 0x02), then the
+        // `Missing` variant: 0 = whole frame, 1 = a list (length, indices
+        // as varints: 200 = 0xC8 0x01).
+        let packets = encode_frame(&ControlMessage::Nack(Nack {
+            frame_id: 300,
+            missing: Missing::Packets(vec![1, 200]),
+        }));
+        assert_eq!(packets, frame_of(&[11, 0xAC, 0x02, 1, 2, 1, 0xC8, 0x01]));
+        let whole = encode_frame(&ControlMessage::Nack(Nack {
+            frame_id: 7,
+            missing: Missing::Whole,
+        }));
+        assert_eq!(whole, frame_of(&[11, 7, 0]));
     }
 
     #[test]

@@ -6,9 +6,12 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use protocol::recovery::{Missing, Nack};
 use protocol::video::{HEADER_LEN, ReassembledFrame, Reassembler, ReassemblyEvent};
 
 use super::*;
+use crate::burst::BURST_BYTES;
+use crate::keyframe_gate::MIN_FORCED_KEYFRAME_INTERVAL;
 
 /// Scripted screen: each queued image is one "change".
 #[derive(Default)]
@@ -118,6 +121,8 @@ struct FakeSink {
     max_size: Rc<RefCell<usize>>,
     sent: Rc<RefCell<Vec<Bytes>>>,
     backlog: Rc<Cell<usize>>,
+    /// When each datagram of `sent` was sent.
+    sent_at: Rc<RefCell<Vec<Instant>>>,
 }
 
 impl DatagramSink for FakeSink {
@@ -128,6 +133,7 @@ impl DatagramSink for FakeSink {
     fn send(&self, datagram: Bytes) -> Result<()> {
         self.backlog.set(self.backlog.get() + datagram.len());
         self.sent.borrow_mut().push(datagram);
+        self.sent_at.borrow_mut().push(Instant::now());
         Ok(())
     }
 
@@ -142,6 +148,9 @@ struct Harness {
     max_size: Rc<RefCell<usize>>,
     sent: Rc<RefCell<Vec<Bytes>>>,
     backlog: Rc<Cell<usize>>,
+    /// When each datagram of `sent` was sent.
+    sent_at: Rc<RefCell<Vec<Instant>>>,
+    recent: RecentFrames,
     streamer: HostStreamer<FakeSource, FakeEncoder, FakeSink>,
 }
 
@@ -168,6 +177,8 @@ fn harness(initial: &[u8], capacity: usize) -> Harness {
     let max_size = Rc::new(RefCell::new(HEADER_LEN + 4));
     let sent = Rc::new(RefCell::new(Vec::new()));
     let backlog = Rc::new(Cell::new(0));
+    let sent_at = Rc::new(RefCell::new(Vec::new()));
+    let recent = RecentFrames::new();
     let streamer = HostStreamer::new(
         FakeSource(source.clone()),
         FakeEncoder(encoder.clone()),
@@ -175,9 +186,11 @@ fn harness(initial: &[u8], capacity: usize) -> Harness {
             max_size: max_size.clone(),
             sent: sent.clone(),
             backlog: backlog.clone(),
+            sent_at: sent_at.clone(),
         },
         FPS,
         BITRATE,
+        recent.clone(),
     );
     Harness {
         source,
@@ -185,6 +198,8 @@ fn harness(initial: &[u8], capacity: usize) -> Harness {
         max_size,
         sent,
         backlog,
+        sent_at,
+        recent,
         streamer,
     }
 }
@@ -333,12 +348,81 @@ fn static_screen_submits_nothing_and_waits_a_full_interval() {
 fn keyframe_request_on_static_screen_produces_keyframe() {
     let mut h = harness(b"still", 1);
     h.step_until(|h| h.streamer.stats().frames_sent == 1);
+    // Past the merge window of the first keyframe.
+    std::thread::sleep(MIN_FORCED_KEYFRAME_INTERVAL);
     h.streamer.request_keyframe().unwrap();
     h.step_until(|h| h.streamer.stats().frames_sent == 2);
     assert_eq!(h.streamer.stats().keyframes_sent, 2);
+    assert_eq!(h.streamer.stats().keyframe_requests_merged, 0);
     let frames = h.reassemble();
     assert!(frames[1].keyframe);
     assert_eq!(frames[1].data[..], *b"still");
+}
+
+#[test]
+fn keyframe_requests_while_one_is_on_its_way_are_merged() {
+    let mut h = harness(b"start", 1);
+    h.step_until(|h| h.streamer.stats().frames_sent == 1);
+    // The viewer asked before the first keyframe reached it: ignored.
+    h.streamer.request_keyframe().unwrap();
+    assert!(!h.encoder.borrow().force_keyframe);
+    std::thread::sleep(MIN_FORCED_KEYFRAME_INTERVAL);
+    // Three requests in a row (e.g. a burst of losses): one keyframe.
+    for _ in 0..3 {
+        h.streamer.request_keyframe().unwrap();
+    }
+    h.step_until(|h| h.streamer.stats().frames_sent == 2);
+    h.change_and_submit(b"next");
+    h.step_until(|h| h.streamer.stats().frames_sent == 3);
+    let stats = h.streamer.stats();
+    assert_eq!(stats.keyframes_sent, 2);
+    assert_eq!(stats.keyframe_requests_merged, 3);
+    let keyframes: Vec<bool> = h.reassemble().iter().map(|f| f.keyframe).collect();
+    assert_eq!(keyframes, [true, true, false]);
+}
+
+#[test]
+fn sent_frames_can_be_resent_from_the_shared_buffer() {
+    let mut h = harness(b"12345678", 1);
+    h.step_until(|h| h.streamer.stats().frames_sent == 1);
+    let sent = h.sent.borrow().clone();
+    assert_eq!(sent.len(), 2);
+    let nack = Nack {
+        frame_id: 0,
+        missing: Missing::Packets(vec![1]),
+    };
+    let resent = h.recent.resend(&nack, &h.streamer.sink, Instant::now());
+    assert_eq!(resent.unwrap(), 1);
+    assert_eq!(h.sent.borrow()[2], sent[1], "the very same datagram");
+    // The viewer reassembles the frame from the original and the resend.
+    let mut r = Reassembler::new(8);
+    r.push(sent[0].clone()).unwrap();
+    let events = r.push(h.sent.borrow()[2].clone()).unwrap();
+    assert!(matches!(&events[..], [ReassemblyEvent::Frame(f)] if f.data[..] == *b"12345678"));
+}
+
+#[test]
+fn a_large_frame_leaves_in_bursts_and_a_small_one_at_once() {
+    let mut h = harness(&vec![7; 3 * BURST_BYTES], 1);
+    *h.max_size.borrow_mut() = HEADER_LEN + 1000;
+    h.step_until(|h| h.streamer.stats().frames_sent == 1);
+    let pauses = |h: &Harness| {
+        let times = h.sent_at.borrow();
+        times
+            .windows(2)
+            .filter(|pair| pair[1] - pair[0] >= BURST_GAP)
+            .count()
+    };
+    assert!(pauses(&h) >= 2, "{} pauses", pauses(&h));
+    let datagrams = h.sent.borrow().len();
+    assert_eq!(h.streamer.stats().datagrams_sent, datagrams as u64);
+    assert_eq!(h.reassemble()[0].data.len(), 3 * BURST_BYTES);
+    // An ordinary frame afterwards goes out without a pause.
+    h.sent_at.borrow_mut().clear();
+    h.backlog.set(0);
+    h.change_and_submit(&[1; 4000]);
+    h.step_until(|h| h.streamer.stats().frames_sent == 2);
+    assert_eq!(pauses(&h), 0);
 }
 
 #[test]

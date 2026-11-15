@@ -22,10 +22,9 @@ pub(super) fn configure_low_latency(api: &ICodecAPI, config: &EncoderConfig) {
     // No B-frames: each one adds a frame of delay (and the decoder relies on
     // output order == input order to emit pictures immediately).
     set(&CODECAPI_AVEncMPVDefaultBPictureCount, variant_u32(0));
-    // Rare periodic keyframes; the client asks for one when it needs it.
     set(
         &CODECAPI_AVEncMPVGOPSize,
-        variant_u32(config.fps.saturating_mul(10)),
+        variant_u32(gop_frames(config.fps)),
     );
     set(&CODECAPI_AVEncCommonQualityVsSpeed, variant_u32(50));
 }
@@ -51,6 +50,21 @@ pub(super) fn force_keyframe(api: &ICodecAPI) -> windows::core::Result<()> {
     unsafe { api.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &variant_u32(1)) }
 }
 
+/// Time between two keyframes the encoder inserts on its own. Lost video is
+/// recovered by resending datagrams, and the viewer asks for a keyframe
+/// when that fails, so periodic keyframes are no longer how the picture
+/// heals: each one is a burst of several frames' worth of data, a regular
+/// spike of latency and loss. One a minute remains as a safety net against
+/// damage the viewer cannot notice (a frame decoded from a corrupt
+/// reference), rare enough to cost nothing. Not 0: drivers read it
+/// differently (no periodic keyframe, or a default of their own).
+const GOP_SECONDS: u32 = 60;
+
+/// GOP length in frames for `fps`.
+fn gop_frames(fps: u32) -> u32 {
+    fps.saturating_mul(GOP_SECONDS)
+}
+
 /// Rate-control buffer: four frames' worth of bits.
 fn vbv_buffer_bits(bitrate_bps: u32, fps: u32) -> u32 {
     (bitrate_bps / fps.max(1)).saturating_mul(4)
@@ -68,6 +82,12 @@ mod tests {
     #[test]
     fn vbv_buffer_follows_the_rate() {
         assert_eq!(vbv_buffer_bits(1_500_000, 60), 1_500_000 / 60 * 4);
+    }
+
+    #[test]
+    fn periodic_keyframes_come_once_a_minute() {
+        assert_eq!(gop_frames(60), 3600);
+        assert_eq!(gop_frames(u32::MAX), u32::MAX);
     }
 
     #[test]

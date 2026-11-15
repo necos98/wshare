@@ -13,11 +13,18 @@
 //! | 10  | 8    | timestamp in 100 ns units (i64)        |
 //!
 //! Frame ids are u32 and never wrap in practice (2+ years at 60 fps).
+//!
+//! A datagram sent again after a [`crate::recovery::Nack`] is a byte-for-byte
+//! copy of the original: the [`Reassembler`] treats it like any late
+//! datagram, so retransmission needs nothing in this format.
 
-use std::collections::{BTreeMap, BTreeSet};
+mod reassembly;
+
 use std::time::{Duration, Instant};
 
 use bytes::{BufMut, Bytes, BytesMut};
+
+pub use reassembly::{Gap, Reassembler, ReassemblyEvent};
 
 use crate::ProtocolError;
 
@@ -109,6 +116,11 @@ impl Packetizer {
         Self { next_frame_id: 0 }
     }
 
+    /// The id the next successfully packetized frame gets.
+    pub fn next_frame_id(&self) -> u32 {
+        self.next_frame_id
+    }
+
     /// Splits one frame into datagrams no larger than `max_datagram_size`
     /// (header included), assigning the next frame id. Panics if
     /// `max_datagram_size <= HEADER_LEN`. An empty frame still yields one
@@ -163,200 +175,6 @@ impl Default for Packetizer {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReassemblyEvent {
-    /// A complete frame that is safe to decode.
-    Frame(ReassembledFrame),
-    /// The frame with this id will never be complete.
-    Lost { frame_id: u32 },
-    /// A complete frame that was discarded because a frame it depends on
-    /// was lost and no keyframe has arrived since.
-    Skipped { frame_id: u32 },
-}
-
-/// One frame whose packets are still arriving.
-struct PendingFrame {
-    keyframe: bool,
-    timestamp: i64,
-    /// Payloads, as slices of the received datagrams (no copy).
-    packets: Vec<Option<Bytes>>,
-    received: usize,
-}
-
-impl PendingFrame {
-    fn new(header: &PacketHeader) -> Self {
-        Self {
-            keyframe: header.keyframe,
-            timestamp: header.timestamp,
-            packets: vec![None; usize::from(header.packet_count)],
-            received: 0,
-        }
-    }
-
-    /// Stores a packet; returns false for duplicates or count mismatches.
-    fn insert(&mut self, header: &PacketHeader, payload: Bytes) -> bool {
-        if usize::from(header.packet_count) != self.packets.len() {
-            return false;
-        }
-        let slot = &mut self.packets[usize::from(header.packet_index)];
-        if slot.is_some() {
-            return false;
-        }
-        *slot = Some(payload);
-        self.received += 1;
-        true
-    }
-
-    fn is_complete(&self) -> bool {
-        self.received == self.packets.len()
-    }
-
-    /// Joins the payloads: a single-packet frame is handed over as is, a
-    /// larger one is copied once into a buffer of the exact size.
-    fn into_frame(self, frame_id: u32) -> ReassembledFrame {
-        let mut payloads: Vec<Bytes> = self.packets.into_iter().flatten().collect();
-        let data = if payloads.len() == 1 {
-            payloads.swap_remove(0)
-        } else {
-            let mut joined = BytesMut::with_capacity(payloads.iter().map(Bytes::len).sum());
-            for payload in &payloads {
-                joined.put_slice(payload);
-            }
-            joined.freeze()
-        };
-        ReassembledFrame {
-            frame_id,
-            timestamp: self.timestamp,
-            keyframe: self.keyframe,
-            data,
-        }
-    }
-}
-/// Rebuilds frames from datagrams, optimising for latency over completeness.
-///
-/// Policy:
-/// - Frames are emitted in frame-id order; datagrams may arrive out of order.
-/// - When a frame completes while older frames are still incomplete, those
-///   older frames are declared `Lost` (in LAN, reordering across frames is
-///   rare; waiting would only add latency).
-/// - At most `max_pending` incomplete frames are kept; when exceeded, the
-///   oldest is declared `Lost`.
-/// - Datagrams for frames older than the last emitted/lost one, duplicates
-///   and inconsistent packets (index >= count, count mismatch) are ignored.
-/// - It starts "awaiting keyframe" and enters that state again after any
-///   loss: until a keyframe completes, complete non-keyframes are reported
-///   as `Skipped` instead of `Frame`.
-///
-/// Additionally, once a frame has been emitted/lost, frame ids that are
-/// skipped entirely (every packet dropped) are also reported as `Lost` when a
-/// later frame resolves, because ids are contiguous. At most
-/// [`MAX_REPORTED_GAP`] such never-seen ids are reported per gap. `max_pending`
-/// values below 1 are treated as 1.
-pub struct Reassembler {
-    max_pending: usize,
-    pending: BTreeMap<u32, PendingFrame>,
-    /// Highest frame id that was emitted, skipped or declared lost.
-    last_resolved: Option<u32>,
-    awaiting_keyframe: bool,
-}
-
-impl Reassembler {
-    pub fn new(max_pending: usize) -> Self {
-        Self {
-            max_pending: max_pending.max(1),
-            pending: BTreeMap::new(),
-            last_resolved: None,
-            awaiting_keyframe: true,
-        }
-    }
-
-    /// Processes one datagram. Malformed datagrams return an error and leave
-    /// the state unchanged.
-    pub fn push(
-        &mut self,
-        datagram: impl Into<Bytes>,
-    ) -> Result<Vec<ReassemblyEvent>, ProtocolError> {
-        let datagram = datagram.into();
-        let (header, _) = PacketHeader::parse(&datagram)?;
-        let payload = datagram.slice(HEADER_LEN..);
-        let mut events = Vec::new();
-        if self.is_resolved(header.frame_id) || header.packet_index >= header.packet_count {
-            return Ok(events);
-        }
-
-        let frame_id = header.frame_id;
-        let frame = self
-            .pending
-            .entry(frame_id)
-            .or_insert_with(|| PendingFrame::new(&header));
-        if !frame.insert(&header, payload) {
-            return Ok(events);
-        }
-
-        if frame.is_complete() {
-            let frame = self.pending.remove(&frame_id).expect("frame is pending");
-            self.resolve_older_than(frame_id, &mut events);
-            events.push(self.classify(frame.into_frame(frame_id)));
-            self.last_resolved = Some(frame_id);
-        } else if self.pending.len() > self.max_pending {
-            let (&oldest, _) = self
-                .pending
-                .first_key_value()
-                .expect("pending is not empty");
-            self.resolve_older_than(oldest, &mut events);
-            self.pending.remove(&oldest);
-            self.declare_lost(oldest, &mut events);
-            self.last_resolved = Some(oldest);
-        }
-        Ok(events)
-    }
-
-    /// True until a keyframe completes, and again after any loss.
-    pub fn awaiting_keyframe(&self) -> bool {
-        self.awaiting_keyframe
-    }
-
-    fn is_resolved(&self, frame_id: u32) -> bool {
-        self.last_resolved.is_some_and(|last| frame_id <= last)
-    }
-
-    /// Declares every unresolved frame id below `frame_id` lost: incomplete
-    /// pending frames and (bounded) ids that were never seen at all.
-    fn resolve_older_than(&mut self, frame_id: u32, events: &mut Vec<ReassemblyEvent>) {
-        let still_pending = self.pending.split_off(&frame_id);
-        let mut lost: BTreeSet<u32> = std::mem::replace(&mut self.pending, still_pending)
-            .into_keys()
-            .collect();
-        if let Some(last) = self.last_resolved {
-            let first_gap = last + 1;
-            let gap_end = frame_id.min(first_gap.saturating_add(MAX_REPORTED_GAP));
-            lost.extend(first_gap..gap_end);
-        }
-        for id in lost {
-            self.declare_lost(id, events);
-        }
-    }
-
-    fn declare_lost(&mut self, frame_id: u32, events: &mut Vec<ReassemblyEvent>) {
-        self.awaiting_keyframe = true;
-        events.push(ReassemblyEvent::Lost { frame_id });
-    }
-
-    /// Applies the keyframe dependency rule to a complete frame.
-    fn classify(&mut self, frame: ReassembledFrame) -> ReassemblyEvent {
-        if frame.keyframe {
-            self.awaiting_keyframe = false;
-        }
-        if self.awaiting_keyframe {
-            ReassemblyEvent::Skipped {
-                frame_id: frame.frame_id,
-            }
-        } else {
-            ReassemblyEvent::Frame(frame)
-        }
-    }
-}
-
 /// Rate-limits keyframe requests so a burst of losses yields one request,
 /// while a request that got lost/ignored is retried after `min_interval`.
 pub struct KeyframeRequester {
@@ -389,7 +207,7 @@ impl KeyframeRequester {
 mod tests {
     use super::*;
 
-    fn header(frame_id: u32, index: u16, count: u16, keyframe: bool) -> PacketHeader {
+    pub(super) fn header(frame_id: u32, index: u16, count: u16, keyframe: bool) -> PacketHeader {
         PacketHeader {
             keyframe,
             frame_id,
@@ -399,7 +217,7 @@ mod tests {
         }
     }
 
-    fn datagram(h: PacketHeader, payload: &[u8]) -> Vec<u8> {
+    pub(super) fn datagram(h: PacketHeader, payload: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         h.write(&mut out);
         out.extend_from_slice(payload);
@@ -407,31 +225,8 @@ mod tests {
     }
 
     /// Single-packet frame datagram with payload `[frame_id as u8]`.
-    fn single(frame_id: u32, keyframe: bool) -> Vec<u8> {
+    pub(super) fn single(frame_id: u32, keyframe: bool) -> Vec<u8> {
         datagram(header(frame_id, 0, 1, keyframe), &[frame_id as u8])
-    }
-
-    fn frame_event(frame_id: u32, keyframe: bool, data: &[u8]) -> ReassemblyEvent {
-        ReassemblyEvent::Frame(ReassembledFrame {
-            frame_id,
-            timestamp: 7,
-            keyframe,
-            data: Bytes::copy_from_slice(data),
-        })
-    }
-
-    fn lost(frame_id: u32) -> ReassemblyEvent {
-        ReassemblyEvent::Lost { frame_id }
-    }
-
-    /// Reassembler that already emitted keyframe 0, so it is not awaiting one.
-    fn primed(max_pending: usize) -> Reassembler {
-        let mut r = Reassembler::new(max_pending);
-        assert_eq!(
-            r.push(single(0, true)).unwrap(),
-            vec![frame_event(0, true, &[0])]
-        );
-        r
     }
 
     // ---- header ----
@@ -585,6 +380,7 @@ mod tests {
             })
             .collect();
         assert_eq!(ids, vec![0, 1, 2]);
+        assert_eq!(p.next_frame_id(), 3);
     }
 
     #[test]
@@ -616,299 +412,6 @@ mod tests {
         let _ = Packetizer::new().packetize(&[1], false, 0, HEADER_LEN);
     }
 
-    // ---- reassembler ----
-
-    #[test]
-    fn reassembles_in_order() {
-        let mut r = Reassembler::new(8);
-        let data: Vec<u8> = (0..250).collect();
-        let packets = Packetizer::new()
-            .packetize(&data, true, 7, HEADER_LEN + 100)
-            .unwrap();
-        assert!(r.push(packets[0].clone()).unwrap().is_empty());
-        assert!(r.push(packets[1].clone()).unwrap().is_empty());
-        assert_eq!(
-            r.push(packets[2].clone()).unwrap(),
-            vec![frame_event(0, true, &data)]
-        );
-        assert!(!r.awaiting_keyframe());
-    }
-
-    #[test]
-    fn reassembles_out_of_order_within_frame() {
-        let mut r = Reassembler::new(8);
-        let data: Vec<u8> = (0..250).collect();
-        let packets = Packetizer::new()
-            .packetize(&data, true, 7, HEADER_LEN + 100)
-            .unwrap();
-        assert!(r.push(packets[2].clone()).unwrap().is_empty());
-        assert!(r.push(packets[0].clone()).unwrap().is_empty());
-        assert_eq!(
-            r.push(packets[1].clone()).unwrap(),
-            vec![frame_event(0, true, &data)]
-        );
-    }
-
-    #[test]
-    fn duplicates_are_ignored() {
-        let mut r = Reassembler::new(8);
-        let a = datagram(header(0, 0, 2, true), &[1]);
-        let a_dup = datagram(header(0, 0, 2, true), &[9]);
-        assert!(r.push(a.clone()).unwrap().is_empty());
-        assert!(r.push(a_dup.clone()).unwrap().is_empty());
-        let b = datagram(header(0, 1, 2, true), &[2]);
-        assert_eq!(
-            r.push(b.clone()).unwrap(),
-            vec![frame_event(0, true, &[1, 2])]
-        );
-        // Duplicate of an already emitted frame.
-        assert!(r.push(b.clone()).unwrap().is_empty());
-    }
-
-    #[test]
-    fn starts_awaiting_keyframe_and_skips_until_one() {
-        let mut r = Reassembler::new(8);
-        assert!(r.awaiting_keyframe());
-        assert_eq!(
-            r.push(single(5, false)).unwrap(),
-            vec![ReassemblyEvent::Skipped { frame_id: 5 }]
-        );
-        assert!(r.awaiting_keyframe());
-        assert_eq!(
-            r.push(single(6, true)).unwrap(),
-            vec![frame_event(6, true, &[6])]
-        );
-        assert_eq!(
-            r.push(single(7, false)).unwrap(),
-            vec![frame_event(7, false, &[7])]
-        );
-        assert!(!r.awaiting_keyframe());
-    }
-
-    #[test]
-    fn older_incomplete_frame_is_lost_when_newer_completes() {
-        let mut r = primed(8);
-        assert!(
-            r.push(datagram(header(1, 0, 2, false), &[1]))
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(
-            r.push(single(2, false)).unwrap(),
-            vec![lost(1), ReassemblyEvent::Skipped { frame_id: 2 }]
-        );
-        assert!(r.awaiting_keyframe());
-        // Late packet of the lost frame is ignored.
-        assert!(
-            r.push(datagram(header(1, 1, 2, false), &[1]))
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(
-            r.push(single(3, true)).unwrap(),
-            vec![frame_event(3, true, &[3])]
-        );
-        assert!(!r.awaiting_keyframe());
-    }
-
-    #[test]
-    fn entirely_missing_frames_are_lost() {
-        let mut r = primed(8);
-        assert_eq!(
-            r.push(single(3, false)).unwrap(),
-            vec![lost(1), lost(2), ReassemblyEvent::Skipped { frame_id: 3 }]
-        );
-    }
-
-    #[test]
-    fn huge_gap_reports_bounded_losses() {
-        let mut r = primed(8);
-        let events = r.push(single(u32::MAX, false)).unwrap();
-        assert_eq!(events.len(), MAX_REPORTED_GAP as usize + 1);
-        assert_eq!(events[0], lost(1));
-        assert_eq!(
-            *events.last().unwrap(),
-            ReassemblyEvent::Skipped { frame_id: u32::MAX }
-        );
-    }
-
-    #[test]
-    fn first_frames_without_history_report_only_pending_losses() {
-        let mut r = Reassembler::new(8);
-        assert!(
-            r.push(datagram(header(10, 0, 2, true), &[1]))
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(
-            r.push(single(12, false)).unwrap(),
-            vec![lost(10), ReassemblyEvent::Skipped { frame_id: 12 }]
-        );
-    }
-
-    #[test]
-    fn max_pending_evicts_oldest() {
-        let mut r = primed(2);
-        assert!(
-            r.push(datagram(header(1, 0, 2, false), &[1]))
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            r.push(datagram(header(2, 0, 2, false), &[2]))
-                .unwrap()
-                .is_empty()
-        );
-        assert!(!r.awaiting_keyframe());
-        assert_eq!(
-            r.push(datagram(header(3, 0, 2, false), &[3])).unwrap(),
-            vec![lost(1)]
-        );
-        assert!(r.awaiting_keyframe());
-        // Evicted frame's remaining packet is ignored.
-        assert!(
-            r.push(datagram(header(1, 1, 2, false), &[1]))
-                .unwrap()
-                .is_empty()
-        );
-        // Frame 2 can still complete (but must be skipped).
-        assert_eq!(
-            r.push(datagram(header(2, 1, 2, false), &[2])).unwrap(),
-            vec![ReassemblyEvent::Skipped { frame_id: 2 }]
-        );
-    }
-
-    #[test]
-    fn max_pending_zero_behaves_as_one() {
-        let mut r = primed(0);
-        assert!(
-            r.push(datagram(header(1, 0, 2, false), &[1]))
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(
-            r.push(datagram(header(2, 0, 2, false), &[2])).unwrap(),
-            vec![lost(1)]
-        );
-    }
-
-    #[test]
-    fn inconsistent_packets_are_ignored() {
-        let mut r = primed(8);
-        // index >= count
-        assert!(
-            r.push(datagram(header(1, 2, 2, false), &[1]))
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            r.push(datagram(header(1, 0, 2, false), &[1]))
-                .unwrap()
-                .is_empty()
-        );
-        // count mismatch with the first packet of the frame
-        assert!(
-            r.push(datagram(header(1, 1, 3, false), &[1]))
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(
-            r.push(datagram(header(1, 1, 2, false), &[2])).unwrap(),
-            vec![frame_event(1, false, &[1, 2])]
-        );
-    }
-
-    #[test]
-    fn malformed_datagram_errors_and_keeps_state() {
-        let mut r = primed(8);
-        assert!(
-            r.push(datagram(header(1, 0, 2, false), &[1]))
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(
-            r.push(&[VIDEO_VERSION, 0][..]),
-            Err(ProtocolError::Truncated(2))
-        );
-        let mut bad = datagram(header(1, 1, 2, false), &[2]);
-        bad[0] = 0;
-        assert_eq!(r.push(bad.clone()), Err(ProtocolError::BadVersion(0)));
-        assert!(!r.awaiting_keyframe());
-        assert_eq!(
-            r.push(datagram(header(1, 1, 2, false), &[2])).unwrap(),
-            vec![frame_event(1, false, &[1, 2])]
-        );
-    }
-
-    #[test]
-    fn packetizer_reassembler_roundtrip_many_frames() {
-        let mut p = Packetizer::new();
-        let mut r = Reassembler::new(8);
-        for i in 0..20u32 {
-            let data: Vec<u8> = (0..(i * 37)).map(|b| b as u8).collect();
-            let mut packets = p
-                .packetize(&data, i == 0, i64::from(i), HEADER_LEN + 50)
-                .unwrap();
-            packets.reverse();
-            let events: Vec<_> = packets
-                .iter()
-                .flat_map(|d| r.push(d.clone()).unwrap())
-                .collect();
-            assert_eq!(
-                events,
-                vec![ReassemblyEvent::Frame(ReassembledFrame {
-                    frame_id: i,
-                    timestamp: i64::from(i),
-                    keyframe: i == 0,
-                    data: data.into()
-                })]
-            );
-        }
-    }
-
-    #[test]
-    fn packetizer_slices_one_allocation_per_frame() {
-        let data: Vec<u8> = (0..250).map(|b| b as u8).collect();
-        let out = Packetizer::new()
-            .packetize(&data, true, 0, HEADER_LEN + 100)
-            .unwrap();
-        assert_eq!(out.len(), 3);
-        for pair in out.windows(2) {
-            let end_of_first = pair[0].as_ptr().wrapping_add(pair[0].len());
-            assert_eq!(end_of_first, pair[1].as_ptr(), "datagrams are contiguous");
-        }
-    }
-
-    #[test]
-    fn single_packet_frame_reuses_the_datagram_memory() {
-        let datagram = Bytes::from(datagram(header(0, 0, 1, true), b"picture"));
-        let payload_address = datagram[HEADER_LEN..].as_ptr();
-        let events = Reassembler::new(4).push(datagram).unwrap();
-        let [ReassemblyEvent::Frame(frame)] = &events[..] else {
-            panic!("expected one frame, got {events:?}");
-        };
-        assert_eq!(&frame.data[..], b"picture");
-        assert_eq!(frame.data.as_ptr(), payload_address, "no copy");
-    }
-
-    #[test]
-    fn multi_packet_frame_is_joined_into_an_exact_buffer() {
-        let data: Vec<u8> = (0..1000u32).map(|b| (b * 7) as u8).collect();
-        let mut packets = Packetizer::new()
-            .packetize(&data, true, 3, HEADER_LEN + 64)
-            .unwrap();
-        packets.reverse();
-        let mut r = Reassembler::new(4);
-        let events: Vec<_> = packets
-            .into_iter()
-            .flat_map(|d| r.push(d).unwrap())
-            .collect();
-        let [ReassemblyEvent::Frame(frame)] = &events[..] else {
-            panic!("expected one frame, got {events:?}");
-        };
-        assert_eq!(frame.data, data);
-        assert_eq!(frame.data.len(), 1000);
-    }
     // ---- keyframe requester ----
 
     #[test]

@@ -5,6 +5,9 @@
 //! `HostStreamer`, steered from async code through atomics and channels.
 //! The thread also fits the encoder's bitrate to the network (see
 //! `rate_adaptation`), helped by the viewer's reports the session hands in.
+//! The frames it sends are kept for a moment in [`RecentFrames`], from which
+//! the session resends at once the datagrams the viewer asks for, without
+//! waiting for the thread's next frame.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,9 +18,10 @@ use std::time::Instant;
 use anyhow::{Context, Result, anyhow};
 use codec::{DesktopSource, HwEncoder, MediaFoundation};
 use net::VideoChannel;
-use pipeline::{HostStats, HostStreamer};
+use pipeline::{HostStats, HostStreamer, RecentFrames};
 use protocol::control::{ControlMessage, StreamInfo};
 use protocol::feedback::ReceptionReport;
+use protocol::recovery::Nack;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
@@ -41,6 +45,9 @@ pub(super) struct StreamingThread {
     stop: Arc<AtomicBool>,
     keyframe: Arc<AtomicBool>,
     reports: Arc<ViewerReports>,
+    recent: RecentFrames,
+    /// Where resent datagrams go: the connection the thread streams on.
+    video: VideoChannel,
     done: Arc<tokio::sync::Notify>,
     ready: Option<oneshot::Receiver<Result<StreamInfo>>>,
     go: Option<mpsc::Sender<()>>,
@@ -60,14 +67,17 @@ impl StreamingThread {
         let stop = Arc::new(AtomicBool::new(false));
         let keyframe = Arc::new(AtomicBool::new(false));
         let reports = Arc::new(ViewerReports::default());
+        let recent = RecentFrames::new();
         let done = Arc::new(tokio::sync::Notify::new());
         let (ready_tx, ready_rx) = oneshot::channel();
         let (go_tx, go_rx) = mpsc::channel();
         let thread = {
-            let (stop, keyframe, reports, done) = (
+            let (stop, keyframe, reports, recent, video, done) = (
                 stop.clone(),
                 keyframe.clone(),
                 reports.clone(),
+                recent.clone(),
+                video.clone(),
                 done.clone(),
             );
             std::thread::Builder::new()
@@ -77,6 +87,7 @@ impl StreamingThread {
                         stop: &stop,
                         keyframe: &keyframe,
                         reports,
+                        recent,
                         updates,
                         events,
                     };
@@ -90,6 +101,8 @@ impl StreamingThread {
             stop,
             keyframe,
             reports,
+            recent,
+            video,
             done,
             ready: Some(ready_rx),
             go: Some(go_tx),
@@ -119,6 +132,15 @@ impl StreamingThread {
     /// Hands a viewer's reception report to the bitrate adaptation.
     pub(super) fn record_report(&self, report: &ReceptionReport) {
         self.reports.record(report);
+    }
+
+    /// Sends again the datagrams `nack` asks for, those still kept. Errors
+    /// only when the video connection can no longer send.
+    pub(super) fn resend(&self, nack: &Nack) -> Result<()> {
+        self.recent
+            .resend(nack, &self.video, Instant::now())
+            .context("resending video datagrams")?;
+        Ok(())
     }
 
     /// Resolves when the thread has stopped on its own (error or viewer
@@ -155,6 +177,8 @@ struct StreamControl<'a> {
     stop: &'a AtomicBool,
     keyframe: &'a AtomicBool,
     reports: Arc<ViewerReports>,
+    /// Shared with [`StreamingThread::resend`].
+    recent: RecentFrames,
     updates: UnboundedSender<ControlMessage>,
     events: EventSink,
 }
@@ -212,7 +236,14 @@ fn stream_loop(
     let _mmcss = MmcssRegistration::register();
     let transport = video.clone();
     let max_bps = stream.bitrate_bps();
-    let mut streamer = HostStreamer::new(source, encoder, video, stream.fps, max_bps);
+    let mut streamer = HostStreamer::new(
+        source,
+        encoder,
+        video,
+        stream.fps,
+        max_bps,
+        control.recent.clone(),
+    );
     let mut rate = RateAdaptation::new(
         max_bps,
         control.reports.clone(),

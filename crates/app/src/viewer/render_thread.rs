@@ -11,7 +11,7 @@ use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
 use codec::{HwDecoder, MediaFoundation};
 use gpu::Gpu;
-use pipeline::{ViewerAction, ViewerStats, ViewerStreamer};
+use pipeline::{ViewerStats, ViewerStreamer};
 use protocol::control::{ControlMessage, StreamInfo};
 use render::{Renderer, ToolbarView};
 use windows::Win32::Foundation::HWND;
@@ -23,6 +23,7 @@ use super::rate::ReceptionReporter;
 use super::sink::ViewSink;
 use super::stall::StallWatch;
 use super::stats::{FrameTimer, Labels, LinkProbe, RateMeter, Totals, overlay_lines};
+use super::stream_requests::{requests, wait_for};
 use crate::realtime::MmcssRegistration;
 
 /// How often the loop wakes up without datagrams (keyframe retries, resize,
@@ -167,8 +168,8 @@ fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
     let mut applied = unpack(size.load(Ordering::Relaxed));
     let renderer = Renderer::new(&gpu, hwnd, applied.0, applied.1)?;
     println!("Decoding with {} on {}", decoder.name(), gpu.adapter_name);
-    let mut overlay =
-        StatsOverlay::new(input.stream.clone(), decoder.name().to_string(), input.link);
+    let link = input.link;
+    let mut overlay = StatsOverlay::new(input.stream.clone(), decoder.name().to_string());
     let mut streamer = ViewerStreamer::new(decoder, ViewSink::new(renderer));
     let started = Instant::now();
     let mut stall = StallWatch::new(started);
@@ -178,26 +179,28 @@ fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
     let mut batch = Vec::new();
 
     while !stop.load(Ordering::Relaxed) {
-        let timeout = if toolbar.active() { TOOLBAR_TICK } else { TICK };
-        let action = match next_batch(&input.datagrams, timeout, &mut batch) {
+        let tick = if toolbar.active() { TOOLBAR_TICK } else { TICK };
+        let timeout = wait_for(tick, streamer.next_wakeup(), Instant::now());
+        let actions = match next_batch(&input.datagrams, timeout, &mut batch) {
             Ok(()) => {
                 let (received, shown) = (Instant::now(), streamer.stats().frames_presented);
                 stall.on_datagram(received);
-                let action = streamer.on_datagrams(batch.iter().cloned(), received)?;
+                streamer.set_rtt(link.read().rtt);
+                let actions = streamer.on_datagrams(batch.iter().cloned(), received)?;
                 overlay.on_batch(
                     batch.iter().map(Bytes::len).sum(),
                     streamer.stats().frames_presented > shown,
                     received,
                 );
-                action
+                actions
             }
-            Err(RecvTimeoutError::Timeout) => streamer.on_tick(Instant::now()),
+            Err(RecvTimeoutError::Timeout) => streamer.on_tick(Instant::now())?,
             Err(RecvTimeoutError::Disconnected) => break,
         };
         let now = Instant::now();
         let silence = stall.check(now);
-        if action == ViewerAction::RequestKeyframe || silence.probe {
-            let _ = input.outgoing.send(ControlMessage::RequestKeyframe);
+        for message in requests(actions, silence.probe) {
+            let _ = input.outgoing.send(message);
         }
         if let Some(report) = reporter.poll(now, streamer.stats()) {
             let _ = input.outgoing.send(ControlMessage::ReceptionReport(report));
@@ -220,6 +223,7 @@ fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
         overlay.update(
             stats_visible.load(Ordering::Relaxed),
             &mut streamer,
+            &link,
             Instant::now(),
         )?;
     }
@@ -230,7 +234,6 @@ fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
 struct StatsOverlay {
     stream: StreamInfo,
     decoder: String,
-    link: LinkProbe,
     meter: RateMeter,
     frame_time: FrameTimer,
     bytes_received: u64,
@@ -239,11 +242,10 @@ struct StatsOverlay {
 }
 
 impl StatsOverlay {
-    fn new(stream: StreamInfo, decoder: String, link: LinkProbe) -> Self {
+    fn new(stream: StreamInfo, decoder: String) -> Self {
         Self {
             stream,
             decoder,
-            link,
             meter: RateMeter::default(),
             frame_time: FrameTimer::default(),
             bytes_received: 0,
@@ -265,6 +267,7 @@ impl StatsOverlay {
         &mut self,
         visible: bool,
         streamer: &mut ViewerStreamer<D, ViewSink>,
+        link: &LinkProbe,
         now: Instant,
     ) -> Result<()>
     where
@@ -297,7 +300,7 @@ impl StatsOverlay {
             &labels,
             rates,
             &stats,
-            self.link.read(),
+            link.read(),
             self.frame_time.take_average(),
         );
         streamer.sink_mut().set_overlay(Some(lines))?;

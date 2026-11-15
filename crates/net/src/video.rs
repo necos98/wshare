@@ -1,6 +1,9 @@
 //! Video channel: unreliable QUIC datagrams.
 //!
-//! Datagrams are congestion-controlled but never retransmitted. The host
+//! Datagrams are congestion-controlled but never retransmitted by QUIC:
+//! the viewer asks for the ones it missed on the control stream, and the
+//! host sends copies while they are still useful (`pipeline::retransmit`),
+//! a choice QUIC cannot make for us. The host
 //! reads the queue with [`DatagramSink::backlog_bytes`] and stops encoding
 //! while it is over a few frames (`pipeline::backlog`), so video does not
 //! pile up when the network is slower than the stream; should the queue

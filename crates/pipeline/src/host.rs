@@ -7,15 +7,25 @@
 //! Under congestion frames are skipped *before* capture and encoding (see
 //! [`crate::backlog`]): every frame that is encoded is also sent whole, so
 //! the decoder's reference chain stays valid.
+//!
+//! Every frame sent is kept for a moment in [`RecentFrames`], from which
+//! the datagrams a viewer missed are sent again ([`crate::retransmit`]).
+//! Large frames leave in a few bursts ([`crate::burst`]), and keyframe
+//! requests are merged ([`crate::keyframe_gate`]), so one loss does not
+//! snowball into a train of keyframes.
 
 use std::collections::VecDeque;
 use std::time::Instant;
 
 use anyhow::Result;
+use bytes::Bytes;
 use protocol::video::Packetizer;
 
 use crate::backlog::send_backlog_limit;
+use crate::burst::{BURST_GAP, burst_sizes};
+use crate::keyframe_gate::KeyframeGate;
 use crate::pacer::FramePacer;
+use crate::retransmit::RecentFrames;
 use crate::traits::{DatagramSink, EncodedFrame, FrameSource, VideoEncoder};
 
 /// Upper bound on encoder events awaited after a submit (an async encoder
@@ -32,6 +42,8 @@ pub struct HostStats {
     pub datagrams_sent: u64,
     /// Due frames not captured because the send queue was over its limit.
     pub frames_skipped: u64,
+    /// Keyframe requests ignored because a keyframe was already on its way.
+    pub keyframe_requests_merged: u64,
 }
 
 pub struct HostStreamer<S, E, D>
@@ -45,6 +57,8 @@ where
     sink: D,
     pacer: FramePacer,
     packetizer: Packetizer,
+    recent: RecentFrames,
+    keyframes: KeyframeGate,
     start: Instant,
     encoded: VecDeque<EncodedFrame>,
     fps: u32,
@@ -62,8 +76,17 @@ where
     /// The pacer starts dirty so the first `step` sends an initial picture
     /// without waiting for the screen to change. `bitrate_bps`, the
     /// encoder's target rate, sizes the send backlog allowed (see
-    /// [`send_backlog_limit`]). Panics if `fps` is 0.
-    pub fn new(source: S, encoder: E, sink: D, fps: u32, bitrate_bps: u32) -> Self {
+    /// [`send_backlog_limit`]). Every frame sent is recorded in `recent`,
+    /// which the caller shares with whatever answers the viewer's resend
+    /// requests. Panics if `fps` is 0.
+    pub fn new(
+        source: S,
+        encoder: E,
+        sink: D,
+        fps: u32,
+        bitrate_bps: u32,
+        recent: RecentFrames,
+    ) -> Self {
         let mut pacer = FramePacer::new(fps);
         pacer.mark_dirty();
         Self {
@@ -72,6 +95,8 @@ where
             sink,
             pacer,
             packetizer: Packetizer::new(),
+            recent,
+            keyframes: KeyframeGate::new(),
             start: Instant::now(),
             encoded: VecDeque::new(),
             fps,
@@ -101,8 +126,15 @@ where
     }
 
     /// Forces the next encoded frame to be a keyframe AND marks the pacer
-    /// dirty, so a keyframe is produced even if the screen is static.
+    /// dirty, so a keyframe is produced even if the screen is static —
+    /// unless a keyframe was forced or sent moments ago (see
+    /// [`KeyframeGate`]): the request is then merged into that one and
+    /// counted in [`HostStats::keyframe_requests_merged`].
     pub fn request_keyframe(&mut self) -> Result<()> {
+        if !self.keyframes.accept(Instant::now()) {
+            self.stats.keyframe_requests_merged += 1;
+            return Ok(());
+        }
         self.encoder.request_keyframe()?;
         self.pacer.mark_dirty();
         Ok(())
@@ -138,20 +170,39 @@ where
         Ok(())
     }
 
+    /// Packetizes `frame`, records it for resends (before sending, so a
+    /// request can never outrun it) and sends it, in bursts if large.
     fn send_frame(&mut self, frame: &EncodedFrame) -> Result<()> {
         let max_size = self.sink.max_datagram_size();
+        let frame_id = self.packetizer.next_frame_id();
         let datagrams =
             self.packetizer
                 .packetize(&frame.data, frame.keyframe, frame.timestamp, max_size)?;
-        for datagram in datagrams {
-            let len = datagram.len() as u64;
-            self.sink.send(datagram)?;
-            self.stats.datagrams_sent += 1;
-            self.stats.bytes_sent += len;
-        }
+        self.recent.record(frame_id, &datagrams, Instant::now());
+        self.send_in_bursts(datagrams)?;
         self.stats.frames_sent += 1;
         if frame.keyframe {
             self.stats.keyframes_sent += 1;
+            self.keyframes.on_keyframe_sent(Instant::now());
+        }
+        Ok(())
+    }
+
+    /// Sends `datagrams` in the bursts [`burst_sizes`] plans, pausing
+    /// [`BURST_GAP`] between two (an ordinary frame is one burst: no pause).
+    fn send_in_bursts(&mut self, datagrams: Vec<Bytes>) -> Result<()> {
+        let lengths: Vec<usize> = datagrams.iter().map(Bytes::len).collect();
+        let mut datagrams = datagrams.into_iter();
+        for (burst, size) in burst_sizes(&lengths).into_iter().enumerate() {
+            if burst > 0 {
+                std::thread::sleep(BURST_GAP);
+            }
+            for datagram in datagrams.by_ref().take(size) {
+                let len = datagram.len() as u64;
+                self.sink.send(datagram)?;
+                self.stats.datagrams_sent += 1;
+                self.stats.bytes_sent += len;
+            }
         }
         Ok(())
     }

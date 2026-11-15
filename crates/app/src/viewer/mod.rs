@@ -31,6 +31,7 @@ pub mod report;
 mod sink;
 mod stall;
 mod stats;
+mod stream_requests;
 mod toolbar;
 mod window;
 
@@ -176,10 +177,12 @@ pub fn run(options: ViewOptions) -> Result<()> {
     });
     if let Some(stats) = window.stats() {
         println!(
-            "Session: {} frames shown, {} lost, {} skipped, \
-             {} passed over to catch up, {} keyframes requested",
+            "Session: {} frames shown, {} lost, {} recovered ({} resend requests), \
+             {} skipped, {} passed over to catch up, {} keyframes requested",
             stats.frames_presented,
             stats.frames_lost,
+            stats.frames_recovered,
+            stats.nacks_sent,
             stats.frames_skipped,
             stats.frames_superseded,
             stats.keyframes_requested

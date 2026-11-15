@@ -269,6 +269,7 @@ impl ControlLoop<'_> {
             tokio::select! {
                 message = self.rx.recv() => match message? {
                     Some(ControlMessage::RequestKeyframe) => self.streaming.request_keyframe(),
+                    Some(ControlMessage::Nack(nack)) => self.streaming.resend(&nack)?,
                     Some(ControlMessage::ReceptionReport(report)) => {
                         self.streaming.record_report(&report);
                     }

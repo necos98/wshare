@@ -158,6 +158,7 @@ pub fn overlay_lines(
             stats.keyframes_requested,
         ),
         row(text::STAT_SUPERSEDED, stats.frames_superseded.to_string()),
+        row(text::STAT_RECOVERED, stats.frames_recovered.to_string()),
         row(text::STAT_ENCODER, stream.encoder.clone()),
         row(text::STAT_DECODER, labels.decoder.to_string()),
         text::STATS_HOTKEYS.to_string(),
@@ -234,6 +235,7 @@ mod tests {
             frames_lost: 2,
             frames_skipped: 3,
             frames_superseded: 4,
+            frames_recovered: 5,
             ..Default::default()
         };
         overlay_lines(
@@ -282,6 +284,7 @@ mod tests {
             "Persi 2",
             "Scartati 3",
             "Non mostrati 4",
+            "Recuperati   5",
             "Intel QSV",
             "MS H264",
         ] {

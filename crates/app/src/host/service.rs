@@ -21,12 +21,14 @@ use protocol::control::PROTOCOL_VERSION;
 
 use super::HostEvent;
 use super::accept::accept_viewers;
+use super::devices::Devices;
 use super::events::EventSink;
 use super::session::SessionContext;
 use super::state::SharedState;
 use crate::cli::HostOptions;
 use crate::handshake::generate_pin;
 use crate::paths;
+use crate::trust::{AuthorizedDevices, host_id};
 
 /// Networking is light (one viewer, a control stream); the heavy work runs
 /// on the streaming thread, so a small runtime is enough.
@@ -34,6 +36,7 @@ const RUNTIME_WORKERS: usize = 2;
 
 pub(super) struct Service {
     state: Arc<SharedState>,
+    devices: Arc<Devices>,
     events: EventSink,
     thread: Option<JoinHandle<()>>,
 }
@@ -44,17 +47,25 @@ impl Service {
     pub(super) fn start(options: HostOptions, events: EventSink) -> Result<Self> {
         let pin = options.pin.clone().unwrap_or_else(generate_pin);
         let state = Arc::new(SharedState::new(pin, !options.view_only));
+        let (store, load_warning) = AuthorizedDevices::load(paths::authorized_viewers_file()?);
+        let devices = Arc::new(Devices::new(store, events.clone()));
         let (setup_tx, setup_rx) = channel();
         let thread = {
-            let (state, events) = (state.clone(), events.clone());
+            let shared = Shared {
+                state: state.clone(),
+                devices: devices.clone(),
+                events: events.clone(),
+                load_warning,
+            };
             thread::Builder::new()
                 .name("wshare-host".into())
-                .spawn(move || service_thread(&options, &state, &events, &setup_tx))
+                .spawn(move || service_thread(&options, &shared, &setup_tx))
                 .context("spawning the sharing service thread")?
         };
         match setup_rx.recv() {
             Ok(Ok(())) => Ok(Self {
                 state,
+                devices,
                 events,
                 thread: Some(thread),
             }),
@@ -71,6 +82,10 @@ impl Service {
 
     pub(super) fn state(&self) -> &SharedState {
         &self.state
+    }
+
+    pub(super) fn devices(&self) -> &Devices {
+        &self.devices
     }
 
     /// Rotates the PIN for future connections and reports it.
@@ -113,18 +128,24 @@ enum Exit {
     Ended(Result<()>),
 }
 
+/// What the service thread shares with the handle.
+struct Shared {
+    state: Arc<SharedState>,
+    devices: Arc<Devices>,
+    events: EventSink,
+    /// Why the authorized devices could not be loaded, reported once
+    /// listening (the first event must be `Listening`).
+    load_warning: Option<String>,
+}
+
 /// Body of the service thread. A panic is caught so the front-end always
 /// learns that sharing ended (`Stopped { error: Some(..) }`), instead of
 /// the UI showing "sharing" forever.
-fn service_thread(
-    options: &HostOptions,
-    state: &Arc<SharedState>,
-    events: &EventSink,
-    setup: &Sender<Result<()>>,
-) {
+fn service_thread(options: &HostOptions, shared: &Shared, setup: &Sender<Result<()>>) {
+    let events = &shared.events;
     let mut listening = false;
     let outcome = catch_unwind(AssertUnwindSafe(|| {
-        serve(options, state, events, setup, &mut listening)
+        serve(options, shared, setup, &mut listening)
     }));
     let error = match outcome {
         Ok(Exit::SetupFailed) => return,
@@ -147,11 +168,16 @@ fn service_thread(
 
 fn serve(
     options: &HostOptions,
-    state: &Arc<SharedState>,
-    events: &EventSink,
+    shared: &Shared,
     setup: &Sender<Result<()>>,
     listening: &mut bool,
 ) -> Exit {
+    let Shared {
+        state,
+        devices,
+        events,
+        load_warning,
+    } = shared;
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(RUNTIME_WORKERS)
         .thread_name("wshare-host-io")
@@ -181,11 +207,18 @@ fn serve(
                 "LAN announcement failed: {e:#}"
             )));
         }
+        devices.announce();
+        if let Some(warning) = load_warning {
+            events.emit(HostEvent::Warning(format!(
+                "every viewer needs the PIN again: {warning}"
+            )));
+        }
 
         let context = SessionContext {
             host_name: host.name.clone(),
             stream: options.stream.clone(),
             state: Arc::clone(state),
+            devices: Arc::clone(devices),
             events: events.clone(),
         };
         let result = accept_viewers(&host.endpoint, &context).await;
@@ -219,9 +252,9 @@ impl Host {
         let endpoint = HostEndpoint::bind_any(options.port, &identity)
             .with_context(|| format!("listening on UDP port {}", options.port))?;
         let port = endpoint.local_addr()?.port();
-        let fingerprint = identity.fingerprint().to_string();
+        let fingerprint = identity.fingerprint();
         let announcement = HostAnnouncement {
-            id: fingerprint[..16].to_string(),
+            id: host_id(&fingerprint),
             display_name: name.clone(),
             port,
             protocol_version: PROTOCOL_VERSION,
@@ -236,7 +269,7 @@ impl Host {
             computer_name: name.clone(),
             port,
             pin,
-            fingerprint,
+            fingerprint: fingerprint.to_string(),
             monitor: monitor.name,
             width: monitor.width,
             height: monitor.height,

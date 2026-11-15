@@ -1,5 +1,11 @@
 //! `wshare view`: connect to a host and show its screen.
 //!
+//! The viewer presents its own certificate, so a host that admitted it once
+//! with the PIN lets it in without one from then on; such a host is
+//! remembered and pinned by fingerprint (see `pairing`). Without a PIN
+//! given, a remembered host is tried without one first and the PIN is asked
+//! only if the host requires it again.
+//!
 //! Threads:
 //! - main thread: the window (winit requires it);
 //! - tokio runtime: control channel and datagram reception;
@@ -7,10 +13,12 @@
 //!   (reassemble -> decode -> present).
 
 mod cursor;
+pub mod failure;
 mod input_map;
 mod key_log;
 mod key_router;
 mod keyboard_hook;
+mod pairing;
 mod remote;
 mod render_thread;
 mod sink;
@@ -22,16 +30,21 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
 use discovery::computer_name;
-use net::{ControlReceiver, ControlSender, Fingerprint, SessionHandle, VideoChannel};
-use protocol::control::{ControlMessage, PROTOCOL_VERSION, StreamInfo};
+use net::{
+    ControlReceiver, ControlSender, Fingerprint, IdentityMismatch, SessionHandle, VideoChannel,
+};
+use protocol::control::{ControlMessage, PROTOCOL_VERSION, RejectReason, StreamInfo};
+use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use winit::event_loop::{DeviceEvents, EventLoop, EventLoopProxy};
 
 use crate::cli::{DEFAULT_PORT, ViewOptions};
-use crate::target::{self, parse_target};
+use crate::target::{self, Resolved, parse_target};
+use failure::ConnectFailure;
+use pairing::Pairing;
 use window::{ControlPolicy, UserEvent, ViewerWindow, WindowOptions};
 
 /// Environment variable holding the PIN when `--pin` is absent (used by
@@ -48,7 +61,7 @@ struct Connected {
     host_name: String,
     stream: StreamInfo,
     input_allowed: bool,
-    fingerprint: Option<Fingerprint>,
+    fingerprint: Fingerprint,
     tx: ControlSender,
     rx: ControlReceiver,
     video: VideoChannel,
@@ -60,16 +73,18 @@ pub fn run(options: ViewOptions) -> Result<()> {
     if !matches!(target, target::Target::Address(_)) {
         println!("Searching the LAN for hosts...");
     }
-    let (addr, label) = target::resolve(&target, DISCOVERY_WAIT)?;
-    let pin = match given_pin(options.pin, std::env::var(PIN_ENV).ok()) {
-        Some(pin) => pin,
-        None => prompt(&format!("PIN shown on {label}: "))?,
-    };
+    let Resolved {
+        addr,
+        label,
+        host_id,
+    } = target::resolve(&target, DISCOVERY_WAIT)?;
+    let mut pairing = Pairing::load(options.host_id.as_deref().or(host_id.as_deref()));
+    let given = given_pin(options.pin, std::env::var(PIN_ENV).ok());
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let connected = runtime.block_on(connect(addr, pin))?;
+    let connected = authenticate(&runtime, addr, &label, &pairing, given)?;
     let Connected {
         host_name,
         stream,
@@ -80,13 +95,14 @@ pub fn run(options: ViewOptions) -> Result<()> {
         video,
         handle,
     } = connected;
+    // Before the "Connected" line: the desktop interface re-reads the known
+    // hosts when it sees that line.
+    pairing.remember(fingerprint, &host_name);
     println!(
         "Connected to \"{host_name}\" ({addr}) - {}x{} @ {} fps {:?}",
         stream.width, stream.height, stream.fps, stream.codec
     );
-    if let Some(fp) = fingerprint {
-        println!("Host fingerprint: {fp}");
-    }
+    println!("Host fingerprint: {fingerprint}");
     let policy = ControlPolicy {
         host_allows: input_allowed,
         view_only: options.view_only,
@@ -141,9 +157,65 @@ pub fn run(options: ViewOptions) -> Result<()> {
     window.error().map_or(Ok(()), |e| bail!("{e}"))
 }
 
-async fn connect(addr: SocketAddr, pin: String) -> Result<Connected> {
-    let session = net::connect(addr, None).await?;
-    let fingerprint = session.peer_fingerprint();
+/// What the first connection attempt sends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FirstAttempt {
+    Pin(String),
+    /// A remembered host: it should let us in without one.
+    WithoutPin,
+    AskPin,
+}
+
+fn first_attempt(given: Option<String>, host_remembered: bool) -> FirstAttempt {
+    match (given, host_remembered) {
+        (Some(pin), _) => FirstAttempt::Pin(pin),
+        (None, true) => FirstAttempt::WithoutPin,
+        (None, false) => FirstAttempt::AskPin,
+    }
+}
+
+/// Connects, asking for the PIN when the host requires one we did not
+/// send. Gives up (with the host's answer) when no PIN is typed, e.g. when
+/// started by the desktop interface, which has no terminal.
+fn authenticate(
+    runtime: &Runtime,
+    addr: SocketAddr,
+    label: &str,
+    pairing: &Pairing,
+    given: Option<String>,
+) -> Result<Connected> {
+    let mut pin = match first_attempt(given, pairing.expected().is_some()) {
+        FirstAttempt::Pin(pin) => Some(pin),
+        FirstAttempt::WithoutPin => None,
+        FirstAttempt::AskPin => ask_pin(&format!("PIN shown on {label}: "))?,
+    };
+    loop {
+        match runtime.block_on(connect(addr, pairing, pin.clone())) {
+            Err(e) if pin.is_none() && is_pin_required(&e) => {
+                pin = ask_pin(&format!("{label} requires the PIN: "))?;
+                if pin.is_none() {
+                    return Err(e);
+                }
+            }
+            result => return result,
+        }
+    }
+}
+
+fn is_pin_required(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<ConnectFailure>()
+        == Some(&ConnectFailure::Rejected(RejectReason::PinRequired))
+}
+
+/// One connection attempt: TLS (pinned for a remembered host, presenting
+/// our certificate), then Hello and the host's answer.
+async fn connect(addr: SocketAddr, pairing: &Pairing, pin: Option<String>) -> Result<Connected> {
+    let session = net::connect(addr, pairing.expected(), pairing.identity())
+        .await
+        .map_err(host_changed)?;
+    let fingerprint = session
+        .peer_fingerprint()
+        .ok_or_else(|| anyhow!("the host presented no certificate"))?;
     let handle = session.handle();
     let (mut tx, mut rx, video) = session.split();
     tx.send(&ControlMessage::Hello {
@@ -170,9 +242,18 @@ async fn connect(addr: SocketAddr, pin: String) -> Result<Connected> {
             video,
             handle,
         }),
-        Some(ControlMessage::Rejected { reason }) => bail!("the host refused: {reason}"),
+        Some(ControlMessage::Rejected { reason }) => Err(ConnectFailure::Rejected(reason).into()),
         Some(other) => bail!("unexpected answer from the host: {other:?}"),
         None => bail!("the host closed the connection"),
+    }
+}
+
+/// A pinned host that presented another certificate is a
+/// [`ConnectFailure`]; other connection errors pass through.
+fn host_changed(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast::<IdentityMismatch>() {
+        Ok(mismatch) => ConnectFailure::HostChanged(mismatch).into(),
+        Err(error) => error,
     }
 }
 
@@ -223,20 +304,27 @@ async fn run_control(
     let _ = window.send_event(UserEvent::HostLeft(reason));
 }
 
-fn prompt(question: &str) -> Result<String> {
+/// Asks for the PIN on the terminal; `None` if nothing was typed (or there
+/// is no terminal: stdin then reads as empty).
+fn ask_pin(question: &str) -> Result<Option<String>> {
     print!("{question}");
     std::io::stdout().flush()?;
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
-    Ok(line.trim().to_string())
+    Ok(non_empty(line))
+}
+
+fn non_empty(pin: String) -> Option<String> {
+    let pin = pin.trim();
+    (!pin.is_empty()).then(|| pin.to_string())
 }
 
 /// Shared with the render thread so the window can request keyframes.
 pub type Outgoing = UnboundedSender<ControlMessage>;
 
-/// The PIN from `--pin`, else from [`PIN_ENV`]; `None`: ask the user.
+/// The PIN from `--pin`, else from [`PIN_ENV`]; `None`: none given.
 fn given_pin(flag: Option<String>, env: Option<String>) -> Option<String> {
-    flag.or_else(|| env.filter(|pin| !pin.trim().is_empty()))
+    flag.or(env).and_then(non_empty)
 }
 
 #[cfg(test)]
@@ -258,8 +346,49 @@ mod tests {
     }
 
     #[test]
-    fn prompt_as_last_resort() {
+    fn blank_pins_count_as_none() {
         assert_eq!(given_pin(None, None), None);
         assert_eq!(given_pin(None, s("  ")), None);
+        assert_eq!(given_pin(s(""), None), None);
+        assert_eq!(given_pin(s(" 42 "), None), s("42"));
+    }
+
+    #[test]
+    fn remembered_hosts_are_tried_without_a_pin() {
+        assert_eq!(first_attempt(None, true), FirstAttempt::WithoutPin);
+        assert_eq!(first_attempt(None, false), FirstAttempt::AskPin);
+    }
+
+    #[test]
+    fn a_given_pin_is_used_at_once() {
+        for remembered in [true, false] {
+            assert_eq!(
+                first_attempt(s("123456"), remembered),
+                FirstAttempt::Pin("123456".into())
+            );
+        }
+    }
+
+    #[test]
+    fn only_pin_required_triggers_the_prompt() {
+        let failure = |reason| anyhow::Error::new(ConnectFailure::Rejected(reason));
+        assert!(is_pin_required(&failure(RejectReason::PinRequired)));
+        assert!(!is_pin_required(&failure(RejectReason::WrongPin)));
+        assert!(!is_pin_required(&anyhow!("PIN required")));
+    }
+
+    #[test]
+    fn identity_mismatch_becomes_host_changed() {
+        let mismatch = IdentityMismatch {
+            expected: Fingerprint([1; 32]),
+            actual: Fingerprint([2; 32]),
+        };
+        let error = host_changed(anyhow::Error::new(mismatch));
+        assert_eq!(
+            error.downcast_ref::<ConnectFailure>(),
+            Some(&ConnectFailure::HostChanged(mismatch))
+        );
+        let other = host_changed(anyhow!("timed out"));
+        assert!(other.downcast_ref::<ConnectFailure>().is_none());
     }
 }

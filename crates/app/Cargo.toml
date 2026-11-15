@@ -24,7 +24,9 @@ pipeline.workspace = true
 protocol.workspace = true
 render.workspace = true
 bytes = "1"
+serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+toml = "1.2"
 winit = "0.30.13"
 eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts"] }
 tray-icon = { version = "0.26.1", default-features = false }
@@ -37,3 +39,6 @@ windows = { workspace = true, features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

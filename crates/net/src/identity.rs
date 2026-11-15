@@ -1,9 +1,10 @@
-//! Host identity: a self-signed certificate and its private key.
+//! Peer identity: a self-signed certificate and its private key.
 //!
-//! The certificate is never validated against a CA; viewers identify a host
-//! by the SHA-256 fingerprint of its certificate DER. Persisting the identity
-//! keeps that fingerprint stable across restarts so a pinned/TOFU viewer
-//! keeps trusting the same machine.
+//! The certificate is never validated against a CA; peers identify each
+//! other by the SHA-256 fingerprint of its certificate DER (viewers the
+//! host's, hosts the viewer's client certificate). Persisting the identity
+//! keeps that fingerprint stable across restarts so the other side keeps
+//! recognising the same machine.
 
 use std::fmt;
 use std::fs;
@@ -117,7 +118,7 @@ impl Identity {
         Ok(identity)
     }
 
-    /// Fingerprint viewers use to recognize this host.
+    /// Fingerprint the other side recognizes this identity by.
     pub fn fingerprint(&self) -> Fingerprint {
         Fingerprint::of_cert(&self.cert)
     }

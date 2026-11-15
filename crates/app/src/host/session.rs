@@ -1,6 +1,11 @@
-//! One viewer, from Hello to goodbye: admission (PIN), stream setup,
-//! Welcome, then the control loop (keyframe requests, remote input, pointer
-//! updates) until the viewer, the stream or the host ends it.
+//! One viewer, from Hello to goodbye: admission, stream setup, Welcome,
+//! then the control loop (keyframe requests, remote input, pointer updates)
+//! until the viewer, the stream or the host ends it.
+//!
+//! Admission: a viewer whose TLS client certificate is among the authorized
+//! devices needs no PIN; anyone else must give the PIN valid right now, and
+//! a viewer admitted that way with a certificate is authorized from then
+//! on. Trust rests only on the fingerprint proven by the TLS handshake.
 //!
 //! Every outcome is reported as a [`HostEvent`]; nothing here prints.
 
@@ -10,24 +15,26 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use input::{RemoteInput, ScreenArea};
-use net::{ControlReceiver, ControlSender, Session, SessionHandle, VideoChannel};
+use net::{ControlReceiver, ControlSender, Fingerprint, Session, SessionHandle, VideoChannel};
 use pipeline::HostStats;
-use protocol::control::{ControlMessage, StreamInfo};
+use protocol::ProtocolError;
+use protocol::control::{ControlMessage, RejectReason, StreamInfo};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::sync::watch;
 
 use super::HostEvent;
+use super::devices::Devices;
 use super::events::EventSink;
 use super::input_gate::InputGate;
 use super::input_switch::InputSwitch;
 use super::state::{Cancelled, SharedState};
 use super::streaming::{StreamEnd, StreamingThread};
 use crate::cli::StreamOptions;
-use crate::handshake::{HelloVerdict, check_hello};
+use crate::handshake::{HelloVerdict, ViewerTrust, check_hello, unsupported_version};
 
 /// How long a connected viewer has to send Hello.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
-/// Delay after a wrong PIN, to make guessing slow.
+/// Delay before every rejection, to make guessing the PIN slow.
 const REJECT_DELAY: Duration = Duration::from_secs(1);
 /// Grace period to tell "viewer left" from "our stream failed" when the
 /// streaming thread stops first.
@@ -41,6 +48,7 @@ pub(super) struct SessionContext {
     pub(super) host_name: String,
     pub(super) stream: StreamOptions,
     pub(super) state: Arc<SharedState>,
+    pub(super) devices: Arc<Devices>,
     pub(super) events: EventSink,
 }
 
@@ -59,7 +67,7 @@ enum Admission {
         viewer_name: String,
     },
     Refused {
-        reason: String,
+        reason: RejectReason,
     },
     /// The host ended the session before admission completed.
     Abandoned,
@@ -70,10 +78,16 @@ enum Admission {
 pub(super) async fn serve_viewer(session: Session, ctx: &SessionContext, mut cancel: Cancelled) {
     let address = session.remote_addr();
     let handle = session.handle();
+    // Proven by the TLS handshake; `None` if the viewer has no certificate.
+    let certificate = session.peer_fingerprint();
     let (mut tx, mut rx, video) = session.split();
+    let trust = viewer_trust(certificate.as_ref(), &ctx.devices);
 
-    match admit(&mut tx, &mut rx, &ctx.state, &mut cancel).await {
+    match admit(&mut tx, &mut rx, &ctx.state, trust, &mut cancel).await {
         Admission::Admitted { viewer_name } => {
+            if let Some(fingerprint) = certificate {
+                ctx.devices.record_access(fingerprint, &viewer_name);
+            }
             let viewer = Viewer {
                 address,
                 name: viewer_name,
@@ -91,11 +105,21 @@ pub(super) async fn serve_viewer(session: Session, ctx: &SessionContext, mut can
     handle.close("session over");
 }
 
-/// Waits for Hello and checks it against the PIN valid right now.
+/// Whether the certificate the viewer proved is an authorized device.
+fn viewer_trust(certificate: Option<&Fingerprint>, devices: &Devices) -> ViewerTrust {
+    match certificate {
+        Some(fingerprint) if devices.is_authorized(fingerprint) => ViewerTrust::Authorized,
+        _ => ViewerTrust::Unknown,
+    }
+}
+
+/// Waits for Hello and checks it (see [`check_hello`]) against the PIN
+/// valid right now.
 async fn admit(
     tx: &mut ControlSender,
     rx: &mut ControlReceiver,
     state: &SharedState,
+    trust: ViewerTrust,
     cancel: &mut Cancelled,
 ) -> Admission {
     let hello = tokio::select! {
@@ -103,30 +127,41 @@ async fn admit(
         hello = tokio::time::timeout(HELLO_TIMEOUT, rx.recv()) => hello,
     };
     let refused = |reason: &str| Admission::Refused {
-        reason: reason.to_string(),
+        reason: RejectReason::Other(reason.to_string()),
     };
-    let hello = match hello {
+    let verdict = match hello {
         Err(_) => return refused("viewer sent no Hello"),
+        // A Hello of another protocol version does not decode: tell the
+        // viewer so (older viewers can read the answer).
+        Ok(Err(e)) if is_undecodable(&e) => HelloVerdict::Reject {
+            reason: unsupported_version(),
+        },
         Ok(Err(e)) => return refused(&format!("{e:#}")),
         Ok(Ok(None)) => return refused("viewer left before Hello"),
-        Ok(Ok(Some(message))) => message,
+        Ok(Ok(Some(message))) => check_hello(&message, &state.pin(), trust),
     };
-    match check_hello(&hello, &state.pin()) {
-        HelloVerdict::Accept { viewer_name } => Admission::Admitted { viewer_name },
+    match verdict {
+        HelloVerdict::Accept { viewer_name, .. } => Admission::Admitted { viewer_name },
         HelloVerdict::Reject { reason } => {
             tokio::select! {
                 () = cancel.wait() => return Admission::Abandoned,
                 () = tokio::time::sleep(REJECT_DELAY) => {}
             }
-            let _ = tx
-                .send(&ControlMessage::Rejected {
-                    reason: reason.clone(),
-                })
-                .await;
-            let _ = tx.finish();
+            send_rejection(tx, reason.clone()).await;
             Admission::Refused { reason }
         }
     }
+}
+
+fn is_undecodable(error: &anyhow::Error) -> bool {
+    matches!(error.downcast_ref(), Some(ProtocolError::Decode(_)))
+}
+
+/// Sends our last message of a refused session (best effort: the viewer
+/// may already be gone).
+async fn send_rejection(tx: &mut ControlSender, reason: RejectReason) {
+    let _ = tx.send(&ControlMessage::Rejected { reason }).await;
+    let _ = tx.finish();
 }
 
 /// An admitted viewer.
@@ -157,12 +192,8 @@ async fn serve_admitted(
     } = channels;
     let address = viewer.address;
     let refuse = async |tx: &mut ControlSender, reason: String| {
-        let _ = tx
-            .send(&ControlMessage::Rejected {
-                reason: reason.clone(),
-            })
-            .await;
-        let _ = tx.finish();
+        let reason = RejectReason::Other(reason);
+        send_rejection(tx, reason.clone()).await;
         ctx.events
             .emit(HostEvent::ViewerRejected { address, reason });
     };
@@ -195,7 +226,7 @@ async fn serve_admitted(
     let told = *allowed.borrow_and_update();
     let welcome = welcome(&ctx.host_name, info, told);
     if let Err(e) = tx.send(&welcome).await {
-        let reason = format!("viewer left before Welcome: {e:#}");
+        let reason = RejectReason::Other(format!("viewer left before Welcome: {e:#}"));
         ctx.events
             .emit(HostEvent::ViewerRejected { address, reason });
         let _ = streaming.stop().await;

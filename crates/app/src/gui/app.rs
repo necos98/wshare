@@ -6,14 +6,17 @@ use std::sync::mpsc::Receiver;
 use eframe::egui::{self, ViewportCommand};
 
 use super::controller::{Controller, Intent, WindowCommand};
+use super::known_hosts_file::KnownHostsFile;
 use super::launcher::ProcessLauncher;
 use super::ports::AppEvent;
 use super::sharing::HostService;
 use super::tray::Tray;
 use super::view::{self, Drafts};
 
+type AppController = Controller<HostService, ProcessLauncher, KnownHostsFile>;
+
 pub struct WshareApp {
-    controller: Controller<HostService, ProcessLauncher>,
+    controller: AppController,
     events: Receiver<AppEvent>,
     drafts: Drafts,
     /// `None` if the notification area is unavailable.
@@ -23,11 +26,7 @@ pub struct WshareApp {
 }
 
 impl WshareApp {
-    pub fn new(
-        controller: Controller<HostService, ProcessLauncher>,
-        events: Receiver<AppEvent>,
-        tray: Option<Tray>,
-    ) -> Self {
+    pub fn new(controller: AppController, events: Receiver<AppEvent>, tray: Option<Tray>) -> Self {
         Self { controller, events, drafts: Drafts::default(), tray, hidden: false, quitting: false }
     }
 

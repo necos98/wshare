@@ -6,8 +6,11 @@ use eframe::egui::{
     StrokeKind, TextEdit, Ui, WidgetInfo, pos2, vec2,
 };
 
+use crate::trust::Timestamp;
+
 use super::controller::Intent;
 use super::model::{GuiState, HostRow, Sharing, ViewerSession, ViewerStatus, format_pin};
+use super::pairing_view::{self, RememberedAction};
 
 /// Text fields being edited; not part of the application state.
 #[derive(Debug, Default)]
@@ -30,7 +33,7 @@ enum Form {
 
 const GAP: f32 = 10.0;
 /// Font size of secondary lines (details, warnings).
-const DETAIL_SIZE: f32 = 12.0;
+pub(super) const DETAIL_SIZE: f32 = 12.0;
 
 pub fn show(ui: &mut Ui, state: &GuiState, drafts: &mut Drafts) -> Vec<Intent> {
     let mut intents = Vec::new();
@@ -144,6 +147,7 @@ fn sharing_section(ui: &mut Ui, sharing: &Sharing, intents: &mut Vec<Intent>) {
         if let Some(notice) = &sharing.notice {
             ui.label(RichText::new(notice).size(DETAIL_SIZE).weak());
         }
+        pairing_view::authorized_devices(ui, &sharing.authorized, Timestamp::now(), intents);
     });
 }
 
@@ -170,21 +174,15 @@ fn network_section(ui: &mut Ui, state: &GuiState, drafts: &mut Drafts, intents: 
             intents.push(Intent::SelectHost(id));
         }
         if selected {
-            let error = state
-                .connect_error
-                .as_deref()
-                .filter(|_| drafts.last_form == Form::Host);
-            let focus = std::mem::take(&mut drafts.focus_host_pin);
-            let connect = pin_form(ui, &mut drafts.host_pin, None, error, focus);
-            if connect {
-                drafts.last_form = Form::Host;
-                let pin = std::mem::take(&mut drafts.host_pin);
-                intents.push(Intent::ConnectHost {
-                    id: row.id.clone(),
-                    pin,
-                });
-            }
+            selected_host_form(ui, row, state, drafts, intents);
         }
+    }
+    if let Some(warning) = state.remembered.warning() {
+        ui.label(
+            RichText::new(format!("Computer memorizzati non disponibili: {warning}"))
+                .size(DETAIL_SIZE)
+                .weak(),
+        );
     }
     ui.add_space(GAP / 2.0);
     egui::CollapsingHeader::new("Connetti a un indirizzo IP").show_unindented(ui, |ui| {
@@ -207,6 +205,44 @@ fn network_section(ui: &mut Ui, state: &GuiState, drafts: &mut Drafts, intents: 
             });
         }
     });
+}
+
+/// Under the selected computer: `Connetti` (and `Dimentica`) if it
+/// remembers this PC, else the PIN form.
+fn selected_host_form(
+    ui: &mut Ui,
+    row: &HostRow,
+    state: &GuiState,
+    drafts: &mut Drafts,
+    intents: &mut Vec<Intent>,
+) {
+    let error = state
+        .connect_error
+        .as_deref()
+        .filter(|_| drafts.last_form == Form::Host);
+    let connect = |pin| Intent::ConnectHost {
+        id: row.id.clone(),
+        pin,
+    };
+    if row.remembered {
+        match pairing_view::remembered_form(ui, error) {
+            Some(RememberedAction::Connect) => {
+                drafts.last_form = Form::Host;
+                intents.push(connect(String::new()));
+            }
+            Some(RememberedAction::Forget) => {
+                drafts.last_form = Form::Host;
+                intents.push(Intent::ForgetHost { id: row.id.clone() });
+            }
+            None => {}
+        }
+        return;
+    }
+    let focus = std::mem::take(&mut drafts.focus_host_pin);
+    if pin_form(ui, &mut drafts.host_pin, None, error, focus) {
+        drafts.last_form = Form::Host;
+        intents.push(connect(std::mem::take(&mut drafts.host_pin)));
+    }
 }
 
 /// One computer of the list; clickable when it can be connected to.
@@ -247,6 +283,8 @@ fn host_row(ui: &mut Ui, row: &HostRow, selected: bool) -> Response {
 }
 
 /// `[address] [PIN] [Connetti]`; returns true when the user asked to connect.
+/// With an address field the PIN is optional (the host may remember this
+/// PC); without one, the PIN is what the form is for.
 fn pin_form(
     ui: &mut Ui,
     pin: &mut String,
@@ -258,6 +296,7 @@ fn pin_form(
     ui.horizontal(|ui| {
         ui.add_space(8.0);
         let has_address = address.is_some();
+        let mut address_given = false;
         if let Some(address) = address {
             let field = ui.add(
                 TextEdit::singleline(address)
@@ -265,6 +304,7 @@ fn pin_form(
                     .desired_width(130.0),
             );
             submit |= enter_pressed(ui, &field);
+            address_given = !address.trim().is_empty();
         }
         let field = ui.add(
             TextEdit::singleline(pin)
@@ -276,7 +316,11 @@ fn pin_form(
             field.request_focus();
         }
         submit |= enter_pressed(ui, &field);
-        let ready = !pin.trim().is_empty();
+        let ready = if has_address {
+            address_given
+        } else {
+            !pin.trim().is_empty()
+        };
         submit |= ui
             .add_enabled(ready, egui::Button::new("Connetti"))
             .clicked();
@@ -334,7 +378,7 @@ fn viewers_section(ui: &mut Ui, viewers: &[ViewerSession], intents: &mut Vec<Int
     }
 }
 
-fn error_color(ui: &Ui) -> Color32 {
+pub(super) fn error_color(ui: &Ui) -> Color32 {
     if ui.visuals().dark_mode {
         Color32::from_rgb(255, 120, 110)
     } else {

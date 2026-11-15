@@ -3,6 +3,7 @@
 use std::thread::{self, JoinHandle};
 
 use anyhow::Result;
+use net::Fingerprint;
 
 use crate::cli::HostOptions;
 use crate::host::{HostEvent, HostHandle, HostObserver};
@@ -67,6 +68,10 @@ impl SharingControl for RunningHost {
 
     fn disconnect_viewer(&self) {
         self.handle.disconnect_viewer();
+    }
+
+    fn forget_device(&self, fingerprint: &Fingerprint) {
+        self.handle.forget_device(fingerprint);
     }
 
     fn stop(self: Box<Self>) {

@@ -8,6 +8,7 @@
 //! addresses are IPv4 in practice. Callers that want IPv6 can pass an IPv6
 //! address to [`HostEndpoint::bind`].
 
+use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -73,8 +74,10 @@ impl HostEndpoint {
 
     async fn establish(incoming: Incoming) -> Result<Session> {
         let conn = incoming.await.context("QUIC handshake")?;
+        // `None`: the viewer presented no certificate (it is optional).
+        let viewer = peer_fingerprint(&conn);
         match tokio::time::timeout(CONTROL_STREAM_TIMEOUT, conn.accept_bi()).await {
-            Ok(Ok(streams)) => Ok(Session::new(conn, streams, None)),
+            Ok(Ok(streams)) => Ok(Session::new(conn, streams, viewer)),
             Ok(Err(e)) => Err(e).context("accepting control stream"),
             Err(_) => {
                 conn.close(VarInt::from_u32(1), b"no control stream");
@@ -89,18 +92,49 @@ impl HostEndpoint {
     }
 }
 
+/// The pinned host presented a different certificate: either another
+/// machine answers at that address or the host's identity was recreated.
+/// Returned (inside the `anyhow::Error`) by [`connect`]; downcast to tell it
+/// apart from ordinary connection failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdentityMismatch {
+    pub expected: Fingerprint,
+    pub actual: Fingerprint,
+}
+
+impl fmt::Display for IdentityMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the host's identity changed: expected fingerprint {}, got {}",
+            self.expected, self.actual
+        )
+    }
+}
+
+impl std::error::Error for IdentityMismatch {}
+
 /// Connects a viewer to the host at `addr`.
 ///
 /// - `expected = Some(fp)`: the handshake fails unless the host certificate
-///   has fingerprint `fp` (pinning).
+///   has fingerprint `fp` (pinning); a different one is reported as
+///   [`IdentityMismatch`].
 /// - `expected = None`: trust on first use; read what was seen from
 ///   [`Session::peer_fingerprint`].
+///
+/// `identity`, when given, is presented as the TLS client certificate, so
+/// the host can recognise this viewer by its fingerprint.
 ///
 /// The control stream is opened locally but is invisible to the host until
 /// the first message is sent, so send `Hello` immediately. Must be called
 /// inside a tokio runtime (multi-thread).
-pub async fn connect(addr: SocketAddr, expected: Option<Fingerprint>) -> Result<Session> {
-    let crypto = QuicClientConfig::try_from(tls::client_config(expected)?)
+pub async fn connect(
+    addr: SocketAddr,
+    expected: Option<Fingerprint>,
+    identity: Option<&Identity>,
+) -> Result<Session> {
+    let verifier = Arc::new(tls::FingerprintVerifier::new(expected));
+    let crypto = QuicClientConfig::try_from(tls::client_config(verifier.clone(), identity)?)
         .context("building QUIC client crypto")?;
     let mut config = quinn::ClientConfig::new(Arc::new(crypto));
     config.transport_config(transport_config());
@@ -113,24 +147,31 @@ pub async fn connect(addr: SocketAddr, expected: Option<Fingerprint>) -> Result<
     // One endpoint per session: dropping our handle is fine, quinn keeps the
     // endpoint driver alive until its connections are gone.
     let endpoint = crate::socket::endpoint(local, None)?;
-    let conn = endpoint
+    let connecting = endpoint
         .connect_with(config, addr, crate::SERVER_NAME)
-        .context("starting QUIC connection")?
-        .await
-        .with_context(|| format!("connecting to {addr}"))?;
+        .context("starting QUIC connection")?;
+    let conn = match connecting.await {
+        Ok(conn) => conn,
+        Err(e) => {
+            if let (Some(expected), Some(actual)) = (expected, verifier.mismatch()) {
+                return Err(IdentityMismatch { expected, actual }.into());
+            }
+            return Err(e).with_context(|| format!("connecting to {addr}"));
+        }
+    };
 
-    let fingerprint = peer_fingerprint(&conn)?;
+    let fingerprint =
+        peer_fingerprint(&conn).ok_or_else(|| anyhow!("host presented no certificate"))?;
     let streams = conn.open_bi().await.context("opening control stream")?;
     Ok(Session::new(conn, streams, Some(fingerprint)))
 }
 
-fn peer_fingerprint(conn: &Connection) -> Result<Fingerprint> {
+/// Fingerprint of the leaf certificate the peer proved during the
+/// handshake; `None` if it presented none.
+fn peer_fingerprint(conn: &Connection) -> Option<Fingerprint> {
     let certs = conn
-        .peer_identity()
-        .and_then(|any| any.downcast::<Vec<CertificateDer<'static>>>().ok())
-        .ok_or_else(|| anyhow!("host presented no certificate"))?;
-    let leaf = certs
-        .first()
-        .ok_or_else(|| anyhow!("host presented an empty certificate chain"))?;
-    Ok(Fingerprint::of_cert(leaf))
+        .peer_identity()?
+        .downcast::<Vec<CertificateDer<'static>>>()
+        .ok()?;
+    certs.first().map(|leaf| Fingerprint::of_cert(leaf))
 }

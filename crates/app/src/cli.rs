@@ -3,6 +3,8 @@
 use anyhow::{Context, Result, bail};
 use codec::Codec;
 
+use crate::trust;
+
 pub const DEFAULT_PORT: u16 = 7420;
 
 /// Encoding settings shared by `host` and `bench`.
@@ -59,6 +61,10 @@ pub struct ViewOptions {
     /// Address, address:port, or (part of) a host name. `None`: discover.
     pub target: Option<String>,
     pub pin: Option<String>,
+    /// LAN id of the host at `target` (see `trust::host_id`), so a host
+    /// remembered under that id is pinned and connected to without a PIN.
+    /// Hosts found by name get it from discovery.
+    pub host_id: Option<String>,
     /// Only watch: do not send mouse/keyboard even if the host allows it.
     pub view_only: bool,
     /// Open the viewer window in full screen (toggle with Ctrl+Alt+Enter).
@@ -84,7 +90,13 @@ wshare - LAN screen sharing (no arguments: open the window)
 
   wshare host  [--monitor N] [--fps F] [--mbps B] [--codec h264|hevc] [--port P] [--pin PIN]
                [--view-only]
-  wshare view  [HOST | IP[:PORT]] [--pin PIN] [--view-only] [--fullscreen] [--stats]
+               a viewer that gave the PIN once connects without it from then on
+               (remove it from the list in the wshare window)
+  wshare view  [HOST | IP[:PORT]] [--pin PIN] [--host-id ID] [--view-only] [--fullscreen] [--stats]
+               the PIN is needed only the first time: the host then remembers this PC,
+               and this PC pins the host (HOST names, or the LAN id given with --host-id);
+               without --pin, a remembered host is tried without one and the PIN asked
+               only if the host requires it again
                in the viewer: Ctrl+Alt+Enter full screen, Ctrl+Alt+I statistics
   wshare list                       hosts found on the LAN
   wshare monitors                   monitors of this PC
@@ -193,6 +205,7 @@ fn parse_view(args: &[String]) -> Result<ViewOptions> {
     let mut options = ViewOptions {
         target: None,
         pin: None,
+        host_id: None,
         view_only: false,
         fullscreen: false,
         stats: false,
@@ -200,6 +213,7 @@ fn parse_view(args: &[String]) -> Result<ViewOptions> {
     for_each_arg(args, |arg, value| {
         match arg {
             "--pin" => options.pin = Some(value()?),
+            "--host-id" => options.host_id = Some(host_id(&value()?)?),
             "--view-only" => options.view_only = true,
             "--fullscreen" => options.fullscreen = true,
             "--stats" => options.stats = true,
@@ -211,6 +225,16 @@ fn parse_view(args: &[String]) -> Result<ViewOptions> {
         Ok(true)
     })?;
     Ok(options)
+}
+
+fn host_id(value: &str) -> Result<String> {
+    if !trust::is_host_id(value) {
+        bail!(
+            "--host-id must be {} hex digits (the start of the host fingerprint)",
+            trust::HOST_ID_LEN
+        );
+    }
+    Ok(value.to_ascii_lowercase())
 }
 
 fn parse_codec(value: &str) -> Result<Codec> {
@@ -285,6 +309,7 @@ mod tests {
         let expected = ViewOptions {
             target: Some("192.168.1.20:7420".into()),
             pin: Some("42".into()),
+            host_id: None,
             view_only: false,
             fullscreen: false,
             stats: false,
@@ -324,6 +349,23 @@ mod tests {
         };
         assert!(v.fullscreen);
         assert!(v.stats);
+    }
+
+    #[test]
+    fn view_with_host_id() {
+        let Command::View(v) = parse(&args("view 10.0.0.2 --host-id 0123456789ABCDEF")).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(v.host_id.as_deref(), Some("0123456789abcdef"));
+        assert_eq!(v.pin, None);
+        for bad in [
+            "view --host-id 0123",
+            "view --host-id zz23456789abcdef",
+            "view --host-id",
+        ] {
+            assert!(parse(&args(bad)).is_err(), "{bad}");
+        }
     }
 
     #[test]

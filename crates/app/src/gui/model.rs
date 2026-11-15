@@ -7,14 +7,17 @@ use discovery::{DiscoveredHost, DiscoveryEvent, HostList};
 use protocol::control::PROTOCOL_VERSION;
 
 use crate::host::HostEvent;
+use crate::trust::{AuthorizedDevice, HOST_ID_LEN};
+use crate::viewer::failure::FailureKind;
 
+use super::remembered::RememberedHosts;
 use super::viewer_error;
 
 /// Identifies a viewer process launched by the interface.
 pub type ViewerId = u64;
 
-/// Length of the host id announced on the LAN: a prefix of the fingerprint.
-const HOST_ID_LEN: usize = 16;
+/// Shown under a remembered host that refused to connect without a PIN.
+pub const PIN_AGAIN: &str = "Questo computer richiede di nuovo il PIN.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectedViewer {
@@ -42,6 +45,8 @@ pub struct Sharing {
     pub notice: Option<String>,
     /// Why sharing is off although the user switched it on.
     pub error: Option<String>,
+    /// Viewers that connect without a PIN (known while sharing).
+    pub authorized: Vec<AuthorizedDevice>,
 }
 
 impl Default for Sharing {
@@ -56,6 +61,7 @@ impl Default for Sharing {
             input_blocked: false,
             notice: None,
             error: None,
+            authorized: Vec::new(),
         }
     }
 }
@@ -106,6 +112,7 @@ impl Sharing {
                 return Some(fingerprint.chars().take(HOST_ID_LEN).collect());
             }
             HostEvent::PinChanged { pin } => self.pin = Some(pin),
+            HostEvent::AuthorizedDevices(devices) => self.authorized = devices,
             HostEvent::ViewerConnected {
                 viewer_name,
                 address,
@@ -121,7 +128,7 @@ impl Sharing {
                 self.notice = Some(format!(
                     "Connessione rifiutata da {}: {}",
                     address.ip(),
-                    viewer_error::translate_reason(&reason)
+                    viewer_error::reason_text(&reason)
                 ));
             }
             HostEvent::ViewerDisconnected { error, .. } => {
@@ -164,10 +171,12 @@ pub struct HostRow {
     pub address: Option<SocketAddr>,
     /// Same protocol version as this program.
     pub compatible: bool,
+    /// This PC connects to it without a PIN.
+    pub remembered: bool,
 }
 
 impl HostRow {
-    fn new(host: &DiscoveredHost) -> Self {
+    fn new(host: &DiscoveredHost, remembered: bool) -> Self {
         let a = &host.announcement;
         Self {
             id: a.id.clone(),
@@ -175,6 +184,7 @@ impl HostRow {
             resolution: format!("{}×{}", a.width, a.height),
             address: host.preferred_address(),
             compatible: a.protocol_version == PROTOCOL_VERSION,
+            remembered,
         }
     }
 
@@ -187,9 +197,14 @@ impl HostRow {
         if !self.compatible {
             return "Versione di wshare diversa: non compatibile".to_string();
         }
-        match self.address {
+        let line = match self.address {
             Some(address) => format!("{} · {address}", self.resolution),
             None => format!("{} · nessun indirizzo raggiungibile", self.resolution),
+        };
+        if self.remembered {
+            format!("{line} · Accesso memorizzato")
+        } else {
+            line
         }
     }
 }
@@ -207,6 +222,8 @@ pub struct ViewerSession {
     pub id: ViewerId,
     pub label: String,
     pub address: SocketAddr,
+    /// LAN id of the host, when it was picked from the list.
+    pub host_id: Option<String>,
     pub status: ViewerStatus,
 }
 
@@ -249,6 +266,8 @@ pub struct GuiState {
     /// Problem with the last connection request (bad address, empty PIN).
     pub connect_error: Option<String>,
     pub viewers: Vec<ViewerSession>,
+    /// Hosts this PC connects to without a PIN.
+    pub remembered: RememberedHosts,
 }
 
 impl GuiState {
@@ -273,7 +292,7 @@ impl GuiState {
             .hosts()
             .into_iter()
             .filter(|h| Some(h.id()) != self.own_host_id.as_deref())
-            .map(HostRow::new)
+            .map(|h| HostRow::new(h, self.remembered.is_remembered(h.id())))
             .collect()
     }
 
@@ -288,8 +307,12 @@ impl GuiState {
     pub fn apply_viewer_update(&mut self, id: ViewerId, update: ViewerUpdate) {
         match update {
             ViewerUpdate::Connected => {
-                if let Some(viewer) = self.viewer_mut(id) {
-                    viewer.status = ViewerStatus::Connected;
+                let Some(viewer) = self.viewer_mut(id) else {
+                    return;
+                };
+                viewer.status = ViewerStatus::Connected;
+                if let Some(host_id) = viewer.host_id.clone() {
+                    self.remembered.connected(&host_id);
                 }
             }
             ViewerUpdate::Exited { success: true, .. } => self.viewers.retain(|v| v.id != id),
@@ -298,11 +321,27 @@ impl GuiState {
                 code,
                 stderr,
             } => {
-                if let Some(viewer) = self.viewer_mut(id) {
-                    viewer.status = ViewerStatus::Failed(viewer_error::describe(&stderr, code));
+                let Some(viewer) = self.viewer_mut(id) else {
+                    return;
+                };
+                let failure = viewer_error::describe(&stderr, code);
+                match (failure.kind, viewer.host_id.clone()) {
+                    (Some(FailureKind::PinRequired), Some(host_id)) => {
+                        self.ask_pin_again(id, host_id)
+                    }
+                    _ => viewer.status = ViewerStatus::Failed(failure.message),
                 }
             }
         }
+    }
+
+    /// A listed host refused to connect without a PIN: its row opens with
+    /// the PIN field and says why, instead of a failed viewer line.
+    fn ask_pin_again(&mut self, viewer: ViewerId, host_id: String) {
+        self.viewers.retain(|v| v.id != viewer);
+        self.remembered.pin_required(&host_id);
+        self.selected_host = Some(host_id);
+        self.connect_error = Some(PIN_AGAIN.to_string());
     }
 
     /// A viewer already open (or opening) on `address`.
@@ -337,8 +376,11 @@ pub fn format_pin(pin: &str) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use discovery::HostAnnouncement;
+    use protocol::control::RejectReason;
 
     use super::*;
+    use crate::gui::remembered::tests::known;
+    use crate::trust::host_id;
 
     pub fn listening(pin: &str, fingerprint: &str) -> HostEvent {
         HostEvent::Listening {
@@ -431,7 +473,7 @@ pub(crate) mod tests {
         );
         s.apply(HostEvent::ViewerRejected {
             address: addr("10.0.0.2:1"),
-            reason: "wrong PIN".into(),
+            reason: RejectReason::WrongPin,
         });
         assert_eq!(
             s.notice.as_deref(),
@@ -541,6 +583,7 @@ pub(crate) mod tests {
             id: 1,
             label: "Ufficio".into(),
             address,
+            host_id: None,
             status: ViewerStatus::Connecting,
         });
         assert_eq!(
@@ -572,21 +615,121 @@ pub(crate) mod tests {
             id: 4,
             label: "Ufficio".into(),
             address,
+            host_id: None,
             status: ViewerStatus::Connecting,
         });
-        state.apply_viewer_update(
-            4,
-            ViewerUpdate::Exited {
-                success: false,
-                code: Some(1),
-                stderr: "error: the host refused: wrong PIN\n".into(),
-            },
-        );
+        state.apply_viewer_update(4, failed_with(FailureKind::WrongPin));
         assert_eq!(
             state.viewers[0].status,
             ViewerStatus::Failed("PIN errato.".into())
         );
         assert!(state.active_viewer_for(address).is_none());
+    }
+
+    fn failed_with(kind: FailureKind) -> ViewerUpdate {
+        ViewerUpdate::Exited {
+            success: false,
+            code: Some(kind.exit_code()),
+            stderr: "error: the host refused\n".into(),
+        }
+    }
+
+    /// The listed host `UFFICIO`, remembered, with a viewer opening on it.
+    fn remembered_office() -> (GuiState, String) {
+        let office = known(0xab, "UFFICIO");
+        let id = host_id(&office.fingerprint);
+        let mut state = GuiState::default();
+        state.apply_discovery(found(&id, "UFFICIO", "192.168.1.3", PROTOCOL_VERSION));
+        state.remembered.set(vec![office], None);
+        state.viewers.push(ViewerSession {
+            id: 7,
+            label: "UFFICIO".into(),
+            address: addr("192.168.1.3:7420"),
+            host_id: Some(id.clone()),
+            status: ViewerStatus::Connecting,
+        });
+        (state, id)
+    }
+
+    #[test]
+    fn remembered_hosts_are_marked_in_the_list() {
+        let (state, id) = remembered_office();
+        let row = state.host_row(&id).unwrap();
+        assert!(row.remembered);
+        assert_eq!(
+            row.details(),
+            "2560×1440 · 192.168.1.3:7420 · Accesso memorizzato"
+        );
+    }
+
+    #[test]
+    fn pin_required_brings_back_the_pin_field() {
+        let (mut state, id) = remembered_office();
+        state.apply_viewer_update(7, failed_with(FailureKind::PinRequired));
+        assert!(!state.host_row(&id).unwrap().remembered, "PIN field shown");
+        assert_eq!(state.selected_host.as_deref(), Some(id.as_str()));
+        assert_eq!(state.connect_error.as_deref(), Some(PIN_AGAIN));
+        assert!(
+            state.viewers.is_empty(),
+            "the row says it, not a failed line"
+        );
+
+        state.viewers.push(ViewerSession {
+            id: 8,
+            label: "UFFICIO".into(),
+            address: addr("192.168.1.3:7420"),
+            host_id: Some(id.clone()),
+            status: ViewerStatus::Connecting,
+        });
+        state.apply_viewer_update(8, ViewerUpdate::Connected);
+        assert!(state.host_row(&id).unwrap().remembered, "admitted again");
+    }
+
+    #[test]
+    fn pin_required_without_a_listed_host_is_a_failed_line() {
+        let mut state = GuiState::default();
+        state.viewers.push(ViewerSession {
+            id: 2,
+            label: "10.0.0.5".into(),
+            address: addr("10.0.0.5:7420"),
+            host_id: None,
+            status: ViewerStatus::Connecting,
+        });
+        state.apply_viewer_update(2, failed_with(FailureKind::PinRequired));
+        assert_eq!(
+            state.viewers[0].status_line(),
+            "10.0.0.5: Questo computer richiede il PIN."
+        );
+    }
+
+    #[test]
+    fn a_changed_identity_is_reported_on_the_viewer_line() {
+        let (mut state, id) = remembered_office();
+        state.apply_viewer_update(7, failed_with(FailureKind::HostChanged));
+        let ViewerStatus::Failed(message) = &state.viewers[0].status else {
+            panic!()
+        };
+        assert!(message.contains("identità"), "{message}");
+        assert!(
+            state.host_row(&id).unwrap().remembered,
+            "still offers Dimentica"
+        );
+    }
+
+    #[test]
+    fn authorized_devices_follow_the_service() {
+        let mut s = Sharing::default();
+        s.started();
+        let device = AuthorizedDevice {
+            fingerprint: net::Fingerprint([3; 32]),
+            name: "PORTATILE".into(),
+            first_access: crate::trust::Timestamp::from_unix_seconds(0),
+            last_access: crate::trust::Timestamp::from_unix_seconds(0),
+        };
+        s.apply(HostEvent::AuthorizedDevices(vec![device.clone()]));
+        assert_eq!(s.authorized, [device]);
+        s.apply(HostEvent::Stopped { error: None });
+        assert!(s.authorized.is_empty(), "known only while sharing");
     }
 
     #[test]

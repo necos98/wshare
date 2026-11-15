@@ -5,12 +5,17 @@
 //! Session handshake:
 //!   viewer -> host  Hello { version, viewer_name, pin }
 //!   host -> viewer  Welcome { host_name, stream }   or  Rejected { reason }
+//! `pin` may be `None`: a viewer the host already authorized is recognised
+//! by its TLS client certificate (see the `net` crate), never by anything
+//! in `Hello`. Otherwise the host answers `Rejected { PinRequired }`.
 //! then at any time:
 //!   viewer -> host  RequestKeyframe
 //!   viewer -> host  Input(event)            (ignored by view-only hosts)
 //!   host -> viewer  Cursor(shape) / CursorVisible(bool)
 //!   host -> viewer  InputAllowed(bool)      (remote control switched mid-session)
 //!   either          Bye
+
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -19,7 +24,9 @@ use crate::input::{CursorShape, InputEvent};
 
 /// 2: remote control (Input, Cursor, CursorVisible; Welcome.input_allowed).
 /// 3: InputAllowed; StreamInfo.encoder.
-pub const PROTOCOL_VERSION: u16 = 3;
+/// 4: Hello.pin optional (remembered viewers); Rejected carries a
+///    [`RejectReason`].
+pub const PROTOCOL_VERSION: u16 = 4;
 
 /// Upper bound for one control message; protects against garbage lengths.
 /// Sized for the largest cursor image (256x256 RGBA = 256 KiB) plus margin.
@@ -45,12 +52,83 @@ pub struct StreamInfo {
     pub encoder: String,
 }
 
+/// Why the host refused a viewer.
+///
+/// On the wire this is the plain text of [`fmt::Display`], the same string
+/// field protocol 3 used for `Rejected`: viewers of that version still
+/// decode the message and show a readable reason (e.g. "version"), and
+/// texts from such hosts map back to the matching variant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "String", from = "String")]
+pub enum RejectReason {
+    /// The viewer is not authorized yet and sent no PIN.
+    PinRequired,
+    WrongPin,
+    /// The viewer speaks another protocol version; `host` is the host's.
+    UnsupportedVersion {
+        host: u16,
+    },
+    /// Anything else, as text for people (e.g. the host cannot stream).
+    Other(String),
+}
+
+const PIN_REQUIRED_TEXT: &str = "PIN required";
+const WRONG_PIN_TEXT: &str = "wrong PIN";
+/// Protocol 3 hosts wrote "protocol version V not supported (host uses H)";
+/// both forms start and end the same way.
+const VERSION_TEXT_PREFIX: &str = "protocol version";
+const VERSION_TEXT_HOST: &str = "(host uses ";
+
+impl fmt::Display for RejectReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PinRequired => f.write_str(PIN_REQUIRED_TEXT),
+            Self::WrongPin => f.write_str(WRONG_PIN_TEXT),
+            Self::UnsupportedVersion { host } => {
+                write!(
+                    f,
+                    "{VERSION_TEXT_PREFIX} not supported {VERSION_TEXT_HOST}{host})"
+                )
+            }
+            Self::Other(text) => f.write_str(text),
+        }
+    }
+}
+
+impl From<RejectReason> for String {
+    fn from(reason: RejectReason) -> Self {
+        reason.to_string()
+    }
+}
+
+impl From<String> for RejectReason {
+    fn from(text: String) -> Self {
+        match text.as_str() {
+            PIN_REQUIRED_TEXT => Self::PinRequired,
+            WRONG_PIN_TEXT => Self::WrongPin,
+            _ => match unsupported_version_host(&text) {
+                Some(host) => Self::UnsupportedVersion { host },
+                None => Self::Other(text),
+            },
+        }
+    }
+}
+
+/// The host version in a version-mismatch text, if `text` is one.
+fn unsupported_version_host(text: &str) -> Option<u16> {
+    let rest = text.strip_prefix(VERSION_TEXT_PREFIX)?;
+    let (_, host) = rest.rsplit_once(VERSION_TEXT_HOST)?;
+    host.strip_suffix(')')?.parse().ok()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ControlMessage {
     Hello {
         version: u16,
         viewer_name: String,
-        pin: String,
+        /// `None` for a viewer that expects to be recognised by its client
+        /// certificate.
+        pin: Option<String>,
     },
     Welcome {
         host_name: String,
@@ -59,7 +137,7 @@ pub enum ControlMessage {
         input_allowed: bool,
     },
     Rejected {
-        reason: String,
+        reason: RejectReason,
     },
     RequestKeyframe,
     Input(InputEvent),
@@ -153,7 +231,12 @@ mod tests {
             ControlMessage::Hello {
                 version: PROTOCOL_VERSION,
                 viewer_name: "laptop".into(),
-                pin: "1234".into(),
+                pin: Some("1234".into()),
+            },
+            ControlMessage::Hello {
+                version: PROTOCOL_VERSION,
+                viewer_name: "laptop".into(),
+                pin: None,
             },
             ControlMessage::Welcome {
                 host_name: "desktop".into(),
@@ -184,7 +267,13 @@ mod tests {
             ControlMessage::CursorVisible(false),
             ControlMessage::InputAllowed(true),
             ControlMessage::Rejected {
-                reason: "bad pin".into(),
+                reason: RejectReason::PinRequired,
+            },
+            ControlMessage::Rejected {
+                reason: RejectReason::UnsupportedVersion { host: 4 },
+            },
+            ControlMessage::Rejected {
+                reason: RejectReason::Other("host cannot stream: no encoder".into()),
             },
             ControlMessage::RequestKeyframe,
             ControlMessage::Bye,
@@ -217,13 +306,52 @@ mod tests {
     }
 
     #[test]
+    fn reject_reasons_roundtrip_through_their_text() {
+        for reason in [
+            RejectReason::PinRequired,
+            RejectReason::WrongPin,
+            RejectReason::UnsupportedVersion { host: 4 },
+            RejectReason::Other("busy".into()),
+        ] {
+            assert_eq!(RejectReason::from(reason.to_string()), reason);
+        }
+    }
+
+    #[test]
+    fn rejected_is_encoded_as_text_like_protocol_3() {
+        let frame = encode_frame(&ControlMessage::Rejected {
+            reason: RejectReason::WrongPin,
+        });
+        // Variant index 2, then a postcard string: length + bytes.
+        let mut expected = vec![2, 9];
+        expected.extend_from_slice(b"wrong PIN");
+        assert_eq!(&frame[LENGTH_PREFIX..], expected);
+    }
+
+    #[test]
+    fn protocol_3_texts_map_to_reasons() {
+        assert_eq!(
+            RejectReason::from("protocol version 4 not supported (host uses 3)".to_string()),
+            RejectReason::UnsupportedVersion { host: 3 }
+        );
+        assert_eq!(
+            RejectReason::from("wrong PIN".to_string()),
+            RejectReason::WrongPin
+        );
+        assert_eq!(
+            RejectReason::from("protocol version (host uses x)".to_string()),
+            RejectReason::Other("protocol version (host uses x)".into())
+        );
+    }
+
+    #[test]
     fn empty_decoder_needs_more_bytes() {
         assert_eq!(FrameDecoder::new().next_message().unwrap(), None);
     }
 
     #[test]
     fn bytes_split_at_every_offset() {
-        let msg = samples().remove(1);
+        let msg = samples().remove(2); // Welcome
         let frame = encode_frame(&msg);
         for split in 0..=frame.len() {
             let mut decoder = FrameDecoder::new();

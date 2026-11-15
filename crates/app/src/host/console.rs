@@ -100,6 +100,11 @@ pub(super) fn describe(event: &HostEvent) -> Vec<(Output, String)> {
             ),
         ],
         HostEvent::PinChanged { pin } => vec![(Stdout, format!("New PIN: {pin}"))],
+        HostEvent::AuthorizedDevices(devices) if devices.is_empty() => vec![],
+        HostEvent::AuthorizedDevices(devices) => {
+            let names: Vec<&str> = devices.iter().map(|d| d.name.as_str()).collect();
+            vec![(Stdout, format!("Connect without PIN: {}", names.join(", ")))]
+        }
         HostEvent::ViewerConnected {
             viewer_name,
             address,
@@ -148,10 +153,13 @@ pub(super) fn describe(event: &HostEvent) -> Vec<(Output, String)> {
 mod tests {
     use std::net::SocketAddr;
 
+    use net::Fingerprint;
     use pipeline::HostStats;
+    use protocol::control::RejectReason;
 
     use super::Output::{Stderr, Stdout};
     use super::*;
+    use crate::trust::{AuthorizedDevice, Timestamp};
 
     fn address() -> SocketAddr {
         "192.168.1.20:50000".parse().unwrap()
@@ -195,7 +203,7 @@ mod tests {
         assert_eq!(
             texts(HostEvent::ViewerRejected {
                 address: address(),
-                reason: "wrong PIN".into()
+                reason: RejectReason::WrongPin,
             }),
             ["192.168.1.20:50000: rejected (wrong PIN)"]
         );
@@ -244,6 +252,17 @@ mod tests {
             ["New PIN: 654321"]
         );
         assert_eq!(describe(&HostEvent::InputBlocked).len(), 1);
+        let device = |name: &str| AuthorizedDevice {
+            fingerprint: Fingerprint([0; 32]),
+            name: name.into(),
+            first_access: Timestamp::from_unix_seconds(0),
+            last_access: Timestamp::from_unix_seconds(0),
+        };
+        assert_eq!(
+            texts(HostEvent::AuthorizedDevices(vec![device("A"), device("B")])),
+            ["Connect without PIN: A, B"]
+        );
+        assert!(describe(&HostEvent::AuthorizedDevices(vec![])).is_empty());
         assert_eq!(
             describe(&HostEvent::Stopped { error: None }),
             [(Stdout, "Stopped sharing.".to_string())]

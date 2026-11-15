@@ -42,9 +42,12 @@ impl Session {
         self.conn.remote_address()
     }
 
-    /// Fingerprint of the host certificate seen during the handshake
-    /// (viewer side; `None` on the host side, where viewers present no
-    /// certificate). With trust-on-first-use, store this and pin it next time.
+    /// Fingerprint of the certificate the peer proved during the handshake.
+    ///
+    /// - Viewer side: the host's (always present). With trust-on-first-use,
+    ///   store this and pin it next time.
+    /// - Host side: the viewer's client certificate, or `None` if it
+    ///   presented none (client certificates are optional).
     pub fn peer_fingerprint(&self) -> Option<Fingerprint> {
         self.peer_fingerprint
     }

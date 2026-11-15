@@ -1,6 +1,6 @@
 //! Boundaries between the interface logic and the outside world. Real
-//! implementations live in `sharing`, `launcher` and `discovery_source`;
-//! tests use fakes.
+//! implementations live in `sharing`, `launcher`, `discovery_source` and
+//! `known_hosts_file`; tests use fakes.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -8,9 +8,11 @@ use std::sync::mpsc::Sender;
 
 use anyhow::Result;
 use discovery::DiscoveryEvent;
+use net::Fingerprint;
 
 use crate::cli::HostOptions;
 use crate::host::HostEvent;
+use crate::trust::KnownHost;
 
 use super::model::{ViewerId, ViewerUpdate};
 
@@ -80,6 +82,8 @@ pub trait SharingControl {
     fn set_input_allowed(&self, allowed: bool);
     fn new_pin(&self) -> String;
     fn disconnect_viewer(&self);
+    /// Removes an authorized viewer: its next connection needs the PIN.
+    fn forget_device(&self, fingerprint: &Fingerprint);
     /// Stops sharing and waits until it is over (keys released, viewer told
     /// Bye, port closed). Blocks for up to about a second.
     fn stop(self: Box<Self>);
@@ -95,9 +99,28 @@ pub trait PendingStop {
     fn wait(self: Box<Self>);
 }
 
+/// Where and how a viewer connects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchRequest {
+    pub target: SocketAddr,
+    /// The LAN id of the host, when picked from the list: a remembered host
+    /// is then pinned and connected to without a PIN.
+    pub host_id: Option<String>,
+    /// `None`: the host must recognise this PC (or it refuses).
+    pub pin: Option<String>,
+}
+
 /// Opens viewer windows.
 pub trait ViewerLauncher {
-    /// Starts a viewer connecting to `target` with `pin`; its progress
-    /// arrives as [`AppEvent::Viewer`] with `id`.
-    fn launch(&mut self, id: ViewerId, target: SocketAddr, pin: &str) -> Result<()>;
+    /// Starts a viewer; its progress arrives as [`AppEvent::Viewer`] with
+    /// `id`.
+    fn launch(&mut self, id: ViewerId, request: &LaunchRequest) -> Result<()>;
+}
+
+/// The hosts this PC is remembered by (written by the viewers it launches).
+pub trait KnownHostsStore {
+    /// The current list; on failure an empty one and the reason.
+    fn load(&self) -> (Vec<KnownHost>, Option<String>);
+    /// Forgets a host: it is neither pinned nor connected to without a PIN.
+    fn forget(&self, fingerprint: &Fingerprint) -> Result<()>;
 }

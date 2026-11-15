@@ -3,7 +3,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use net::{Fingerprint, HostEndpoint, Identity, connect};
+use net::{Fingerprint, HostEndpoint, Identity, IdentityMismatch, Session, connect};
 use pipeline::DatagramSink;
 use protocol::control::{ControlMessage, PROTOCOL_VERSION, StreamInfo, VideoCodec};
 use tokio::time::timeout;
@@ -14,7 +14,7 @@ fn hello() -> ControlMessage {
     ControlMessage::Hello {
         version: PROTOCOL_VERSION,
         viewer_name: "viewer".into(),
-        pin: "1234".into(),
+        pin: Some("1234".into()),
     }
 }
 
@@ -57,7 +57,9 @@ async fn connected() -> Connected {
     let (host, addr) = bind_host(&identity);
     timeout(TIMEOUT, async {
         let (host_session, viewer_session) = tokio::join!(host.accept(), async {
-            let viewer = connect(addr, Some(identity.fingerprint())).await.unwrap();
+            let viewer = connect(addr, Some(identity.fingerprint()), None)
+                .await
+                .unwrap();
             let fp = viewer.peer_fingerprint();
             let remote = viewer.remote_addr();
             let (mut tx, rx, video) = viewer.split();
@@ -65,7 +67,10 @@ async fn connected() -> Connected {
             ((tx, rx, video), fp, remote)
         });
         let host_session = host_session.unwrap();
-        assert!(host_session.peer_fingerprint().is_none());
+        assert!(
+            host_session.peer_fingerprint().is_none(),
+            "no client certificate"
+        );
         let host_handle = host_session.handle();
         let (host_tx, mut host_rx, host_video) = host_session.split();
         assert_eq!(host_rx.recv().await.unwrap(), Some(hello()));
@@ -162,15 +167,25 @@ async fn oversized_datagram_errors() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pinned_fingerprint_mismatch_fails() {
+async fn pinned_fingerprint_mismatch_is_reported() {
     let identity = Identity::generate("host").unwrap();
     let (host, addr) = bind_host(&identity);
     let host_task = tokio::spawn(async move {
         let _ = host.accept().await;
     });
     let wrong = Identity::generate("impostor").unwrap().fingerprint();
-    let result = timeout(TIMEOUT, connect(addr, Some(wrong))).await.unwrap();
-    assert!(result.is_err());
+    let error = timeout(TIMEOUT, connect(addr, Some(wrong), None))
+        .await
+        .unwrap()
+        .err()
+        .expect("pinning a different fingerprint must fail");
+    assert_eq!(
+        error.downcast_ref::<IdentityMismatch>(),
+        Some(&IdentityMismatch {
+            expected: wrong,
+            actual: identity.fingerprint(),
+        })
+    );
     host_task.abort();
 }
 
@@ -181,13 +196,52 @@ async fn tofu_reports_host_fingerprint() {
     let host_task = tokio::spawn(async move {
         let _ = host.accept().await;
     });
-    let session = timeout(TIMEOUT, connect(addr, None))
+    let session = timeout(TIMEOUT, connect(addr, None, None))
         .await
         .unwrap()
         .unwrap();
     assert_eq!(session.peer_fingerprint(), Some(identity.fingerprint()));
     session.close();
     host_task.abort();
+}
+
+/// Connects with `client` as the viewer certificate and returns the
+/// host's session once it has read Hello.
+async fn host_view_of(client: Option<&Identity>) -> Session {
+    let identity = Identity::generate("host").unwrap();
+    let (host, addr) = bind_host(&identity);
+    timeout(TIMEOUT, async {
+        let (accepted, _viewer) = tokio::join!(host.accept(), async {
+            let viewer = connect(addr, Some(identity.fingerprint()), client)
+                .await
+                .unwrap();
+            let (mut tx, rx, video) = viewer.split();
+            tx.send(&hello()).await.unwrap();
+            (tx, rx, video)
+        });
+        accepted.unwrap()
+    })
+    .await
+    .expect("connection timed out")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn host_sees_the_viewer_certificate_fingerprint() {
+    let viewer = Identity::generate("viewer").unwrap();
+    let session = host_view_of(Some(&viewer)).await;
+    assert_eq!(session.peer_fingerprint(), Some(viewer.fingerprint()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn client_certificate_is_optional() {
+    let session = host_view_of(None).await;
+    assert_eq!(session.peer_fingerprint(), None);
+    let (_tx, mut rx, _video) = session.split();
+    assert_eq!(
+        timeout(TIMEOUT, rx.recv()).await.unwrap().unwrap(),
+        Some(hello()),
+        "a viewer without a certificate still reaches the control channel"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -199,8 +253,10 @@ async fn host_keeps_accepting_after_failed_handshake() {
         // The viewer parts are returned (not dropped) so the connection
         // stays open while the host reads Hello.
         let (accepted, _viewer) = tokio::join!(host.accept(), async {
-            assert!(connect(addr, Some(wrong)).await.is_err());
-            let viewer = connect(addr, Some(identity.fingerprint())).await.unwrap();
+            assert!(connect(addr, Some(wrong), None).await.is_err());
+            let viewer = connect(addr, Some(identity.fingerprint()), None)
+                .await
+                .unwrap();
             let (mut tx, rx, video) = viewer.split();
             tx.send(&hello()).await.unwrap();
             (tx, rx, video)

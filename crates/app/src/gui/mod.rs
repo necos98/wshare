@@ -1,10 +1,12 @@
 //! The minimal desktop interface (egui) and tray icon.
 //!
-//! - `model`: pure state; `controller`: intents and events -> state,
-//!   through the `ports` (traits) implemented by `sharing` (host service),
-//!   `launcher` (viewer child processes) and `discovery_source`.
-//! - `view` draws the state and returns intents; `app` is the eframe glue;
-//!   `tray` the notification-area icon.
+//! - `model`: pure state (with `remembered`: hosts this PC connects to
+//!   without a PIN); `controller`: intents and events -> state, through the
+//!   `ports` (traits) implemented by `sharing` (host service), `launcher`
+//!   (viewer child processes), `discovery_source` and `known_hosts_file`.
+//! - `view` draws the state and returns intents (`pairing_view` the parts
+//!   about remembered PCs); `app` is the eframe glue; `tray` the
+//!   notification-area icon.
 //!
 //! The sharing service runs in this process; every viewer window is a
 //! separate `wshare view` process (one winit event loop per process).
@@ -12,11 +14,15 @@
 mod app;
 mod controller;
 mod discovery_source;
+mod elapsed;
 mod icon;
+mod known_hosts_file;
 mod launcher;
 mod model;
+mod pairing_view;
 pub mod platform;
 mod ports;
+mod remembered;
 mod sharing;
 mod tray;
 mod view;
@@ -56,6 +62,7 @@ pub fn run() -> Result<()> {
             let controller = Controller::new(
                 sharing::HostService::new(inbox.clone()),
                 launcher::ProcessLauncher::new(inbox)?,
+                known_hosts_file::KnownHostsFile,
             );
             Ok(Box::new(WshareApp::new(controller, rx, tray)))
         }),

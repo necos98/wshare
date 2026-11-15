@@ -13,6 +13,7 @@ mod handshake;
 mod host;
 mod paths;
 mod target;
+mod trust;
 mod viewer;
 mod wire;
 
@@ -27,6 +28,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = cli::parse(&args);
     let is_gui = matches!(command, Ok(Command::Gui));
+    let is_view = matches!(command, Ok(Command::View(_)));
     if !is_gui {
         gui::platform::attach_parent_console();
     }
@@ -36,7 +38,13 @@ fn main() {
         } else {
             eprintln!("error: {e:#}");
         }
-        std::process::exit(1);
+        // The desktop interface reads why a viewer failed from its code.
+        let code = if is_view {
+            viewer::failure::exit_code(&e)
+        } else {
+            viewer::failure::GENERIC_EXIT_CODE
+        };
+        std::process::exit(code);
     }
 }
 

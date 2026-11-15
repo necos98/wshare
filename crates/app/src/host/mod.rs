@@ -6,7 +6,9 @@
 //!
 //! - `service`: the service thread and runtime, setup, stop.
 //! - `accept`: one viewer at a time until stopped.
-//! - `session`: one viewer from Hello to goodbye.
+//! - `session`: one viewer from Hello to goodbye (admission: remembered
+//!   device or PIN).
+//! - `devices`: the viewers admitted without a PIN, shared with the handle.
 //! - `streaming`: the capture/encode thread of a session.
 //! - `input_gate`: remote input behind the "allow input" switch.
 //! - `input_switch`: what a session does when that switch flips.
@@ -16,6 +18,7 @@
 
 mod accept;
 mod console;
+mod devices;
 mod events;
 mod input_gate;
 mod input_switch;
@@ -30,9 +33,12 @@ mod tests;
 use std::net::SocketAddr;
 
 use anyhow::Result;
+use net::Fingerprint;
 use pipeline::HostStats;
+use protocol::control::RejectReason;
 
 use crate::cli::HostOptions;
+use crate::trust::AuthorizedDevice;
 
 /// Something that happened while sharing. Front-ends render these; the
 /// service never prints.
@@ -52,13 +58,17 @@ pub enum HostEvent {
     PinChanged {
         pin: String,
     },
+    /// The viewers that connect without a PIN, oldest first. Sent right
+    /// after `Listening` and whenever the list changes (a viewer admitted
+    /// or removed, a last access updated).
+    AuthorizedDevices(Vec<AuthorizedDevice>),
     ViewerConnected {
         viewer_name: String,
         address: SocketAddr,
     },
     ViewerRejected {
         address: SocketAddr,
-        reason: String,
+        reason: RejectReason,
     },
     /// `error` is set when the session ended abnormally on our side.
     ViewerDisconnected {
@@ -110,9 +120,17 @@ impl HostHandle {
     }
 
     /// Generates a new random PIN for the next connections and reports it
-    /// with `PinChanged`. A connected viewer is not affected.
+    /// with `PinChanged`. A connected viewer is not affected, and viewers
+    /// already authorized still connect without a PIN.
     pub fn new_pin(&self) -> String {
         self.service.new_pin()
+    }
+
+    /// Removes a viewer from the authorized devices (reported with
+    /// `AuthorizedDevices`): its next connection needs the PIN. A session
+    /// it has open now goes on.
+    pub fn forget_device(&self, fingerprint: &Fingerprint) {
+        self.service.devices().remove(fingerprint);
     }
 
     /// Ends the current viewing session, if any (the viewer is told Bye).

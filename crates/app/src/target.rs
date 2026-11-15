@@ -67,17 +67,35 @@ pub fn discover(wait: Duration) -> Result<HostList> {
     Ok(hosts)
 }
 
+/// Where to connect, as [`resolve`] found it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved {
+    pub addr: SocketAddr,
+    /// How to call the host to the user.
+    pub label: String,
+    /// The id the host announced, when found by discovery.
+    pub host_id: Option<String>,
+}
+
 /// Resolves a target to a socket address, discovering if needed.
-pub fn resolve(target: &Target, wait: Duration) -> Result<(SocketAddr, String)> {
+pub fn resolve(target: &Target, wait: Duration) -> Result<Resolved> {
     if let Target::Address(addr) = target {
-        return Ok((*addr, addr.to_string()));
+        return Ok(Resolved {
+            addr: *addr,
+            label: addr.to_string(),
+            host_id: None,
+        });
     }
     let list = discover(wait)?;
     let host = choose(&list.hosts(), target)?;
     let Some(addr) = host.preferred_address() else {
         bail!("{} announced no usable address", host.announcement.display_name);
     };
-    Ok((addr, host.announcement.display_name.clone()))
+    Ok(Resolved {
+        addr,
+        label: host.announcement.display_name.clone(),
+        host_id: Some(host.id().to_string()),
+    })
 }
 
 #[cfg(test)]

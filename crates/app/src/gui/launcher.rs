@@ -1,13 +1,14 @@
 //! [`ViewerLauncher`] that runs each viewer as a child process
-//! (`wshare.exe view <ip:port>`): winit allows a single event loop per
-//! process and the viewer renders with its own swap chain.
+//! (`wshare.exe view <ip:port> [--host-id ID]`): winit allows a single
+//! event loop per process and the viewer renders with its own swap chain.
 //!
 //! The PIN travels in the `WSHARE_PIN` environment variable, not on the
-//! command line (visible to every process of the machine). stdout tells
-//! when the viewer connected, stderr why it failed.
+//! command line (visible to every process of the machine); without one the
+//! variable is removed, so the viewer never inherits a stale PIN. stdout
+//! tells when the viewer connected; the exit code (see
+//! `viewer::failure`) and stderr why it failed.
 
 use std::io::{BufRead, BufReader, Read};
-use std::net::SocketAddr;
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -17,7 +18,7 @@ use anyhow::{Context, Result};
 use crate::viewer::PIN_ENV;
 
 use super::model::{ViewerId, ViewerUpdate};
-use super::ports::{AppEvent, Inbox, ViewerLauncher};
+use super::ports::{AppEvent, Inbox, LaunchRequest, ViewerLauncher};
 
 /// `CREATE_NO_WINDOW`: no console for the child, whatever its subsystem.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -38,11 +39,17 @@ impl ProcessLauncher {
 }
 
 impl ViewerLauncher for ProcessLauncher {
-    fn launch(&mut self, id: ViewerId, target: SocketAddr, pin: &str) -> Result<()> {
-        let mut child = Command::new(&self.exe)
-            .arg("view")
-            .arg(target.to_string())
-            .env(PIN_ENV, pin)
+    fn launch(&mut self, id: ViewerId, request: &LaunchRequest) -> Result<()> {
+        let mut command = Command::new(&self.exe);
+        command.arg("view").arg(request.target.to_string());
+        if let Some(host_id) = &request.host_id {
+            command.arg("--host-id").arg(host_id);
+        }
+        match &request.pin {
+            Some(pin) => command.env(PIN_ENV, pin),
+            None => command.env_remove(PIN_ENV),
+        };
+        let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

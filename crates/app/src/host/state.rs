@@ -1,14 +1,16 @@
 //! State shared between the control handle (any thread, e.g. the GUI) and
-//! the running service (its own runtime): PIN, input permission and the
-//! "please end" signals.
+//! the running service (its own runtime): PIN, input permission, the
+//! sessions in progress and the "please end" signals.
 //!
 //! Everything here is read at the moment it matters (the PIN per connection
 //! attempt, the input flag per event) so changes take effect immediately
 //! without restarting the service.
 
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::watch;
+
+use super::sessions::{SessionId, SessionLimits, Sessions};
 
 /// Fires a one-shot cancellation that async code can await.
 ///
@@ -48,11 +50,13 @@ impl Cancelled {
     }
 }
 
-/// The viewer session currently being served, and whether the whole
-/// service is stopping. Kept under one lock so "stop" and "a new session
-/// begins" cannot interleave and leave a session running after stop.
-struct Sessions {
-    current: Option<Cancel>,
+/// Why a connection may not start a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SessionRefusal {
+    /// The service is stopping.
+    Stopping,
+    /// As many connections as allowed are being admitted already.
+    TooManyPending,
 }
 
 pub(super) struct SharedState {
@@ -60,18 +64,20 @@ pub(super) struct SharedState {
     input_allowed: watch::Sender<bool>,
     stop: Cancel,
     stop_listener: Cancelled,
+    /// Under one lock with the stop check, so "stop" and "a new session
+    /// begins" cannot interleave and leave a session running after stop.
     sessions: Mutex<Sessions>,
 }
 
 impl SharedState {
-    pub(super) fn new(pin: String, input_allowed: bool) -> Self {
+    pub(super) fn new(pin: String, input_allowed: bool, limits: SessionLimits) -> Self {
         let (stop, stop_listener) = Cancel::new();
         Self {
             pin: Mutex::new(pin),
             input_allowed: watch::channel(input_allowed).0,
             stop,
             stop_listener,
-            sessions: Mutex::new(Sessions { current: None }),
+            sessions: Mutex::new(Sessions::new(limits)),
         }
     }
 
@@ -101,42 +107,68 @@ impl SharedState {
         self.input_allowed.subscribe()
     }
 
-    /// Registers a new viewer session and returns its end signal, or `None`
-    /// if the service is stopping (the session must not start).
-    pub(super) fn begin_session(&self) -> Option<Cancelled> {
+    /// Registers a new connection to admit. The session lasts as long as
+    /// the returned ticket.
+    pub(super) fn begin_session(self: &Arc<Self>) -> Result<SessionTicket, SessionRefusal> {
         let mut sessions = lock(&self.sessions);
         if self.stop.is_cancelled() {
-            return None;
+            return Err(SessionRefusal::Stopping);
         }
-        let (cancel, listener) = Cancel::new();
-        sessions.current = Some(cancel);
-        Some(listener)
+        let (id, cancelled) = sessions.begin().ok_or(SessionRefusal::TooManyPending)?;
+        Ok(SessionTicket {
+            state: Arc::clone(self),
+            id,
+            cancelled,
+        })
     }
 
-    /// Forgets the session registered by [`Self::begin_session`].
-    pub(super) fn end_session(&self) {
-        lock(&self.sessions).current = None;
+    /// Whether as many viewers as allowed are watching already.
+    pub(super) fn viewers_full(&self) -> bool {
+        lock(&self.sessions).is_full()
     }
 
-    /// Asks the current session (if any) to end; the service keeps running.
+    /// Asks the admitted viewers to end; the service keeps running.
     pub(super) fn end_current_session(&self) {
-        if let Some(cancel) = &lock(&self.sessions).current {
-            cancel.cancel();
-        }
+        lock(&self.sessions).cancel_viewers();
     }
 
-    /// Asks the service to stop: no new sessions, the current one ends.
+    /// Asks the service to stop: no new sessions, the running ones end.
     pub(super) fn request_stop(&self) {
         let sessions = lock(&self.sessions);
         self.stop.cancel();
-        if let Some(cancel) = &sessions.current {
-            cancel.cancel();
-        }
+        sessions.cancel_all();
     }
 
     /// Resolves once [`Self::request_stop`] was called.
     pub(super) fn stop_requested(&self) -> Cancelled {
         self.stop_listener.clone()
+    }
+}
+
+/// One registered session, from its connection to its end; dropping it
+/// unregisters the session (also when its task unwinds).
+pub(super) struct SessionTicket {
+    state: Arc<SharedState>,
+    id: SessionId,
+    cancelled: Cancelled,
+}
+
+impl SessionTicket {
+    /// Fires when the host wants this session over (disconnect or stop).
+    pub(super) fn cancelled(&self) -> Cancelled {
+        self.cancelled.clone()
+    }
+
+    /// Makes this session a viewer; `false` if as many viewers as allowed
+    /// are watching already, or if the session was cancelled.
+    pub(super) fn admit(&self) -> bool {
+        lock(&self.state.sessions).admit(self.id)
+    }
+}
+
+impl Drop for SessionTicket {
+    fn drop(&mut self) {
+        lock(&self.state.sessions).end(self.id);
     }
 }
 
@@ -150,9 +182,17 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 mod tests {
     use super::*;
 
+    fn state() -> Arc<SharedState> {
+        Arc::new(SharedState::new(
+            "111111".into(),
+            true,
+            SessionLimits::default(),
+        ))
+    }
+
     #[test]
     fn pin_is_replaced_for_later_reads() {
-        let state = SharedState::new("111111".into(), true);
+        let state = state();
         assert_eq!(state.pin(), "111111");
         assert_eq!(state.replace_pin("222222".into()), "222222");
         assert_eq!(state.pin(), "222222");
@@ -160,7 +200,7 @@ mod tests {
 
     #[test]
     fn input_flag_changes_wake_watchers_only_on_real_changes() {
-        let state = SharedState::new("1".into(), true);
+        let state = state();
         let mut watcher = state.watch_input();
         state.set_input_allowed(true);
         assert!(
@@ -175,34 +215,69 @@ mod tests {
 
     #[test]
     fn ending_the_current_session_leaves_the_service_running() {
-        let state = SharedState::new("1".into(), true);
-        let session = state.begin_session().expect("not stopping");
+        let state = state();
+        let viewer = state.begin_session().expect("not stopping");
+        assert!(viewer.admit());
         state.end_current_session();
-        assert!(session.is_cancelled());
+        assert!(viewer.cancelled().is_cancelled());
         assert!(!state.stop_requested().is_cancelled());
-        state.end_session();
+        drop(viewer);
         assert!(
-            !state.begin_session().unwrap().is_cancelled(),
+            !state.begin_session().unwrap().cancelled().is_cancelled(),
             "next session is fresh"
         );
     }
 
     #[test]
-    fn ending_a_session_when_idle_is_a_no_op() {
-        let state = SharedState::new("1".into(), true);
+    fn ending_the_current_session_spares_admissions_in_progress() {
+        let state = state();
+        let pending = state.begin_session().unwrap();
         state.end_current_session();
-        assert!(!state.begin_session().unwrap().is_cancelled());
+        assert!(!pending.cancelled().is_cancelled());
     }
 
     #[test]
-    fn stop_ends_the_session_and_refuses_new_ones() {
-        let state = SharedState::new("1".into(), true);
-        let session = state.begin_session().unwrap();
+    fn a_dropped_ticket_frees_the_viewer_place() {
+        let state = state();
+        let viewer = state.begin_session().unwrap();
+        let next = state.begin_session().unwrap();
+        assert!(viewer.admit());
+        assert!(state.viewers_full());
+        assert!(!next.admit(), "one viewer at a time");
+        drop(viewer);
+        assert!(!state.viewers_full());
+        assert!(next.admit());
+    }
+
+    #[test]
+    fn too_many_admissions_at_once_are_refused() {
+        let state = state();
+        let tickets: Vec<SessionTicket> = (0..SessionLimits::default().max_pending)
+            .map(|_| state.begin_session().unwrap())
+            .collect();
+        assert_eq!(
+            state.begin_session().err(),
+            Some(SessionRefusal::TooManyPending)
+        );
+        drop(tickets);
+        assert!(state.begin_session().is_ok());
+    }
+
+    #[test]
+    fn stop_ends_every_session_and_refuses_new_ones() {
+        let state = state();
+        let viewer = state.begin_session().unwrap();
+        assert!(viewer.admit());
+        let pending = state.begin_session().unwrap();
         state.request_stop();
-        assert!(session.is_cancelled());
+        assert!(viewer.cancelled().is_cancelled());
+        assert!(pending.cancelled().is_cancelled());
         assert!(state.stop_requested().is_cancelled());
-        state.end_session();
-        assert!(state.begin_session().is_none());
+        assert!(
+            !pending.admit(),
+            "a stopped admission never becomes a viewer"
+        );
+        assert_eq!(state.begin_session().err(), Some(SessionRefusal::Stopping));
     }
 
     #[tokio::test]

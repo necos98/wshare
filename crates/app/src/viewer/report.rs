@@ -40,6 +40,10 @@ pub enum FailureCause {
     HostLeft,
     /// The connection broke during the session.
     ConnectionLost,
+    /// Another viewer is connected to the host.
+    HostBusy,
+    /// The host pauses this PC after too many wrong PINs.
+    TooManyAttempts,
     /// The host refused because it cannot stream its screen; the text is
     /// the host's own explanation.
     HostCannotStream(String),
@@ -47,7 +51,7 @@ pub enum FailureCause {
 }
 
 /// The causes whose exit code identifies them (no detail needed).
-const CODED_CAUSES: [FailureCause; 8] = [
+const CODED_CAUSES: [FailureCause; 10] = [
     FailureCause::PinRequired,
     FailureCause::WrongPin,
     FailureCause::UnsupportedVersion,
@@ -56,6 +60,8 @@ const CODED_CAUSES: [FailureCause; 8] = [
     FailureCause::TimedOut,
     FailureCause::HostLeft,
     FailureCause::ConnectionLost,
+    FailureCause::HostBusy,
+    FailureCause::TooManyAttempts,
 ];
 
 impl FailureCause {
@@ -71,6 +77,8 @@ impl FailureCause {
             Self::HostLeft => 16,
             Self::ConnectionLost => 17,
             Self::HostCannotStream(_) => 18,
+            Self::HostBusy => 19,
+            Self::TooManyAttempts => 20,
             Self::Other(_) => GENERIC_EXIT_CODE,
         }
     }
@@ -93,6 +101,8 @@ impl FailureCause {
             Self::HostChanged => "host-changed",
             Self::HostLeft => "host-left",
             Self::ConnectionLost => "connection-lost",
+            Self::HostBusy => "host-busy",
+            Self::TooManyAttempts => "too-many-attempts",
             Self::HostCannotStream(_) => "host-cannot-stream",
             Self::Other(_) => "other",
         }
@@ -210,6 +220,14 @@ mod tests {
         assert_eq!(
             ViewerReport::Failed(FailureCause::WrongPin).to_line(),
             "@wshare:failed:wrong-pin"
+        );
+        assert_eq!(
+            ViewerReport::Failed(FailureCause::HostBusy).to_line(),
+            "@wshare:failed:host-busy"
+        );
+        assert_eq!(
+            ViewerReport::Failed(FailureCause::TooManyAttempts).to_line(),
+            "@wshare:failed:too-many-attempts"
         );
         assert_eq!(
             ViewerReport::Failed(FailureCause::HostCannotStream("no encoder".into())).to_line(),

@@ -5,9 +5,13 @@
 //! API; their bodies are implemented in this module's private submodules:
 //!
 //! - `service`: the service thread and runtime, setup, stop.
-//! - `accept`: one viewer at a time until stopped.
-//! - `session`: one viewer from Hello to goodbye (admission: remembered
-//!   device or PIN).
+//! - `accept`: every connection on its own task until stopped.
+//! - `sessions`: the connections being admitted and the viewers, within
+//!   their limits (one viewer at a time).
+//! - `admission`: Hello and its verdict (remembered device or PIN; busy).
+//! - `pin_attempts` + `pin_guard`: wrong PINs pause their address and,
+//!   too many overall, rotate the PIN.
+//! - `session`: one viewer from Hello to goodbye.
 //! - `devices`: the viewers admitted without a PIN, shared with the handle.
 //! - `streaming`: the capture/encode thread of a session.
 //! - `input_gate`: remote input behind the "allow input" switch.
@@ -18,6 +22,7 @@
 //! - `console` + `interrupt`: the CLI front-end (`run`).
 
 mod accept;
+mod admission;
 mod cause;
 mod console;
 mod devices;
@@ -25,8 +30,11 @@ mod events;
 mod input_gate;
 mod input_switch;
 mod interrupt;
+mod pin_attempts;
+mod pin_guard;
 mod service;
 mod session;
+mod sessions;
 mod state;
 mod streaming;
 #[cfg(test)]
@@ -121,7 +129,9 @@ impl HostHandle {
 
     /// Generates a new random PIN for the next connections and reports it
     /// with `PinChanged`. A connected viewer is not affected, and viewers
-    /// already authorized still connect without a PIN.
+    /// already authorized still connect without a PIN. The service also
+    /// rotates it by itself after too many wrong PINs (`PinChanged`, then
+    /// the warning [`HostWarning::PinRotatedAfterWrongAttempts`]).
     pub fn new_pin(&self) -> String {
         self.service.new_pin()
     }
@@ -134,6 +144,7 @@ impl HostHandle {
     }
 
     /// Ends the current viewing session, if any (the viewer is told Bye).
+    /// Connections still being admitted are not affected.
     pub fn disconnect_viewer(&self) {
         self.service.state().end_current_session();
     }

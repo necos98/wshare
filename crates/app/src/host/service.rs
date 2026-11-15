@@ -22,7 +22,9 @@ use protocol::control::PROTOCOL_VERSION;
 use super::accept::accept_viewers;
 use super::devices::Devices;
 use super::events::EventSink;
+use super::pin_guard::{PinGuard, rotate_pin};
 use super::session::SessionContext;
+use super::sessions::SessionLimits;
 use super::state::SharedState;
 use super::{HostEvent, HostFailure, HostWarning};
 use crate::handshake::generate_pin;
@@ -30,8 +32,8 @@ use crate::options::HostOptions;
 use crate::paths;
 use crate::trust::AuthorizedDevices;
 
-/// Networking is light (one viewer, a control stream); the heavy work runs
-/// on the streaming thread, so a small runtime is enough.
+/// Networking is light (a few connections, each a control stream); the
+/// heavy work runs on the streaming thread, so a small runtime is enough.
 const RUNTIME_WORKERS: usize = 2;
 
 pub(super) struct Service {
@@ -46,7 +48,11 @@ impl Service {
     /// failed to).
     pub(super) fn start(options: HostOptions, events: EventSink) -> Result<Self> {
         let pin = options.pin.clone().unwrap_or_else(generate_pin);
-        let state = Arc::new(SharedState::new(pin, !options.view_only));
+        let state = Arc::new(SharedState::new(
+            pin,
+            !options.view_only,
+            SessionLimits::default(),
+        ));
         let (store, load_warning) = AuthorizedDevices::load(paths::authorized_viewers_file()?);
         let devices = Arc::new(Devices::new(store, events.clone()));
         let (setup_tx, setup_rx) = channel();
@@ -90,9 +96,7 @@ impl Service {
 
     /// Rotates the PIN for future connections and reports it.
     pub(super) fn new_pin(&self) -> String {
-        let pin = self.state.replace_pin(generate_pin());
-        self.events.emit(HostEvent::PinChanged { pin: pin.clone() });
-        pin
+        rotate_pin(&self.state, &self.events)
     }
 
     /// Stops and waits for the service thread (it emits `Stopped`).
@@ -208,13 +212,14 @@ fn serve(
             ));
         }
 
-        let context = SessionContext {
+        let context = Arc::new(SessionContext {
             host_name: host.name.clone(),
             stream: options.stream.clone(),
             state: Arc::clone(state),
             devices: Arc::clone(devices),
+            pin_guard: PinGuard::new(Arc::clone(state), events.clone()),
             events: events.clone(),
-        };
+        });
         let result = accept_viewers(&host.endpoint, &context).await;
         host.close();
         Exit::Ended(result)

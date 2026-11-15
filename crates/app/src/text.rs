@@ -34,6 +34,12 @@ pub fn viewer_failure(cause: &FailureCause) -> String {
         }
         FailureCause::HostLeft => "Il computer ha interrotto la condivisione.".to_string(),
         FailureCause::ConnectionLost => "Connessione persa.".to_string(),
+        FailureCause::HostBusy => {
+            "Computer già in uso da un altro visualizzatore: riprova quando si libera.".to_string()
+        }
+        FailureCause::TooManyAttempts => {
+            "Troppi PIN errati: attendi un minuto e riprova.".to_string()
+        }
         FailureCause::HostCannotStream(detail) => format!(
             "Il computer ha rifiutato la connessione: {}.",
             cannot_stream(detail)
@@ -69,6 +75,8 @@ pub fn reject_reason(reason: &RejectReason) -> String {
         RejectReason::WrongPin => "PIN errato".to_string(),
         RejectReason::UnsupportedVersion { .. } => VERSION_MISMATCH.to_string(),
         RejectReason::CannotStream(detail) => cannot_stream(detail),
+        RejectReason::Busy => "computer già in uso da un altro visualizzatore".to_string(),
+        RejectReason::TooManyAttempts => "troppi PIN errati, accesso sospeso".to_string(),
         RejectReason::Other(text) => text.clone(),
     }
 }
@@ -111,6 +119,9 @@ pub fn host_warning(warning: &HostWarning) -> String {
         }
         HostWarning::DeviceRemovalNotSaved(detail) => {
             format!("Impossibile salvare la rimozione del dispositivo: {detail}")
+        }
+        HostWarning::PinRotatedAfterWrongAttempts => {
+            "PIN cambiato dopo troppi tentativi errati.".to_string()
         }
         HostWarning::InputFailed {
             detail,
@@ -318,6 +329,14 @@ mod tests {
             ),
             (FailureCause::ConnectionLost, "Connessione persa."),
             (
+                FailureCause::HostBusy,
+                "Computer già in uso da un altro visualizzatore: riprova quando si libera.",
+            ),
+            (
+                FailureCause::TooManyAttempts,
+                "Troppi PIN errati: attendi un minuto e riprova.",
+            ),
+            (
                 FailureCause::HostCannotStream("no encoder".into()),
                 "Il computer ha rifiutato la connessione: impossibile trasmettere lo schermo \
                  (no encoder).",
@@ -355,6 +374,14 @@ mod tests {
         assert_eq!(
             reject_reason(&RejectReason::CannotStream("no encoder".into())),
             "impossibile trasmettere lo schermo (no encoder)"
+        );
+        assert_eq!(
+            reject_reason(&RejectReason::Busy),
+            "computer già in uso da un altro visualizzatore"
+        );
+        assert_eq!(
+            reject_reason(&RejectReason::TooManyAttempts),
+            "troppi PIN errati, accesso sospeso"
         );
         assert_eq!(reject_reason(&RejectReason::Other("busy".into())), "busy");
         assert_eq!(
@@ -409,6 +436,10 @@ mod tests {
             (
                 HostWarning::DeviceRemovalNotSaved("disk full".into()),
                 "Impossibile salvare la rimozione del dispositivo: disk full",
+            ),
+            (
+                HostWarning::PinRotatedAfterWrongAttempts,
+                "PIN cambiato dopo troppi tentativi errati.",
             ),
             (
                 HostWarning::InputFailed {

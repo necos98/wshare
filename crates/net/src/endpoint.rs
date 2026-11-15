@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use quinn::{Connection, Endpoint, Incoming, VarInt};
+use quinn::{Connection, Endpoint, VarInt};
 use rustls::pki_types::CertificateDer;
 
 use crate::identity::{Fingerprint, Identity};
@@ -57,23 +57,51 @@ impl HostEndpoint {
     /// Waits for the next viewer whose handshake completes and who opens
     /// the control stream. Connections that fail the handshake or stay
     /// silent for [`CONTROL_STREAM_TIMEOUT`] are dropped and accepting
-    /// continues, so one bad peer cannot stop the host. Errors only once the
-    /// endpoint is closed. Viewers are handled one at a time.
+    /// continues. Errors only once the endpoint is closed. Viewers are
+    /// established one at a time: to serve several at once, take each
+    /// [`Self::incoming`] connection and establish it on its own task.
     pub async fn accept(&self) -> Result<Session> {
         loop {
-            let incoming = self
-                .endpoint
-                .accept()
-                .await
-                .ok_or_else(|| anyhow!("host endpoint closed"))?;
-            if let Ok(session) = Self::establish(incoming).await {
+            if let Ok(session) = self.incoming().await?.establish().await {
                 return Ok(session);
             }
         }
     }
 
-    async fn establish(incoming: Incoming) -> Result<Session> {
-        let conn = incoming.await.context("QUIC handshake")?;
+    /// Waits for the next connection attempt, without waiting for its
+    /// handshake: the caller decides whether to [`Incoming::establish`] or
+    /// [`Incoming::refuse`] it. Errors only once the endpoint is closed.
+    pub async fn incoming(&self) -> Result<Incoming> {
+        self.endpoint
+            .accept()
+            .await
+            .map(|incoming| Incoming { incoming })
+            .ok_or_else(|| anyhow!("host endpoint closed"))
+    }
+
+    /// Stops accepting and closes every connection of this endpoint.
+    pub fn close(&self) {
+        self.endpoint.close(VarInt::from_u32(0), b"host closed");
+    }
+}
+
+/// A viewer's connection attempt, before its handshake. Dropping it
+/// ignores the attempt.
+pub struct Incoming {
+    incoming: quinn::Incoming,
+}
+
+impl Incoming {
+    /// Turns the viewer away at once, without a handshake.
+    pub fn refuse(self) {
+        self.incoming.refuse();
+    }
+
+    /// Completes the handshake and waits for the viewer to open the control
+    /// stream; one that stays silent for [`CONTROL_STREAM_TIMEOUT`] is
+    /// dropped with an error.
+    pub async fn establish(self) -> Result<Session> {
+        let conn = self.incoming.await.context("QUIC handshake")?;
         // `None`: the viewer presented no certificate (it is optional).
         let viewer = peer_fingerprint(&conn);
         match tokio::time::timeout(CONTROL_STREAM_TIMEOUT, conn.accept_bi()).await {
@@ -84,11 +112,6 @@ impl HostEndpoint {
                 bail!("viewer did not open the control stream in time")
             }
         }
-    }
-
-    /// Stops accepting and closes every connection of this endpoint.
-    pub fn close(&self) {
-        self.endpoint.close(VarInt::from_u32(0), b"host closed");
     }
 }
 

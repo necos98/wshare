@@ -85,6 +85,9 @@ pub enum HostWarning {
         detail: String,
     },
     DeviceRemovalNotSaved(String),
+    /// Too many wrong PINs arrived lately: the PIN was replaced (the new
+    /// one came with `PinChanged`).
+    PinRotatedAfterWrongAttempts,
     /// Injecting a viewer's input failed; `suppressed` similar failures
     /// were not reported since the last warning.
     InputFailed {
@@ -107,6 +110,9 @@ impl fmt::Display for HostWarning {
             }
             Self::DeviceRemovalNotSaved(detail) => {
                 write!(f, "cannot save the removal: {detail}")
+            }
+            Self::PinRotatedAfterWrongAttempts => {
+                f.write_str("the PIN was changed after too many wrong attempts")
             }
             Self::InputFailed {
                 detail,
@@ -216,6 +222,10 @@ mod tests {
             }
             .to_string(),
             "cannot remember \"PC\": disk full"
+        );
+        assert_eq!(
+            HostWarning::PinRotatedAfterWrongAttempts.to_string(),
+            "the PIN was changed after too many wrong attempts"
         );
     }
 }

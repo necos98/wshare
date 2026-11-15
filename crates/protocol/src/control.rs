@@ -34,7 +34,9 @@ use crate::input::{CursorShape, InputEvent};
 /// 2: remote control (Input, Cursor, CursorVisible; Welcome.input_allowed).
 /// 3: InputAllowed; StreamInfo.encoder.
 /// 4: Hello.pin optional (remembered viewers); Rejected carries a
-///    [`RejectReason`].
+///    [`RejectReason`]. The reasons added later (`Busy`,
+///    `TooManyAttempts`) keep its text form, so they need no new version:
+///    a viewer that does not know them shows their text as `Other`.
 pub const PROTOCOL_VERSION: u16 = 4;
 
 /// Upper bound for one control message; protects against garbage lengths.
@@ -79,12 +81,19 @@ pub enum RejectReason {
     },
     /// The host could not start streaming its screen; the text is why.
     CannotStream(String),
+    /// Another viewer is already connected (who it is stays undisclosed).
+    Busy,
+    /// Too many wrong PINs came from the viewer's address lately: the host
+    /// refuses without checking the PIN until the pause is over.
+    TooManyAttempts,
     /// Anything else, as text for people.
     Other(String),
 }
 
 const PIN_REQUIRED_TEXT: &str = "PIN required";
 const WRONG_PIN_TEXT: &str = "wrong PIN";
+const BUSY_TEXT: &str = "host busy: another viewer is connected";
+const TOO_MANY_ATTEMPTS_TEXT: &str = "too many wrong PINs, try again later";
 const CANNOT_STREAM_TEXT_PREFIX: &str = "host cannot stream:";
 /// Protocol 3 hosts wrote "protocol version V not supported (host uses H)";
 /// both forms start and end the same way.
@@ -103,6 +112,8 @@ impl fmt::Display for RejectReason {
                 )
             }
             Self::CannotStream(cause) => write!(f, "{CANNOT_STREAM_TEXT_PREFIX} {cause}"),
+            Self::Busy => f.write_str(BUSY_TEXT),
+            Self::TooManyAttempts => f.write_str(TOO_MANY_ATTEMPTS_TEXT),
             Self::Other(text) => f.write_str(text),
         }
     }
@@ -119,6 +130,8 @@ impl From<String> for RejectReason {
         match text.as_str() {
             PIN_REQUIRED_TEXT => Self::PinRequired,
             WRONG_PIN_TEXT => Self::WrongPin,
+            BUSY_TEXT => Self::Busy,
+            TOO_MANY_ATTEMPTS_TEXT => Self::TooManyAttempts,
             _ => match unsupported_version_host(&text) {
                 Some(host) => Self::UnsupportedVersion { host },
                 None => match text.strip_prefix(CANNOT_STREAM_TEXT_PREFIX) {
@@ -317,6 +330,12 @@ mod tests {
             ControlMessage::Rejected {
                 reason: RejectReason::CannotStream("no encoder".into()),
             },
+            ControlMessage::Rejected {
+                reason: RejectReason::Busy,
+            },
+            ControlMessage::Rejected {
+                reason: RejectReason::TooManyAttempts,
+            },
             ControlMessage::RequestKeyframe,
             ControlMessage::Bye,
         ]
@@ -354,6 +373,8 @@ mod tests {
             RejectReason::WrongPin,
             RejectReason::UnsupportedVersion { host: 4 },
             RejectReason::CannotStream("no encoder".into()),
+            RejectReason::Busy,
+            RejectReason::TooManyAttempts,
             RejectReason::Other("busy".into()),
         ] {
             assert_eq!(RejectReason::from(reason.to_string()), reason);
@@ -536,6 +557,11 @@ mod tests {
             (
                 RejectReason::CannotStream("no encoder".into()),
                 "host cannot stream: no encoder",
+            ),
+            (RejectReason::Busy, "host busy: another viewer is connected"),
+            (
+                RejectReason::TooManyAttempts,
+                "too many wrong PINs, try again later",
             ),
             (RejectReason::Other("busy".into()), "busy"),
         ] {

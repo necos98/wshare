@@ -3,7 +3,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use net::{Fingerprint, HostEndpoint, Identity, IdentityMismatch, Session, connect};
+use net::{ConnectError, Fingerprint, HostEndpoint, Identity, IdentityMismatch, Session, connect};
 use pipeline::DatagramSink;
 use protocol::control::{ControlMessage, PROTOCOL_VERSION, StreamInfo, VideoCodec};
 use tokio::time::timeout;
@@ -266,4 +266,62 @@ async fn host_keeps_accepting_after_failed_handshake() {
     })
     .await
     .unwrap();
+}
+
+/// Well under the host's wait for a silent viewer's control stream.
+const PROMPT: Duration = Duration::from_secs(3);
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_silent_viewer_does_not_delay_the_next_one() {
+    let identity = Identity::generate("host").unwrap();
+    let (host, addr) = bind_host(&identity);
+    let pinned = Some(identity.fingerprint());
+
+    // Connects but never sends Hello: its control stream stays invisible.
+    let silent_viewer = tokio::spawn(connect(addr, pinned, None));
+    let silent = timeout(TIMEOUT, host.incoming()).await.unwrap().unwrap();
+    let waiting = tokio::spawn(silent.establish());
+    let _silent = timeout(TIMEOUT, silent_viewer)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    let (accepted, _viewer) = timeout(PROMPT, async {
+        tokio::join!(
+            async { host.incoming().await.unwrap().establish().await },
+            async {
+                let viewer = connect(addr, pinned, None).await.unwrap();
+                let (mut tx, rx, video) = viewer.split();
+                tx.send(&hello()).await.unwrap();
+                (tx, rx, video)
+            }
+        )
+    })
+    .await
+    .expect("the second viewer waited for the silent one");
+    let (_tx, mut rx, _video) = accepted.unwrap().split();
+    assert_eq!(rx.recv().await.unwrap(), Some(hello()));
+    assert!(!waiting.is_finished(), "the silent one is still pending");
+    waiting.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_attempt_fails_at_once() {
+    let identity = Identity::generate("host").unwrap();
+    let (host, addr) = bind_host(&identity);
+    let refusing = tokio::spawn(async move {
+        host.incoming().await.unwrap().refuse();
+        host
+    });
+    let error = timeout(PROMPT, connect(addr, Some(identity.fingerprint()), None))
+        .await
+        .expect("a refusal is not a timeout")
+        .err()
+        .expect("a refused attempt cannot connect");
+    assert!(matches!(
+        error.downcast_ref::<ConnectError>(),
+        Some(ConnectError::Failed { .. })
+    ));
+    drop(refusing.await.unwrap());
 }

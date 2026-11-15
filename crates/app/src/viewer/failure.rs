@@ -60,6 +60,8 @@ impl ViewerFailure {
             Self::Rejected(RejectReason::CannotStream(cause)) => {
                 FailureCause::HostCannotStream(cause.clone())
             }
+            Self::Rejected(RejectReason::Busy) => FailureCause::HostBusy,
+            Self::Rejected(RejectReason::TooManyAttempts) => FailureCause::TooManyAttempts,
             Self::Rejected(RejectReason::Other(text)) => FailureCause::Other(text.clone()),
             Self::HostChanged(_) => FailureCause::HostChanged,
             Self::TimedOut(_) => FailureCause::TimedOut,
@@ -124,6 +126,8 @@ mod tests {
                 RejectReason::CannotStream("no encoder".into()),
                 FailureCause::HostCannotStream("no encoder".into()),
             ),
+            (RejectReason::Busy, FailureCause::HostBusy),
+            (RejectReason::TooManyAttempts, FailureCause::TooManyAttempts),
             (
                 RejectReason::Other("busy".into()),
                 FailureCause::Other("busy".into()),

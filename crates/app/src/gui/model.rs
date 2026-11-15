@@ -485,6 +485,39 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_pin_rotated_after_wrong_attempts_is_shown_with_its_reason() {
+        let mut s = Sharing::default();
+        s.started();
+        s.apply(listening("111111", "ff"));
+        s.apply(HostEvent::PinChanged {
+            pin: "222222".into(),
+        });
+        s.apply(HostEvent::Warning(
+            HostWarning::PinRotatedAfterWrongAttempts,
+        ));
+        assert_eq!(s.pin.as_deref(), Some("222222"));
+        assert_eq!(
+            s.notice.as_deref(),
+            Some("PIN cambiato dopo troppi tentativi errati.")
+        );
+    }
+
+    #[test]
+    fn turning_away_a_second_viewer_is_noted() {
+        let mut s = Sharing::default();
+        s.apply(HostEvent::ViewerRejected {
+            address: addr("10.0.0.3:1"),
+            reason: RejectReason::Busy,
+        });
+        assert_eq!(
+            s.notice.as_deref(),
+            Some(
+                "Connessione rifiutata da 10.0.0.3: computer già in uso da un altro visualizzatore"
+            )
+        );
+    }
+
+    #[test]
     fn stopped_resets_but_keeps_preference() {
         let mut s = Sharing {
             input_allowed: false,
@@ -630,6 +663,34 @@ pub(crate) mod tests {
             ViewerStatus::Failed("PIN errato.".into())
         );
         assert!(state.active_viewer_for(address).is_none());
+    }
+
+    #[test]
+    fn a_busy_or_pausing_host_is_explained_on_the_viewer_line() {
+        let (mut state, id) = remembered_office();
+        state.apply_viewer_update(7, failed_with(FailureCause::HostBusy));
+        assert_eq!(
+            state.viewers[0].status_line(),
+            "UFFICIO: Computer già in uso da un altro visualizzatore: riprova quando si libera."
+        );
+        assert!(
+            state.host_row(&id).unwrap().remembered,
+            "a busy host keeps its remembered access"
+        );
+
+        let mut state = GuiState::default();
+        state.viewers.push(ViewerSession {
+            id: 3,
+            label: "10.0.0.5".into(),
+            address: addr("10.0.0.5:7420"),
+            host_id: None,
+            status: ViewerStatus::Connecting,
+        });
+        state.apply_viewer_update(3, failed_with(FailureCause::TooManyAttempts));
+        assert_eq!(
+            state.viewers[0].status_line(),
+            "10.0.0.5: Troppi PIN errati: attendi un minuto e riprova."
+        );
     }
 
     fn failed_with(cause: FailureCause) -> ViewerUpdate {

@@ -31,14 +31,24 @@ pub enum HelloVerdict {
     Reject { reason: RejectReason },
 }
 
+/// What the host knows when a `Hello` arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HelloContext<'a> {
+    /// The PIN valid right now.
+    pub expected_pin: &'a str,
+    pub trust: ViewerTrust,
+    /// As many viewers as allowed are watching already.
+    pub host_busy: bool,
+    /// Too many wrong PINs came from the viewer's address lately.
+    pub pin_paused: bool,
+}
+
 /// Decides whether the first control message of a session admits the
-/// viewer: the version must match; then an authorized device needs no PIN
-/// (whatever PIN it sends), anyone else needs the PIN valid right now.
-pub fn check_hello(
-    message: &ControlMessage,
-    expected_pin: &str,
-    trust: ViewerTrust,
-) -> HelloVerdict {
+/// viewer: the version must match; a busy host refuses everyone; then an
+/// authorized device needs no PIN (whatever PIN it sends) and is never
+/// paused, while anyone else needs the PIN valid right now, which is not
+/// even checked while its address is paused.
+pub fn check_hello(message: &ControlMessage, context: &HelloContext) -> HelloVerdict {
     let ControlMessage::Hello {
         version,
         viewer_name,
@@ -50,8 +60,15 @@ pub fn check_hello(
     if *version != PROTOCOL_VERSION {
         return reject(unsupported_version());
     }
-    let by = match (trust, pin.as_deref().map(str::trim)) {
+    if context.host_busy {
+        return reject(RejectReason::Busy);
+    }
+    let expected_pin = context.expected_pin;
+    let by = match (context.trust, pin.as_deref().map(str::trim)) {
         (ViewerTrust::Authorized, _) => AdmittedBy::Device,
+        (ViewerTrust::Unknown, _) if context.pin_paused => {
+            return reject(RejectReason::TooManyAttempts);
+        }
         (ViewerTrust::Unknown, None | Some("")) => return reject(RejectReason::PinRequired),
         (ViewerTrust::Unknown, Some(pin)) if pins_match(pin, expected_pin) => AdmittedBy::Pin,
         (ViewerTrust::Unknown, Some(_)) => return reject(RejectReason::WrongPin),
@@ -105,8 +122,63 @@ mod tests {
         }
     }
 
+    fn context(trust: ViewerTrust) -> HelloContext<'static> {
+        HelloContext {
+            expected_pin: PIN,
+            trust,
+            host_busy: false,
+            pin_paused: false,
+        }
+    }
+
     fn check(message: &ControlMessage, trust: ViewerTrust) -> HelloVerdict {
-        check_hello(message, PIN, trust)
+        check_hello(message, &context(trust))
+    }
+
+    #[test]
+    fn a_busy_host_refuses_everyone_after_the_version_check() {
+        for trust in [ViewerTrust::Authorized, ViewerTrust::Unknown] {
+            let busy = HelloContext {
+                host_busy: true,
+                ..context(trust)
+            };
+            assert_eq!(
+                check_hello(&hello(PROTOCOL_VERSION, Some(PIN)), &busy),
+                rejected(RejectReason::Busy)
+            );
+            assert_eq!(
+                check_hello(&hello(PROTOCOL_VERSION + 1, Some(PIN)), &busy),
+                rejected(unsupported_version()),
+                "a viewer that could not connect anyway is told why"
+            );
+        }
+    }
+
+    #[test]
+    fn a_paused_address_is_refused_without_checking_its_pin() {
+        let paused = HelloContext {
+            pin_paused: true,
+            ..context(ViewerTrust::Unknown)
+        };
+        for pin in [Some(PIN), Some("000000"), None] {
+            assert_eq!(
+                check_hello(&hello(PROTOCOL_VERSION, pin), &paused),
+                rejected(RejectReason::TooManyAttempts),
+                "{pin:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_authorized_device_is_never_paused() {
+        let paused = HelloContext {
+            pin_paused: true,
+            ..context(ViewerTrust::Authorized)
+        };
+        assert_eq!(
+            check_hello(&hello(PROTOCOL_VERSION, None), &paused),
+            accepted(AdmittedBy::Device)
+        );
     }
 
     fn accepted(by: AdmittedBy) -> HelloVerdict {
@@ -208,11 +280,9 @@ mod tests {
         let message = ControlMessage::Hello {
             version: PROTOCOL_VERSION,
             viewer_name: format!("{}\n", "x".repeat(1000)),
-            pin: Some("1".into()),
+            pin: Some(PIN.into()),
         };
-        let HelloVerdict::Accept { viewer_name, .. } =
-            check_hello(&message, "1", ViewerTrust::Unknown)
-        else {
+        let HelloVerdict::Accept { viewer_name, .. } = check(&message, ViewerTrust::Unknown) else {
             panic!()
         };
         assert_eq!(viewer_name, clean_peer_name(&"x".repeat(1000)));

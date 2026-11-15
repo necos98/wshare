@@ -7,7 +7,7 @@ use protocol::control::PROTOCOL_VERSION;
 use super::fakes::{calls, controller, host};
 use super::*;
 use crate::gui::model::tests::{found, listening};
-use crate::host::{HostEvent, HostFailure};
+use crate::host::{HostEvent, HostFailure, HostWarning};
 use crate::viewer::report::FailureCause;
 
 #[test]
@@ -133,6 +133,31 @@ fn new_pin_and_disconnect_reach_the_service() {
 }
 
 #[test]
+fn a_pin_the_service_rotated_by_itself_is_shown_with_why() {
+    let (mut c, log) = controller();
+    c.handle(Intent::SetSharing(true));
+    c.on_event(host(1, listening("111111", "ff")));
+    calls(&log);
+    c.on_event(host(
+        1,
+        HostEvent::PinChanged {
+            pin: "222222".into(),
+        },
+    ));
+    c.on_event(host(
+        1,
+        HostEvent::Warning(HostWarning::PinRotatedAfterWrongAttempts),
+    ));
+    let sharing = &c.state().sharing;
+    assert_eq!(sharing.pin.as_deref(), Some("222222"));
+    assert_eq!(
+        sharing.notice.as_deref(),
+        Some("PIN cambiato dopo troppi tentativi errati.")
+    );
+    assert!(calls(&log).is_empty(), "nothing to ask the service");
+}
+
+#[test]
 fn viewer_connect_and_disconnect_events() {
     let (mut c, _log) = controller();
     c.handle(Intent::SetSharing(true));
@@ -255,6 +280,37 @@ fn viewer_failure_message_and_dismiss() {
     assert_eq!(c.state().viewers[0].status_line(), "10.0.0.5: PIN errato.");
     c.handle(Intent::DismissViewer(1));
     assert!(c.state().viewers.is_empty());
+}
+
+#[test]
+fn a_busy_host_and_a_pause_are_told_apart_from_a_firewall() {
+    let cases = [
+        (
+            FailureCause::HostBusy,
+            "10.0.0.5: Computer già in uso da un altro visualizzatore: riprova quando si libera.",
+        ),
+        (
+            FailureCause::TooManyAttempts,
+            "10.0.0.5: Troppi PIN errati: attendi un minuto e riprova.",
+        ),
+    ];
+    for (cause, line) in cases {
+        let (mut c, _log) = controller();
+        c.handle(Intent::ConnectAddress {
+            address: "10.0.0.5".into(),
+            pin: "1".into(),
+        });
+        c.on_event(AppEvent::Viewer {
+            id: 1,
+            update: ViewerUpdate::Exited {
+                success: false,
+                code: Some(cause.exit_code()),
+                cause: Some(cause),
+            },
+        });
+        assert_eq!(c.state().viewers[0].status_line(), line);
+        assert!(!line.contains("firewall"));
+    }
 }
 
 #[test]

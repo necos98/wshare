@@ -12,15 +12,17 @@ const RETRY: Duration = Duration::from_secs(10);
 
 /// Starts browsing in a detached thread that lives as long as the process.
 pub fn spawn(inbox: Inbox) {
-    let _ = std::thread::Builder::new().name("discovery".into()).spawn(move || {
-        loop {
-            match Browser::start() {
-                Ok(browser) => browse(browser, &inbox),
-                Err(e) => inbox.send(AppEvent::DiscoveryFailed(format!("{e:#}"))),
+    let _ = std::thread::Builder::new()
+        .name("discovery".into())
+        .spawn(move || {
+            loop {
+                match Browser::start() {
+                    Ok(browser) => browse(browser, &inbox),
+                    Err(e) => inbox.send(AppEvent::DiscoveryFailed(format!("{e:#}"))),
+                }
+                std::thread::sleep(RETRY);
             }
-            std::thread::sleep(RETRY);
-        }
-    });
+        });
 }
 
 /// Forwards events until the browser stops (an empty wait that returns

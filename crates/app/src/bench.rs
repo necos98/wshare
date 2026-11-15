@@ -7,7 +7,9 @@ use std::io::{BufWriter, Write};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use codec::{Codec, DesktopSource, EncodedFrame, FrameSource, HwEncoder, MediaFoundation, VideoEncoder};
+use codec::{
+    Codec, DesktopSource, EncodedFrame, FrameSource, HwEncoder, MediaFoundation, VideoEncoder,
+};
 use pipeline::FramePacer;
 
 use crate::cli::BenchOptions;
@@ -49,7 +51,10 @@ impl Report {
             frames as f64 / secs,
             self.keyframes
         );
-        println!("Bitrate:  {:.1} Mbps average", self.bytes as f64 * 8.0 / secs / 1e6);
+        println!(
+            "Bitrate:  {:.1} Mbps average",
+            self.bytes as f64 * 8.0 / secs / 1e6
+        );
         println!(
             "Encode latency (submit -> bitstream): avg {avg:.2} ms, p50 {:.2}, p95 {:.2}, max {:.2}",
             pct(0.5),
@@ -78,7 +83,10 @@ pub fn run(options: BenchOptions) -> Result<()> {
         "Stream:   {}x{} @ {} fps, {} Mbps {:?} -> {out}",
         config.width, config.height, stream.fps, stream.mbps, stream.codec
     );
-    println!("Recording {} s: move windows or play a video to generate frames...", options.seconds);
+    println!(
+        "Recording {} s: move windows or play a video to generate frames...",
+        options.seconds
+    );
 
     let mut file = BufWriter::new(File::create(&out)?);
     let mut report = Report::default();

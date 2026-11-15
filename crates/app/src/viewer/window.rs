@@ -20,8 +20,8 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 use super::Outgoing;
 use super::cursor::CursorCache;
-use super::key_router::Hotkey;
 use super::key_log;
+use super::key_router::Hotkey;
 use super::keyboard_hook::KeyboardHook;
 use super::remote::RemoteControl;
 use super::render_thread::{RenderInput, RenderThread, RttProbe};

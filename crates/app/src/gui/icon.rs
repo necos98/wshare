@@ -31,7 +31,9 @@ pub fn png_entry(ico: &[u8], wanted: u32) -> Option<&[u8]> {
             let len = usize::try_from(u32_at(entry + 8)?).ok()?;
             let offset = usize::try_from(u32_at(entry + 12)?).ok()?;
             let image = ico.get(offset..offset.checked_add(len)?)?;
-            image.starts_with(b"\x89PNG").then_some((size.abs_diff(wanted), image))
+            image
+                .starts_with(b"\x89PNG")
+                .then_some((size.abs_diff(wanted), image))
         })
         .min_by_key(|(distance, _)| *distance)
         .map(|(_, image)| image)

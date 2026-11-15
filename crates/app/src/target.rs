@@ -47,9 +47,14 @@ pub fn choose<'a>(hosts: &[&'a DiscoveredHost], target: &Target) -> Result<&'a D
         [one] => Ok(one),
         [] => bail!("no matching host found on the LAN (try `wshare view <IP>`)"),
         many => {
-            let names: Vec<&str> =
-                many.iter().map(|h| h.announcement.display_name.as_str()).collect();
-            bail!("several hosts found: {} - pass the name to choose", names.join(", "))
+            let names: Vec<&str> = many
+                .iter()
+                .map(|h| h.announcement.display_name.as_str())
+                .collect();
+            bail!(
+                "several hosts found: {} - pass the name to choose",
+                names.join(", ")
+            )
         }
     }
 }
@@ -89,7 +94,10 @@ pub fn resolve(target: &Target, wait: Duration) -> Result<Resolved> {
     let list = discover(wait)?;
     let host = choose(&list.hosts(), target)?;
     let Some(addr) = host.preferred_address() else {
-        bail!("{} announced no usable address", host.announcement.display_name);
+        bail!(
+            "{} announced no usable address",
+            host.announcement.display_name
+        );
     };
     Ok(Resolved {
         addr,
@@ -129,7 +137,10 @@ mod tests {
             parse_target(Some("10.0.0.5:9000"), 7420),
             Target::Address("10.0.0.5:9000".parse().unwrap())
         );
-        assert_eq!(parse_target(Some("laptop"), 7420), Target::Name("laptop".into()));
+        assert_eq!(
+            parse_target(Some("laptop"), 7420),
+            Target::Name("laptop".into())
+        );
     }
 
     #[test]

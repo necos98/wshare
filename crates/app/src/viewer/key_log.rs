@@ -72,7 +72,10 @@ fn open_log() -> Option<(PathBuf, std::fs::File)> {
             return Some((path, file));
         }
     }
-    eprintln!("Keyboard diagnostics disabled: cannot create a log in {}", dir.display());
+    eprintln!(
+        "Keyboard diagnostics disabled: cannot create a log in {}",
+        dir.display()
+    );
     None
 }
 

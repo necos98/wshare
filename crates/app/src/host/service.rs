@@ -25,8 +25,8 @@ use super::devices::Devices;
 use super::events::EventSink;
 use super::session::SessionContext;
 use super::state::SharedState;
-use crate::options::HostOptions;
 use crate::handshake::generate_pin;
+use crate::options::HostOptions;
 use crate::paths;
 use crate::trust::AuthorizedDevices;
 

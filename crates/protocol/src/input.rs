@@ -25,15 +25,28 @@ pub enum InputEvent {
     /// Absolute pointer position, normalized to the shared screen:
     /// (0,0) = top-left corner, (1,1) = bottom-right. Resolution-independent,
     /// so the viewer window can have any size.
-    MouseMove { x: f32, y: f32 },
-    MouseButton { button: MouseButton, pressed: bool },
+    MouseMove {
+        x: f32,
+        y: f32,
+    },
+    MouseButton {
+        button: MouseButton,
+        pressed: bool,
+    },
     /// Wheel rotation in [`WHEEL_DELTA`] units (positive = away from the
     /// user / to the right). Fractions of a notch come from touchpads.
-    MouseWheel { delta_x: i32, delta_y: i32 },
+    MouseWheel {
+        delta_x: i32,
+        delta_y: i32,
+    },
     /// A key by its PS/2 set-1 scan code (position on the keyboard, not the
     /// character): the HOST's keyboard layout decides what it types.
     /// `extended` = the 0xE0-prefixed keys (arrows, right Ctrl/Alt, ...).
-    Key { scancode: u16, extended: bool, pressed: bool },
+    Key {
+        scancode: u16,
+        extended: bool,
+        pressed: bool,
+    },
     /// Release every key and button the viewer pressed (it lost focus, so
     /// it will not see their release).
     ReleaseAll,

@@ -18,12 +18,8 @@ pub use authorized::{AuthorizedDevice, AuthorizedDevices};
 pub use known_hosts::{KnownHost, KnownHosts};
 pub use timestamp::Timestamp;
 
-
-
 /// Longest name we keep for a peer (it is shown in logs and the UI only).
 const MAX_PEER_NAME: usize = 64;
-
-
 
 /// A name a peer gave itself, made safe to keep and show: control
 /// characters removed, at most [`MAX_PEER_NAME`] characters. It remains a

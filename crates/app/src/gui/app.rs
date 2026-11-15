@@ -27,7 +27,14 @@ pub struct WshareApp {
 
 impl WshareApp {
     pub fn new(controller: AppController, events: Receiver<AppEvent>, tray: Option<Tray>) -> Self {
-        Self { controller, events, drafts: Drafts::default(), tray, hidden: false, quitting: false }
+        Self {
+            controller,
+            events,
+            drafts: Drafts::default(),
+            tray,
+            hidden: false,
+            quitting: false,
+        }
     }
 
     fn execute(&mut self, ctx: &egui::Context, command: WindowCommand) {
@@ -86,7 +93,9 @@ impl eframe::App for WshareApp {
             self.handle(&ctx, Intent::CloseWindow);
         }
         let intents = egui::CentralPanel::default_margins()
-            .show(ui, |ui| view::show(ui, self.controller.state(), &mut self.drafts))
+            .show(ui, |ui| {
+                view::show(ui, self.controller.state(), &mut self.drafts)
+            })
             .inner;
         if !intents.is_empty() {
             // The state changed after this frame was laid out: draw it again.

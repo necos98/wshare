@@ -8,9 +8,9 @@
 
 mod bench;
 mod cli;
+mod data_migration;
 mod gui;
 mod handshake;
-mod data_migration;
 mod host;
 mod options;
 mod paths;
@@ -67,7 +67,10 @@ fn run(command: Command) -> Result<()> {
 
 fn list_monitors() -> Result<()> {
     for m in capture::list_monitors()? {
-        println!("[{}] {} {}x{} on {}", m.index, m.name, m.width, m.height, m.adapter_name);
+        println!(
+            "[{}] {} {}x{} on {}",
+            m.index, m.name, m.width, m.height, m.adapter_name
+        );
     }
     Ok(())
 }

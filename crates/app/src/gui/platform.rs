@@ -30,7 +30,10 @@ pub fn attach_parent_console() {
         if has_handle(handle) {
             continue;
         }
-        let file = std::fs::OpenOptions::new().read(true).write(write).open(device);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(write)
+            .open(device);
         if let Ok(file) = file {
             // The handle stays open for the life of the process.
             let raw = HANDLE(file.into_raw_handle());
@@ -49,6 +52,11 @@ fn has_handle(which: STD_HANDLE) -> bool {
 pub fn error_box(message: &str) {
     // SAFETY: both strings outlive the call; no owner window.
     unsafe {
-        MessageBoxW(None, &HSTRING::from(message), &HSTRING::from("wshare"), MB_OK | MB_ICONERROR);
+        MessageBoxW(
+            None,
+            &HSTRING::from(message),
+            &HSTRING::from("wshare"),
+            MB_OK | MB_ICONERROR,
+        );
     }
 }

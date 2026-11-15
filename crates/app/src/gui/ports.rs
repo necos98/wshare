@@ -10,8 +10,8 @@ use anyhow::Result;
 use discovery::DiscoveryEvent;
 use net::Fingerprint;
 
-use crate::options::HostOptions;
 use crate::host::HostEvent;
+use crate::options::HostOptions;
 use crate::trust::KnownHost;
 
 use super::model::{ViewerId, ViewerUpdate};

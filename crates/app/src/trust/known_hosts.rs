@@ -128,11 +128,7 @@ mod tests {
         let found = reloaded.find_by_id(&id).expect("known");
         assert_eq!(found.name, "UFFICIO");
         assert!(reloaded.find_by_id(&id.to_uppercase()).is_some());
-        assert!(
-            reloaded
-                .find_by_id(&fingerprint().host_id())
-                .is_none()
-        );
+        assert!(reloaded.find_by_id(&fingerprint().host_id()).is_none());
         assert!(
             reloaded.find_by_id("").is_none(),
             "an empty id matches nothing"

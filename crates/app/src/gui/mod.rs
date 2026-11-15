@@ -50,7 +50,11 @@ pub fn run() -> Result<()> {
     if let Some(icon) = icon::window_icon() {
         viewport = viewport.with_icon(Arc::new(icon));
     }
-    let options = eframe::NativeOptions { viewport, centered: true, ..Default::default() };
+    let options = eframe::NativeOptions {
+        viewport,
+        centered: true,
+        ..Default::default()
+    };
     eframe::run_native(
         "wshare",
         options,

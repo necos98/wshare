@@ -25,7 +25,7 @@ mod toolbar_geometry;
 mod toolbar_painter;
 
 pub use layout::{Rect, fit_rect};
-pub use toolbar::ToolbarView;
-pub use toolbar_geometry::{ToolbarGeometry, ToolbarHit, toolbar_geometry};
 pub use pipeline::FrameSink;
 pub use renderer::Renderer;
+pub use toolbar::ToolbarView;
+pub use toolbar_geometry::{ToolbarGeometry, ToolbarHit, toolbar_geometry};

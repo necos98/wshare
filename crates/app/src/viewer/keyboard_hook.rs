@@ -21,6 +21,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
+use super::Outgoing;
+use super::key_log;
+use super::key_router::{Hotkey, KeyAction, KeyRouter, RawKey};
 use anyhow::{Context, Result, anyhow};
 use protocol::control::ControlMessage;
 use protocol::input::InputEvent;
@@ -30,13 +33,11 @@ use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{MAPVK_VK_TO_VSC, MapVirtualKeyW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, HC_ACTION,
-    KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLKHF_UP, MSG, PM_NOREMOVE, PeekMessageW,
-    PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_QUIT,
+    CallNextHookEx, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
+    HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLKHF_UP, MSG, PM_NOREMOVE,
+    PeekMessageW, PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+    WM_QUIT,
 };
-use super::Outgoing;
-use super::key_log;
-use super::key_router::{Hotkey, KeyAction, KeyRouter, RawKey};
 
 /// Runs a viewer hotkey; called on the hook thread, so it must be quick
 /// (e.g. post an event to the window).
@@ -54,7 +55,6 @@ thread_local! {
     static STATE: RefCell<Option<HookState>> = const { RefCell::new(None) };
 }
 
-
 /// Active while it exists; dropping it uninstalls the hook and ends its
 /// thread.
 pub struct KeyboardHook {
@@ -66,11 +66,7 @@ pub struct KeyboardHook {
 impl KeyboardHook {
     /// `forwarding`: remote control on (otherwise only the viewer's own
     /// hotkeys are intercepted).
-    pub fn install(
-        forwarding: bool,
-        outgoing: Outgoing,
-        on_hotkey: HotkeyHandler,
-    ) -> Result<Self> {
+    pub fn install(forwarding: bool, outgoing: Outgoing, on_hotkey: HotkeyHandler) -> Result<Self> {
         let forwarding = Arc::new(AtomicBool::new(forwarding));
         let (ready_tx, ready_rx) = mpsc::channel::<Result<u32>>();
         let state = HookState {
@@ -87,9 +83,16 @@ impl KeyboardHook {
             .recv()
             .map_err(|_| anyhow!("keyboard hook thread exited"))??;
         key_log::log(|| {
-            format!("hook installed on thread {thread_id}, forwarding={}", forwarding.load(Ordering::Relaxed))
+            format!(
+                "hook installed on thread {thread_id}, forwarding={}",
+                forwarding.load(Ordering::Relaxed)
+            )
         });
-        Ok(Self { thread_id, forwarding, thread: Some(thread) })
+        Ok(Self {
+            thread_id,
+            forwarding,
+            thread: Some(thread),
+        })
     }
 
     /// Remote control switched on or off mid-session.
@@ -229,7 +232,9 @@ fn handle(state: &mut HookState, info: &KBDLLHOOKSTRUCT) -> bool {
         KeyAction::Hotkey(hotkey) => {
             if forwarding {
                 // Ctrl and Alt already went to the host: release them there.
-                let _ = state.outgoing.send(ControlMessage::Input(InputEvent::ReleaseAll));
+                let _ = state
+                    .outgoing
+                    .send(ControlMessage::Input(InputEvent::ReleaseAll));
             }
             (state.on_hotkey)(hotkey);
             true
@@ -263,14 +268,24 @@ mod tests {
         assert!(!hook.forwarding.load(Ordering::Relaxed));
         let started = Instant::now();
         drop(hook);
-        assert!(started.elapsed() < Duration::from_secs(1), "hook thread did not stop");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "hook thread did not stop"
+        );
     }
 
     #[test]
     fn right_shift_is_not_extended() {
         // As the hook reports it: vk 0xA1, scan 0x36, LLKHF_EXTENDED set.
         let key = raw_key(0xA1, 0x36, true, true);
-        assert_eq!(key, RawKey { scan: 0x36, extended: false, pressed: true });
+        assert_eq!(
+            key,
+            RawKey {
+                scan: 0x36,
+                extended: false,
+                pressed: true
+            }
+        );
     }
 
     #[test]

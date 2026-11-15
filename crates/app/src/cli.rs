@@ -6,7 +6,6 @@ use net::Fingerprint;
 
 use crate::options::{DEFAULT_PORT, HostOptions, StreamOptions};
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BenchOptions {
     pub stream: StreamOptions,

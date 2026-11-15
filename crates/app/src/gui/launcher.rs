@@ -59,26 +59,31 @@ impl ViewerLauncher for ProcessLauncher {
         let stdout = child.stdout.take().context("viewer stdout")?;
         let mut stderr = child.stderr.take().context("viewer stderr")?;
         let inbox = self.inbox.clone();
-        std::thread::Builder::new().name(format!("viewer-{id}")).spawn(move || {
-            let stdout_inbox = inbox.clone();
-            let stdout_reader = std::thread::spawn(move || {
-                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    if is_connected_line(&line) {
-                        stdout_inbox.send(AppEvent::Viewer { id, update: ViewerUpdate::Connected });
+        std::thread::Builder::new()
+            .name(format!("viewer-{id}"))
+            .spawn(move || {
+                let stdout_inbox = inbox.clone();
+                let stdout_reader = std::thread::spawn(move || {
+                    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                        if is_connected_line(&line) {
+                            stdout_inbox.send(AppEvent::Viewer {
+                                id,
+                                update: ViewerUpdate::Connected,
+                            });
+                        }
                     }
-                }
-            });
-            let mut errors = Vec::new();
-            let _ = stderr.read_to_end(&mut errors);
-            let _ = stdout_reader.join();
-            let status = child.wait();
-            let update = ViewerUpdate::Exited {
-                success: status.as_ref().is_ok_and(|s| s.success()),
-                code: status.ok().and_then(|s| s.code()),
-                stderr: String::from_utf8_lossy(&errors).into_owned(),
-            };
-            inbox.send(AppEvent::Viewer { id, update });
-        })?;
+                });
+                let mut errors = Vec::new();
+                let _ = stderr.read_to_end(&mut errors);
+                let _ = stdout_reader.join();
+                let status = child.wait();
+                let update = ViewerUpdate::Exited {
+                    success: status.as_ref().is_ok_and(|s| s.success()),
+                    code: status.ok().and_then(|s| s.code()),
+                    stderr: String::from_utf8_lossy(&errors).into_owned(),
+                };
+                inbox.send(AppEvent::Viewer { id, update });
+            })?;
         Ok(())
     }
 }

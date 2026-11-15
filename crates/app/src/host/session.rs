@@ -29,8 +29,8 @@ use super::input_gate::InputGate;
 use super::input_switch::InputSwitch;
 use super::state::{Cancelled, SharedState};
 use super::streaming::{StreamEnd, StreamingThread};
-use crate::options::StreamOptions;
 use crate::handshake::{HelloVerdict, ViewerTrust, check_hello, unsupported_version};
+use crate::options::StreamOptions;
 
 /// How long a connected viewer has to send Hello.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);

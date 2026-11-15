@@ -82,10 +82,16 @@ mod tests {
     #[test]
     fn pointer_messages_in_order_and_only_for_changes() {
         assert!(pointer_messages(PointerChanges::default()).is_empty());
-        let both = pointer_messages(PointerChanges { shape: Some(image()), visible: Some(true) });
+        let both = pointer_messages(PointerChanges {
+            shape: Some(image()),
+            visible: Some(true),
+        });
         assert!(matches!(both[0], ControlMessage::Cursor(_)));
         assert_eq!(both[1], ControlMessage::CursorVisible(true));
-        let hidden = pointer_messages(PointerChanges { shape: None, visible: Some(false) });
+        let hidden = pointer_messages(PointerChanges {
+            shape: None,
+            visible: Some(false),
+        });
         assert_eq!(hidden, vec![ControlMessage::CursorVisible(false)]);
     }
 }

@@ -55,9 +55,7 @@ pub enum HostEvent {
         height: u32,
     },
     /// The PIN changed (see [`HostHandle::new_pin`]).
-    PinChanged {
-        pin: String,
-    },
+    PinChanged { pin: String },
     /// The viewers that connect without a PIN, oldest first. Sent right
     /// after `Listening` and whenever the list changes (a viewer admitted
     /// or removed, a last access updated).
@@ -82,9 +80,7 @@ pub enum HostEvent {
     /// Something non-fatal worth showing (e.g. LAN announcement failed).
     Warning(String),
     /// The service ended; `error` explains why if it was not asked to stop.
-    Stopped {
-        error: Option<String>,
-    },
+    Stopped { error: Option<String> },
 }
 
 /// Receives the service's events. Called from the service's own threads,

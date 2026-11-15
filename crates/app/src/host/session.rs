@@ -1,8 +1,8 @@
 //! One viewer, from Hello to goodbye: admission (see [`super::admission`]),
-//! stream setup, Welcome, then the control loop (keyframe requests, remote
-//! input, pointer updates) until the viewer, the stream or the host ends
-//! it. A viewer admitted with the PIN and a certificate is authorized from
-//! then on.
+//! stream setup, Welcome, then the control loop (keyframe requests,
+//! reception reports, remote input, pointer and bitrate updates) until the
+//! viewer, the stream or the host ends it. A viewer admitted with the PIN
+//! and a certificate is authorized from then on.
 //!
 //! Every outcome is reported as a [`HostEvent`]; nothing here prints.
 
@@ -123,12 +123,13 @@ async fn serve_admitted(
             .emit(HostEvent::ViewerRejected { address, reason });
     };
 
-    let (cursor_tx, mut cursor_rx) = unbounded_channel();
+    let (updates_tx, mut updates_rx) = unbounded_channel();
     let prepared = async {
         // Looked up per session: the monitor layout may change while the
         // service runs.
         let input = remote_input(ctx.stream.monitor)?;
-        let mut streaming = StreamingThread::start(ctx.stream.clone(), video, cursor_tx)?;
+        let mut streaming =
+            StreamingThread::start(ctx.stream.clone(), video, updates_tx, ctx.events.clone())?;
         let info = streaming.ready().await?;
         anyhow::Ok((input, streaming, info))
     };
@@ -171,7 +172,7 @@ async fn serve_admitted(
     let loop_state = ControlLoop {
         tx: &mut tx,
         rx: &mut rx,
-        cursor: &mut cursor_rx,
+        updates: &mut updates_rx,
         streaming: &streaming,
         gate: &mut gate,
         allowed,
@@ -249,7 +250,8 @@ fn session_error(
 struct ControlLoop<'a> {
     tx: &'a mut ControlSender,
     rx: &'a mut ControlReceiver,
-    cursor: &'a mut UnboundedReceiver<ControlMessage>,
+    /// What the streaming thread has for the viewer (pointer, bitrate).
+    updates: &'a mut UnboundedReceiver<ControlMessage>,
     streaming: &'a StreamingThread,
     gate: &'a mut InputGate<RemoteInput>,
     allowed: watch::Receiver<bool>,
@@ -261,12 +263,15 @@ struct ControlLoop<'a> {
 
 impl ControlLoop<'_> {
     /// Serves the viewer until either side stops: forwards its requests and
-    /// input, and sends it our pointer updates.
+    /// input, and sends it our pointer and bitrate updates.
     async fn run(mut self) -> Result<SessionEnd> {
         loop {
             tokio::select! {
                 message = self.rx.recv() => match message? {
                     Some(ControlMessage::RequestKeyframe) => self.streaming.request_keyframe(),
+                    Some(ControlMessage::ReceptionReport(report)) => {
+                        self.streaming.record_report(&report);
+                    }
                     Some(ControlMessage::Input(event)) => {
                         let allowed = *self.allowed.borrow();
                         self.report(|gate, now| gate.apply(allowed, &event, now));
@@ -274,7 +279,7 @@ impl ControlLoop<'_> {
                     Some(ControlMessage::Bye) | None => return Ok(SessionEnd::ViewerLeft),
                     Some(_) => {} // ignore unexpected messages
                 },
-                Some(update) = self.cursor.recv() => self.tx.send(&update).await?,
+                Some(update) = self.updates.recv() => self.tx.send(&update).await?,
                 Ok(()) = self.allowed.changed() => {
                     let allowed = *self.allowed.borrow_and_update();
                     let actions = self.switch.update(allowed);

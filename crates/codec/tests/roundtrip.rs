@@ -47,6 +47,41 @@ fn hevc_roundtrip_is_immediate_and_colour_accurate() -> Result<()> {
     roundtrip(Codec::Hevc)
 }
 
+/// The rate adaptation lowers and raises the target while streaming; the
+/// stream must go on decoding across both changes.
+#[test]
+#[ignore = "requires GPU"]
+fn bitrate_changes_mid_stream_keep_the_stream_decodable() -> Result<()> {
+    const RATES: [u32; 3] = [20_000_000, 2_000_000, 12_000_000];
+    let _mf = MediaFoundation::start()?;
+    let gpu = Gpu::default_adapter()?;
+    let source = create_bgra(&gpu)?;
+    let mut converter = BgraToNv12::new(&gpu, &source, WIDTH, HEIGHT, FPS)?;
+    let config = EncoderConfig {
+        codec: Codec::H264,
+        width: WIDTH,
+        height: HEIGHT,
+        fps: FPS,
+        bitrate_bps: RATES[0],
+    };
+    let mut encoder = HwEncoder::new(&gpu.device, gpu.adapter_luid, &config)?;
+    let mut decoder = HwDecoder::new(&gpu, Codec::H264, WIDTH, HEIGHT)?;
+    let frames_per_rate = COLOURS.len() / RATES.len();
+    for (index, colour) in COLOURS.iter().enumerate() {
+        if index % frames_per_rate == 0 && index > 0 {
+            encoder.set_bitrate(RATES[index / frames_per_rate])?;
+        }
+        fill_bgra(&gpu, &source, *colour);
+        let timestamp = index as i64 * 10_000_000 / FPS as i64;
+        let unit = encode_one(&mut encoder, &converter.convert()?, timestamp)?;
+        let frame = decoder
+            .decode(&unit.data, unit.timestamp)?
+            .with_context(|| format!("frame {index} was not decoded"))?;
+        assert_close(read_centre_rgb(&gpu, &frame)?, *colour, index);
+    }
+    Ok(())
+}
+
 fn roundtrip(codec: Codec) -> Result<()> {
     let _mf = MediaFoundation::start()?;
     let gpu = Gpu::default_adapter()?;

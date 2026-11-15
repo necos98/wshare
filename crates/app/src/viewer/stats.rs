@@ -6,7 +6,28 @@ use std::time::{Duration, Instant};
 use pipeline::ViewerStats;
 use protocol::control::StreamInfo;
 
+use super::rate::TargetRate;
 use crate::text;
+
+/// Reads the current network round-trip time (kept abstract so the render
+/// loop does not depend on the transport).
+pub type RttProbe = Box<dyn Fn() -> Duration + Send>;
+
+/// Where the overlay reads what it shows about the connection, which is
+/// updated outside the render loop.
+pub struct LinkProbe {
+    pub rtt: RttProbe,
+    pub target: TargetRate,
+}
+
+impl LinkProbe {
+    pub fn read(&self) -> Link {
+        Link {
+            rtt: (self.rtt)(),
+            target_bps: self.target.get(),
+        }
+    }
+}
 
 /// Cumulative counters sampled by the render loop.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -42,7 +63,7 @@ impl RateMeter {
                 let bytes = totals.bytes_received.saturating_sub(before.bytes_received);
                 self.rates = Rates {
                     fps: frames as f64 / secs,
-                    mbps: bytes as f64 * 8.0 / secs / 1e6,
+                    mbps: bytes as f64 * 8.0 / secs / BITS_PER_MEGABIT,
                 };
             }
         }
@@ -90,24 +111,43 @@ fn row(label: &str, value: String) -> String {
     format!("{label:<LABEL_WIDTH$}{value}")
 }
 
+/// What the overlay shows about the connection.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Link {
+    pub rtt: Duration,
+    /// The encoder's target as the host last announced it.
+    pub target_bps: Option<u32>,
+}
+
+const BITS_PER_MEGABIT: f64 = 1e6;
+
+fn mbit_per_second(mbps: f64) -> String {
+    format!("{mbps:.1} Mbit/s")
+}
+
 /// The overlay text (Italian, like the rest of the UI).
 pub fn overlay_lines(
     labels: &Labels<'_>,
     rates: Rates,
     stats: &ViewerStats,
-    rtt: Duration,
+    link: Link,
     frame_time: Option<Duration>,
 ) -> Vec<String> {
     let ms = |d: Duration| format!("{:.1} ms", d.as_secs_f64() * 1000.0);
     let stream = labels.stream;
+    let target = link.target_bps.map_or_else(
+        || "-".to_string(),
+        |bps| mbit_per_second(f64::from(bps) / BITS_PER_MEGABIT),
+    );
     vec![
         format!(
             "{}x{} {:?} - max {} fps",
             stream.width, stream.height, stream.codec, stream.fps
         ),
         row(text::STAT_FPS, format!("{:.0}", rates.fps)),
-        row(text::STAT_BITRATE, format!("{:.1} Mbit/s", rates.mbps)),
-        row(text::STAT_RTT, ms(rtt)),
+        row(text::STAT_BITRATE, mbit_per_second(rates.mbps)),
+        row(text::STAT_TARGET, target),
+        row(text::STAT_RTT, ms(link.rtt)),
         row(
             text::STAT_DECODE,
             frame_time.map_or_else(|| "-".to_string(), ms),
@@ -181,8 +221,8 @@ mod tests {
         assert_eq!(timer.take_average(), Some(Duration::from_millis(2)));
     }
 
-    #[test]
-    fn overlay_shows_every_figure() {
+    /// The overlay of a sample session whose host announced `target_bps`.
+    fn sample_overlay(target_bps: Option<u32>) -> Vec<String> {
         let stream = StreamInfo {
             codec: VideoCodec::H264,
             width: 1920,
@@ -196,7 +236,7 @@ mod tests {
             frames_superseded: 4,
             ..Default::default()
         };
-        let lines = overlay_lines(
+        overlay_lines(
             &Labels {
                 stream: &stream,
                 decoder: "MS H264",
@@ -206,14 +246,37 @@ mod tests {
                 mbps: 12.34,
             },
             &stats,
-            Duration::from_micros(800),
+            Link {
+                rtt: Duration::from_micros(800),
+                target_bps,
+            },
             Some(Duration::from_micros(1500)),
+        )
+    }
+
+    #[test]
+    fn overlay_shows_the_target_bitrate_of_the_host() {
+        let lines = sample_overlay(Some(8_500_000));
+        assert!(
+            lines.contains(&"Obiettivo    8.5 Mbit/s".to_string()),
+            "{lines:#?}"
         );
-        let text = lines.join("\n");
+    }
+
+    #[test]
+    fn overlay_shows_a_dash_before_the_host_announced_a_target() {
+        let lines = sample_overlay(None);
+        assert!(lines.contains(&"Obiettivo    -".to_string()), "{lines:#?}");
+    }
+
+    #[test]
+    fn overlay_shows_every_figure() {
+        let text = sample_overlay(Some(20_000_000)).join("\n");
         for expected in [
             "1920x1080 H264",
             "60",
             "12.3 Mbit/s",
+            "20.0 Mbit/s",
             "0.8 ms",
             "1.5 ms",
             "Persi 2",

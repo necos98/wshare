@@ -59,6 +59,10 @@ struct EncoderState {
     polls: Vec<bool>,
     /// Simulates an encoder that buffers frames and emits nothing.
     hold_output: bool,
+    /// Last rate accepted by `set_bitrate`.
+    bitrate: Option<u32>,
+    /// Simulates a driver that cannot change the rate while streaming.
+    refuse_bitrate: bool,
 }
 
 struct FakeEncoder(Rc<RefCell<EncoderState>>);
@@ -95,6 +99,15 @@ impl VideoEncoder for FakeEncoder {
 
     fn request_keyframe(&mut self) -> Result<()> {
         self.0.borrow_mut().force_keyframe = true;
+        Ok(())
+    }
+
+    fn set_bitrate(&mut self, bitrate_bps: u32) -> Result<()> {
+        let mut s = self.0.borrow_mut();
+        if s.refuse_bitrate {
+            anyhow::bail!("rate change not supported");
+        }
+        s.bitrate = Some(bitrate_bps);
         Ok(())
     }
 }
@@ -149,6 +162,8 @@ fn harness(initial: &[u8], capacity: usize) -> Harness {
         submitted: Vec::new(),
         polls: Vec::new(),
         hold_output: false,
+        bitrate: None,
+        refuse_bitrate: false,
     }));
     let max_size = Rc::new(RefCell::new(HEADER_LEN + 4));
     let sent = Rc::new(RefCell::new(Vec::new()));
@@ -384,6 +399,32 @@ fn congested_sink_skips_frames_before_capture_and_encoding() {
     h.step_until(|h| h.streamer.stats().frames_sent == 2);
     assert_eq!(h.streamer.stats().frames_skipped, 3);
     assert_eq!(h.reassemble()[1].data[..], *b"second");
+}
+
+#[test]
+fn a_lower_bitrate_reaches_the_encoder_and_shrinks_the_backlog_allowed() {
+    let mut h = harness(b"first", 1);
+    h.step_until(|h| h.streamer.stats().frames_sent == 1);
+    h.streamer.set_bitrate(BITRATE / 2).unwrap();
+    assert_eq!(h.encoder.borrow().bitrate, Some(BITRATE / 2));
+    // Within the old limit, over the new one.
+    h.backlog.set(send_backlog_limit(BITRATE / 2, FPS) + 1);
+    h.source.borrow_mut().changes.push_back(b"second".to_vec());
+    h.step_until(|h| h.streamer.stats().frames_skipped == 1);
+    assert_eq!(h.submitted(), 1);
+}
+
+#[test]
+fn a_refused_bitrate_changes_nothing() {
+    let mut h = harness(b"first", 1);
+    h.step_until(|h| h.streamer.stats().frames_sent == 1);
+    h.encoder.borrow_mut().refuse_bitrate = true;
+    assert!(h.streamer.set_bitrate(BITRATE / 2).is_err());
+    assert_eq!(h.encoder.borrow().bitrate, None);
+    // The backlog allowed still matches the rate the encoder kept.
+    h.backlog.set(send_backlog_limit(BITRATE / 2, FPS) + 1);
+    h.change_and_submit(b"second");
+    assert_eq!(h.streamer.stats().frames_skipped, 0);
 }
 
 #[test]

@@ -14,6 +14,7 @@
 //! - `session`: one viewer from Hello to goodbye.
 //! - `devices`: the viewers admitted without a PIN, shared with the handle.
 //! - `streaming`: the capture/encode thread of a session.
+//! - `rate_adaptation`: the encoder's bitrate fitted to the network.
 //! - `input_gate`: remote input behind the "allow input" switch.
 //! - `input_switch`: what a session does when that switch flips.
 //! - `state`: PIN, input flag and end signals shared with the handle.
@@ -32,6 +33,7 @@ mod input_switch;
 mod interrupt;
 mod pin_attempts;
 mod pin_guard;
+mod rate_adaptation;
 mod service;
 mod session;
 mod sessions;

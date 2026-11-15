@@ -47,6 +47,7 @@ where
     packetizer: Packetizer,
     start: Instant,
     encoded: VecDeque<EncodedFrame>,
+    fps: u32,
     /// Send backlog, in bytes, above which due frames are skipped.
     backlog_limit: usize,
     stats: HostStats,
@@ -73,6 +74,7 @@ where
             packetizer: Packetizer::new(),
             start: Instant::now(),
             encoded: VecDeque::new(),
+            fps,
             backlog_limit: send_backlog_limit(bitrate_bps, fps),
             stats: HostStats::default(),
         }
@@ -103,6 +105,15 @@ where
     pub fn request_keyframe(&mut self) -> Result<()> {
         self.encoder.request_keyframe()?;
         self.pacer.mark_dirty();
+        Ok(())
+    }
+
+    /// Retargets the encoder (see [`crate::bitrate`]) and resizes the send
+    /// backlog allowed to match, so the queue stays a few frames long at
+    /// the new rate. If the encoder refuses, nothing changes.
+    pub fn set_bitrate(&mut self, bitrate_bps: u32) -> Result<()> {
+        self.encoder.set_bitrate(bitrate_bps)?;
+        self.backlog_limit = send_backlog_limit(bitrate_bps, self.fps);
         Ok(())
     }
 

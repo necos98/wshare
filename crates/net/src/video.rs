@@ -19,6 +19,7 @@ use bytes::Bytes;
 use pipeline::traits::DatagramSink;
 use quinn::{Connection, SendDatagramError};
 
+use crate::stats::TransportStats;
 use crate::transport::DATAGRAM_SEND_BUFFER;
 
 /// Used when the connection cannot report a limit (e.g. datagrams not
@@ -51,6 +52,12 @@ impl VideoChannel {
             .read_datagram()
             .await
             .context("receiving video datagram")
+    }
+
+    /// Statistics of the connection carrying the video, for fitting the
+    /// stream's bitrate to the path. Never blocks.
+    pub fn transport_stats(&self) -> TransportStats {
+        TransportStats::of(&self.conn)
     }
 }
 

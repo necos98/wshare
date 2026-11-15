@@ -1,10 +1,12 @@
 //! Wire formats shared by host and viewer.
 //!
 //! - [`control`]: reliable control-channel messages (QUIC stream).
+//! - [`feedback`]: the viewer's reception reports, for rate adaptation.
 //! - [`input`]: remote-control payloads (input events, cursor shape).
 //! - [`video`]: unreliable video datagrams, their reassembly and loss policy.
 
 pub mod control;
+pub mod feedback;
 pub mod input;
 pub mod video;
 

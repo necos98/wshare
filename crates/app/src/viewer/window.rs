@@ -26,7 +26,8 @@ use super::key_router::Hotkey;
 use super::keyboard_hook::KeyboardHook;
 use super::notice::Notice;
 use super::remote::RemoteControl;
-use super::render_thread::{RenderInput, RenderThread, RttProbe};
+use super::render_thread::{RenderInput, RenderThread};
+use super::stats::LinkProbe;
 use super::toolbar::{BarAction, ControlBar, LEFT};
 
 /// The control bar with the renderer's geometry (the one it draws with).
@@ -84,7 +85,7 @@ pub struct WindowOptions {
 /// Inputs consumed when the window opens and the render thread starts.
 struct Pending {
     datagrams: Receiver<Bytes>,
-    rtt: RttProbe,
+    link: LinkProbe,
 }
 
 pub struct ViewerWindow {
@@ -115,7 +116,7 @@ impl ViewerWindow {
         options: WindowOptions,
         stream: StreamInfo,
         datagrams: Receiver<Bytes>,
-        rtt: RttProbe,
+        link: LinkProbe,
         outgoing: Outgoing,
         policy: ControlPolicy,
         proxy: EventLoopProxy<UserEvent>,
@@ -128,7 +129,7 @@ impl ViewerWindow {
         Self {
             options,
             stream,
-            pending: Some(Pending { datagrams, rtt }),
+            pending: Some(Pending { datagrams, link }),
             outgoing,
             proxy,
             policy,
@@ -176,13 +177,13 @@ impl ViewerWindow {
         self.capture_system_keys(self.options.fullscreen);
 
         let PhysicalSize { width, height } = window.inner_size();
-        let Pending { datagrams, rtt } = self.pending.take().context("window opened twice")?;
+        let Pending { datagrams, link } = self.pending.take().context("window opened twice")?;
         let input = RenderInput {
             hwnd,
             stream: self.stream.clone(),
             datagrams,
             outgoing: self.outgoing.clone(),
-            rtt,
+            link,
         };
         let proxy = self.proxy.clone();
         let render = RenderThread::start(input, width, height, move |result| {

@@ -11,12 +11,14 @@ const BITS_PER_MEGABIT: u32 = 1_000_000;
 pub struct StreamOptions {
     pub monitor: usize,
     pub fps: u32,
+    /// The bitrate the stream starts at and never exceeds: the host lowers
+    /// it while the network is congested (`bench` keeps it fixed).
     pub mbps: u32,
     pub codec: Codec,
 }
 
 impl StreamOptions {
-    /// The target bitrate in bit/s (`mbps` saturates at `u32::MAX`).
+    /// The maximum bitrate in bit/s (`mbps` saturates at `u32::MAX`).
     pub fn bitrate_bps(&self) -> u32 {
         self.mbps.saturating_mul(BITS_PER_MEGABIT)
     }

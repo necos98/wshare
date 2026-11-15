@@ -188,6 +188,24 @@ async fn send_backlog_is_reported_and_drains() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn transport_stats_follow_the_traffic() {
+    let c = connected().await;
+    let host_video = &c.host.2;
+    let before = host_video.transport_stats();
+    assert!(before.congestion_window > 0);
+    assert!(before.min_rtt <= before.rtt);
+    timeout(TIMEOUT, async {
+        DatagramSink::send(host_video, Bytes::from_static(b"frame")).unwrap();
+        c.viewer.2.recv().await.unwrap();
+    })
+    .await
+    .unwrap();
+    let after = host_video.transport_stats();
+    assert!(after.sent_packets > before.sent_packets);
+    assert!(after.lost_packets >= before.lost_packets);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn oversized_datagram_errors() {
     let c = connected().await;
     let max = DatagramSink::max_datagram_size(&c.host.2);

@@ -36,6 +36,7 @@ pub struct HwEncoder {
     events: IMFMediaEventGenerator,
     codec_api: Option<ICodecAPI>,
     _device_manager: IMFDXGIDeviceManager,
+    fps: u32,
     frame_duration: i64,
     inputs_wanted: u32,
     drained: bool,
@@ -80,6 +81,7 @@ impl HwEncoder {
             events,
             codec_api,
             _device_manager: device_manager,
+            fps: config.fps,
             frame_duration: 10_000_000 / config.fps.max(1) as i64,
             inputs_wanted: 0,
             drained: false,
@@ -192,6 +194,17 @@ impl VideoEncoder for HwEncoder {
             .context("encoder has no ICodecAPI")?;
         tuning::force_keyframe(api)?;
         Ok(())
+    }
+
+    /// Retargets the CBR rate control mid-stream (`ICodecAPI`). Fails when
+    /// the driver refuses: the encoder then keeps its rate.
+    fn set_bitrate(&mut self, bitrate_bps: u32) -> Result<()> {
+        let api = self
+            .codec_api
+            .as_ref()
+            .context("encoder has no ICodecAPI")?;
+        tuning::set_rate(api, bitrate_bps, self.fps)
+            .with_context(|| format!("{} refused a bitrate of {bitrate_bps} bit/s", self.name))
     }
 }
 

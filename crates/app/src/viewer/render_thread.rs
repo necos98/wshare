@@ -19,9 +19,10 @@ use windows::Win32::Foundation::HWND;
 use super::Outgoing;
 use super::feed::next_batch;
 use super::notice::{Notice, NoticeBoard};
+use super::rate::ReceptionReporter;
 use super::sink::ViewSink;
 use super::stall::StallWatch;
-use super::stats::{FrameTimer, Labels, RateMeter, Totals, overlay_lines};
+use super::stats::{FrameTimer, Labels, LinkProbe, RateMeter, Totals, overlay_lines};
 use crate::realtime::MmcssRegistration;
 
 /// How often the loop wakes up without datagrams (keyframe retries, resize,
@@ -33,10 +34,6 @@ const TOOLBAR_TICK: Duration = Duration::from_millis(16);
 /// How often the statistics overlay is refreshed while visible.
 const OVERLAY_REFRESH: Duration = Duration::from_millis(500);
 
-/// Reads the current network round-trip time (kept abstract so the render
-/// loop does not depend on the transport).
-pub type RttProbe = Box<dyn Fn() -> Duration + Send>;
-
 /// Everything the render thread needs, moved into it at start.
 pub struct RenderInput {
     /// The window handle as an integer: `HWND` itself is not `Send`.
@@ -44,7 +41,7 @@ pub struct RenderInput {
     pub stream: StreamInfo,
     pub datagrams: Receiver<Bytes>,
     pub outgoing: Outgoing,
-    pub rtt: RttProbe,
+    pub link: LinkProbe,
 }
 
 pub struct RenderThread {
@@ -171,12 +168,13 @@ fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
     let renderer = Renderer::new(&gpu, hwnd, applied.0, applied.1)?;
     println!("Decoding with {} on {}", decoder.name(), gpu.adapter_name);
     let mut overlay =
-        StatsOverlay::new(input.stream.clone(), decoder.name().to_string(), input.rtt);
+        StatsOverlay::new(input.stream.clone(), decoder.name().to_string(), input.link);
     let mut streamer = ViewerStreamer::new(decoder, ViewSink::new(renderer));
     let started = Instant::now();
     let mut stall = StallWatch::new(started);
     let mut board = NoticeBoard::default();
     board.show(Notice::Shortcuts, started);
+    let mut reporter = ReceptionReporter::new(started);
     let mut batch = Vec::new();
 
     while !stop.load(Ordering::Relaxed) {
@@ -200,6 +198,9 @@ fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
         let silence = stall.check(now);
         if action == ViewerAction::RequestKeyframe || silence.probe {
             let _ = input.outgoing.send(ControlMessage::RequestKeyframe);
+        }
+        if let Some(report) = reporter.poll(now, streamer.stats()) {
+            let _ = input.outgoing.send(ControlMessage::ReceptionReport(report));
         }
         board.set_unstable(silence.unstable);
         while let Ok(notice) = notices.try_recv() {
@@ -229,7 +230,7 @@ fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
 struct StatsOverlay {
     stream: StreamInfo,
     decoder: String,
-    rtt: RttProbe,
+    link: LinkProbe,
     meter: RateMeter,
     frame_time: FrameTimer,
     bytes_received: u64,
@@ -238,11 +239,11 @@ struct StatsOverlay {
 }
 
 impl StatsOverlay {
-    fn new(stream: StreamInfo, decoder: String, rtt: RttProbe) -> Self {
+    fn new(stream: StreamInfo, decoder: String, link: LinkProbe) -> Self {
         Self {
             stream,
             decoder,
-            rtt,
+            link,
             meter: RateMeter::default(),
             frame_time: FrameTimer::default(),
             bytes_received: 0,
@@ -296,7 +297,7 @@ impl StatsOverlay {
             &labels,
             rates,
             &stats,
-            (self.rtt)(),
+            self.link.read(),
             self.frame_time.take_average(),
         );
         streamer.sink_mut().set_overlay(Some(lines))?;

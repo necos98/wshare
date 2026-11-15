@@ -47,6 +47,8 @@ wshare - LAN screen sharing (no arguments: open the window)
 
   wshare host  [--monitor N] [--fps F] [--mbps B] [--codec h264|hevc] [--port P] [--pin PIN]
                [--view-only]
+               --mbps is the maximum bitrate (default 20): the host lowers it while the
+               network is congested and raises it back gradually
                a viewer that gave the PIN once connects without it from then on
                (remove it from the list in the wshare window)
   wshare view  [HOST | IP[:PORT]] [--pin PIN] [--host-id ID] [--view-only] [--fullscreen] [--stats]

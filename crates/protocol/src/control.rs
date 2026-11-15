@@ -13,6 +13,8 @@
 //!   viewer -> host  Input(event)            (ignored by view-only hosts)
 //!   host -> viewer  Cursor(shape) / CursorVisible(bool)
 //!   host -> viewer  InputAllowed(bool)      (remote control switched mid-session)
+//!   viewer -> host  ReceptionReport(report) (every RECEPTION_REPORT_INTERVAL)
+//!   host -> viewer  TargetBitrate { bps }   (the encoder's rate changed)
 //!   either          Bye
 //!
 //! Compatibility: peers of different protocol versions must still understand
@@ -29,6 +31,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::ProtocolError;
+use crate::feedback::ReceptionReport;
 use crate::input::{CursorShape, InputEvent};
 
 /// 2: remote control (Input, Cursor, CursorVisible; Welcome.input_allowed).
@@ -37,7 +40,9 @@ use crate::input::{CursorShape, InputEvent};
 ///    [`RejectReason`]. The reasons added later (`Busy`,
 ///    `TooManyAttempts`) keep its text form, so they need no new version:
 ///    a viewer that does not know them shows their text as `Other`.
-pub const PROTOCOL_VERSION: u16 = 4;
+/// 5: ReceptionReport (viewer) and TargetBitrate (host): the host adapts
+///    the encoder's bitrate to the network.
+pub const PROTOCOL_VERSION: u16 = 5;
 
 /// Upper bound for one control message; protects against garbage lengths.
 /// Sized for the largest cursor image (256x256 RGBA = 256 KiB) plus margin.
@@ -176,6 +181,14 @@ pub enum ControlMessage {
     Bye,
     /// The host allowed or forbade remote mouse/keyboard during the session.
     InputAllowed(bool),
+    /// How the video fared since the previous report (sent every
+    /// [`crate::feedback::RECEPTION_REPORT_INTERVAL`]).
+    ReceptionReport(ReceptionReport),
+    /// The bitrate the host's encoder now aims at, in bit/s: sent when
+    /// streaming starts and whenever the host adapts it to the network.
+    TargetBitrate {
+        bps: u32,
+    },
 }
 
 /// Serializes `msg` as one length-prefixed frame.
@@ -321,6 +334,11 @@ mod tests {
             }),
             ControlMessage::CursorVisible(false),
             ControlMessage::InputAllowed(true),
+            ControlMessage::ReceptionReport(ReceptionReport {
+                frames_lost: 3,
+                frames_late: 70_000,
+            }),
+            ControlMessage::TargetBitrate { bps: 20_000_000 },
             ControlMessage::Rejected {
                 reason: RejectReason::PinRequired,
             },
@@ -588,6 +606,29 @@ mod tests {
         assert_eq!(index(ControlMessage::RequestKeyframe), 3);
         assert_eq!(index(ControlMessage::Bye), 7);
         assert_eq!(index(ControlMessage::InputAllowed(true)), 8);
+        assert_eq!(
+            index(ControlMessage::ReceptionReport(ReceptionReport::default())),
+            9
+        );
+        assert_eq!(index(ControlMessage::TargetBitrate { bps: 0 }), 10);
+    }
+
+    #[test]
+    fn reception_report_layout_is_stable() {
+        // Variant 9, then both counts as varints: 3, and 300 = 0xAC 0x02.
+        let frame = encode_frame(&ControlMessage::ReceptionReport(ReceptionReport {
+            frames_lost: 3,
+            frames_late: 300,
+        }));
+        assert_eq!(frame, frame_of(&[9, 3, 0xAC, 0x02]));
+    }
+
+    #[test]
+    fn target_bitrate_layout_is_stable() {
+        // Variant 10, then the rate as a varint: 20 000 000 = 0x01312D00,
+        // seven bits at a time from the lowest.
+        let frame = encode_frame(&ControlMessage::TargetBitrate { bps: 20_000_000 });
+        assert_eq!(frame, frame_of(&[10, 0x80, 0xDA, 0xC4, 0x09]));
     }
 
     #[test]

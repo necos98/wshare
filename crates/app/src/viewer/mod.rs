@@ -11,7 +11,8 @@
 //! - tokio runtime: control channel and datagram reception;
 //! - render thread: owns the GPU objects, runs `ViewerStreamer`
 //!   (reassemble -> decode -> present), fed through a bounded queue
-//!   (see `feed`).
+//!   (see `feed`); it also reports to the host how the video arrives, for
+//!   the host's bitrate adaptation (see `rate`).
 
 mod cursor;
 pub mod failure;
@@ -23,6 +24,7 @@ mod keyboard_hook;
 mod notice;
 mod outbox;
 mod pairing;
+mod rate;
 mod remote;
 mod render_thread;
 pub mod report;
@@ -49,7 +51,9 @@ use crate::options::DEFAULT_PORT;
 use crate::target::{self, Resolved, parse_target};
 use failure::ViewerFailure;
 use pairing::Pairing;
+use rate::TargetRate;
 use report::{REPORT_ENV, ViewerReport};
+use stats::LinkProbe;
 use window::{ControlPolicy, UserEvent, ViewerWindow, WindowOptions};
 
 /// Environment variable holding the PIN when `--pin` is absent (used by
@@ -137,7 +141,14 @@ pub fn run(options: ViewOptions) -> Result<()> {
     let (datagram_tx, datagram_rx) = feed::queue();
     let (outgoing_tx, outgoing_rx) = unbounded_channel::<ControlMessage>();
     runtime.spawn(feed::forward(video, datagram_tx));
-    let control = runtime.spawn(run_control(tx, rx, outgoing_rx, event_loop.create_proxy()));
+    let target = TargetRate::default();
+    let control = runtime.spawn(run_control(
+        tx,
+        rx,
+        outgoing_rx,
+        event_loop.create_proxy(),
+        target.clone(),
+    ));
 
     let rtt_handle = handle.clone();
     let mut window = ViewerWindow::new(
@@ -148,7 +159,10 @@ pub fn run(options: ViewOptions) -> Result<()> {
         },
         stream,
         datagram_rx,
-        Box::new(move || rtt_handle.rtt()),
+        LinkProbe {
+            rtt: Box::new(move || rtt_handle.rtt()),
+            target,
+        },
         outgoing_tx.clone(),
         policy,
         event_loop.create_proxy(),
@@ -284,12 +298,14 @@ async fn connect(addr: SocketAddr, pairing: &Pairing, pin: Option<String>) -> Re
     }
 }
 
-/// Sends our requests and watches for the host leaving.
+/// Sends our requests and watches for the host leaving. The host's target
+/// bitrate goes to `target`, for the statistics.
 async fn run_control(
     mut tx: ControlSender,
     mut rx: ControlReceiver,
     mut outgoing: UnboundedReceiver<ControlMessage>,
     window: EventLoopProxy<UserEvent>,
+    target: TargetRate,
 ) {
     let reason = 'control: loop {
         tokio::select! {
@@ -316,6 +332,7 @@ async fn run_control(
                 Ok(Some(ControlMessage::InputAllowed(allowed))) => {
                     let _ = window.send_event(UserEvent::InputAllowed(allowed));
                 }
+                Ok(Some(ControlMessage::TargetBitrate { bps })) => target.set(bps),
                 Ok(Some(_)) => {}
                 Err(e) => break ViewerFailure::ConnectionLost(format!("{e:#}")),
             }

@@ -133,6 +133,10 @@ pub fn host_warning(warning: &HostWarning) -> String {
                 "Controllo remoto non riuscito: {detail} ({suppressed} errori simili non mostrati)"
             )
         }
+        HostWarning::BitrateFixed(detail) => format!(
+            "L'encoder non può adattare il bitrate alla rete: resta fisso per questa \
+             sessione ({detail})."
+        ),
     }
 }
 
@@ -303,6 +307,8 @@ pub const NOTICE_CONTROL_ON: &str = "Controllo remoto riattivato dall'altro comp
 
 pub const STAT_FPS: &str = "Frame/s";
 pub const STAT_BITRATE: &str = "Bitrate";
+/// The bitrate the host's encoder aims at, adapted to the network.
+pub const STAT_TARGET: &str = "Obiettivo";
 pub const STAT_RTT: &str = "RTT rete";
 pub const STAT_DECODE: &str = "Decodifica";
 pub const STAT_ENCODER: &str = "Encoder";
@@ -503,6 +509,11 @@ mod tests {
                     suppressed: 2,
                 },
                 "Controllo remoto non riuscito: SendInput failed (2 errori simili non mostrati)",
+            ),
+            (
+                HostWarning::BitrateFixed("driver refused".into()),
+                "L'encoder non può adattare il bitrate alla rete: resta fisso per questa \
+                 sessione (driver refused).",
             ),
         ];
         for (warning, text) in cases {

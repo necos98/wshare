@@ -94,6 +94,9 @@ pub enum HostWarning {
         detail: String,
         suppressed: u32,
     },
+    /// The encoder refused to change its bitrate while streaming: this
+    /// session stays at the rate it had, whatever the network does.
+    BitrateFixed(String),
 }
 
 impl fmt::Display for HostWarning {
@@ -121,6 +124,10 @@ impl fmt::Display for HostWarning {
             Self::InputFailed { detail, suppressed } => write!(
                 f,
                 "remote input failed: {detail} ({suppressed} similar failures not shown)"
+            ),
+            Self::BitrateFixed(detail) => write!(
+                f,
+                "the bitrate cannot follow the network, it stays fixed: {detail}"
             ),
         }
     }
@@ -226,6 +233,10 @@ mod tests {
         assert_eq!(
             HostWarning::PinRotatedAfterWrongAttempts.to_string(),
             "the PIN was changed after too many wrong attempts"
+        );
+        assert_eq!(
+            HostWarning::BitrateFixed("driver refused".into()).to_string(),
+            "the bitrate cannot follow the network, it stays fixed: driver refused"
         );
     }
 }

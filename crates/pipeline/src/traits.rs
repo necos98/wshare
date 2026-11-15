@@ -47,6 +47,10 @@ pub trait VideoEncoder {
 
     /// Makes the next encoded frame a keyframe.
     fn request_keyframe(&mut self) -> Result<()>;
+
+    /// Changes the target bitrate of the frames encoded from now on, while
+    /// streaming. An error means the encoder keeps its previous rate.
+    fn set_bitrate(&mut self, bitrate_bps: u32) -> Result<()>;
 }
 
 /// Sends unreliable datagrams (host side).

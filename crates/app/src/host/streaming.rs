@@ -3,23 +3,32 @@
 //! GPU objects (capture, encoder) are not `Send`-friendly and the pipeline
 //! is a blocking loop, so each session gets a dedicated OS thread running
 //! `HostStreamer`, steered from async code through atomics and channels.
+//! The thread also fits the encoder's bitrate to the network (see
+//! `rate_adaptation`), helped by the viewer's reports the session hands in.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 use codec::{DesktopSource, HwEncoder, MediaFoundation};
 use net::VideoChannel;
 use pipeline::{HostStats, HostStreamer};
 use protocol::control::{ControlMessage, StreamInfo};
+use protocol::feedback::ReceptionReport;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
+use super::events::EventSink;
+use super::rate_adaptation::{Counters, RateAdaptation, RateChange, ViewerReports};
+use super::{HostEvent, HostWarning};
 use crate::options::StreamOptions;
 use crate::realtime::{MmcssRegistration, TimerResolution};
 use crate::wire::{pointer_messages, to_wire};
+
+type Streamer = HostStreamer<DesktopSource, HwEncoder, VideoChannel>;
 
 /// What the streaming thread did; `error` is why it stopped early, if so.
 pub(super) struct StreamEnd {
@@ -31,6 +40,7 @@ pub(super) struct StreamEnd {
 pub(super) struct StreamingThread {
     stop: Arc<AtomicBool>,
     keyframe: Arc<AtomicBool>,
+    reports: Arc<ViewerReports>,
     done: Arc<tokio::sync::Notify>,
     ready: Option<oneshot::Receiver<Result<StreamInfo>>>,
     go: Option<mpsc::Sender<()>>,
@@ -38,27 +48,37 @@ pub(super) struct StreamingThread {
 }
 
 impl StreamingThread {
-    /// `cursor` receives pointer shape/visibility changes as control
-    /// messages.
+    /// `updates` receives the control messages the stream produces for the
+    /// viewer: pointer shape/visibility changes and the target bitrate.
+    /// `events` gets the warning of an encoder that cannot adapt its rate.
     pub(super) fn start(
         stream: StreamOptions,
         video: VideoChannel,
-        cursor: UnboundedSender<ControlMessage>,
+        updates: UnboundedSender<ControlMessage>,
+        events: EventSink,
     ) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let keyframe = Arc::new(AtomicBool::new(false));
+        let reports = Arc::new(ViewerReports::default());
         let done = Arc::new(tokio::sync::Notify::new());
         let (ready_tx, ready_rx) = oneshot::channel();
         let (go_tx, go_rx) = mpsc::channel();
         let thread = {
-            let (stop, keyframe, done) = (stop.clone(), keyframe.clone(), done.clone());
+            let (stop, keyframe, reports, done) = (
+                stop.clone(),
+                keyframe.clone(),
+                reports.clone(),
+                done.clone(),
+            );
             std::thread::Builder::new()
                 .name("wshare-stream".into())
                 .spawn(move || {
                     let control = StreamControl {
                         stop: &stop,
                         keyframe: &keyframe,
-                        cursor,
+                        reports,
+                        updates,
+                        events,
                     };
                     let result = stream_loop(&stream, video, control, ready_tx, go_rx);
                     done.notify_one();
@@ -69,6 +89,7 @@ impl StreamingThread {
         Ok(Self {
             stop,
             keyframe,
+            reports,
             done,
             ready: Some(ready_rx),
             go: Some(go_tx),
@@ -93,6 +114,11 @@ impl StreamingThread {
 
     pub(super) fn request_keyframe(&self) {
         self.keyframe.store(true, Ordering::Relaxed);
+    }
+
+    /// Hands a viewer's reception report to the bitrate adaptation.
+    pub(super) fn record_report(&self, report: &ReceptionReport) {
+        self.reports.record(report);
     }
 
     /// Resolves when the thread has stopped on its own (error or viewer
@@ -128,7 +154,17 @@ impl Drop for StreamingThread {
 struct StreamControl<'a> {
     stop: &'a AtomicBool,
     keyframe: &'a AtomicBool,
-    cursor: UnboundedSender<ControlMessage>,
+    reports: Arc<ViewerReports>,
+    updates: UnboundedSender<ControlMessage>,
+    events: EventSink,
+}
+
+impl StreamControl<'_> {
+    /// Queues `message` for the viewer. Fails only once the session is
+    /// over, when nothing is left to tell.
+    fn tell_viewer(&self, message: ControlMessage) {
+        let _ = self.updates.send(message);
+    }
 }
 
 /// Body of the streaming thread: set up GPU objects, report readiness, then
@@ -174,7 +210,16 @@ fn stream_loop(
     // Held for the whole streaming loop, released when it ends.
     let _timer = TimerResolution::raise();
     let _mmcss = MmcssRegistration::register();
-    let mut streamer = HostStreamer::new(source, encoder, video, stream.fps, stream.bitrate_bps());
+    let transport = video.clone();
+    let max_bps = stream.bitrate_bps();
+    let mut streamer = HostStreamer::new(source, encoder, video, stream.fps, max_bps);
+    let mut rate = RateAdaptation::new(
+        max_bps,
+        control.reports.clone(),
+        counters(&transport, streamer.stats().frames_skipped),
+        Instant::now(),
+    );
+    control.tell_viewer(ControlMessage::TargetBitrate { bps: max_bps });
     let mut error = None;
     while !control.stop.load(Ordering::Relaxed) {
         let step = (|| {
@@ -189,11 +234,46 @@ fn stream_loop(
         }
         // Pointer changes are collected while capturing; forward them.
         for message in pointer_messages(streamer.source_mut().take_pointer_changes()) {
-            let _ = control.cursor.send(message);
+            control.tell_viewer(message);
         }
+        adapt_bitrate(&mut rate, &mut streamer, &transport, &control);
     }
     Ok(StreamEnd {
         stats: streamer.stats().clone(),
         error,
     })
+}
+
+/// Lets the encoder follow the network when a sample is due, and tells the
+/// viewer its new target. An encoder that refuses a rate is reported once;
+/// the stream then stays at the rate it has.
+fn adapt_bitrate(
+    rate: &mut RateAdaptation,
+    streamer: &mut Streamer,
+    transport: &VideoChannel,
+    control: &StreamControl<'_>,
+) {
+    let frames_skipped = streamer.stats().frames_skipped;
+    let change = rate.poll(
+        Instant::now(),
+        || counters(transport, frames_skipped),
+        |bps| streamer.set_bitrate(bps),
+    );
+    match change {
+        None => {}
+        Some(RateChange::Retargeted(bps)) => {
+            control.tell_viewer(ControlMessage::TargetBitrate { bps });
+        }
+        Some(RateChange::Fixed(e)) => {
+            let warning = HostWarning::BitrateFixed(format!("{e:#}"));
+            control.events.emit(HostEvent::Warning(warning));
+        }
+    }
+}
+
+fn counters(transport: &VideoChannel, frames_skipped: u64) -> Counters {
+    Counters {
+        transport: transport.transport_stats(),
+        frames_skipped,
+    }
 }

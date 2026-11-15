@@ -35,12 +35,14 @@
 //! - [`endpoint`]: host endpoint and viewer [`connect`].
 //! - [`session`]: a connected session and its handle.
 //! - [`control`] / [`video`]: channel wrappers.
+//! - [`stats`]: transport statistics (RTT, congestion window, losses).
 
 pub mod control;
 pub mod endpoint;
 pub mod identity;
 pub mod session;
 mod socket;
+pub mod stats;
 mod tls;
 mod transport;
 pub mod video;
@@ -49,6 +51,7 @@ pub use control::{ControlReceiver, ControlSender};
 pub use endpoint::{ConnectError, HostEndpoint, IdentityMismatch, Incoming, connect};
 pub use identity::{Fingerprint, Identity};
 pub use session::{Session, SessionHandle};
+pub use stats::TransportStats;
 pub use video::VideoChannel;
 
 /// ALPN protocol identifier. It stays fixed: it only says "this is wshare",

@@ -33,7 +33,13 @@ impl ViewSink {
         self.redraw()
     }
 
-    /// Sets the full-screen control bar (`None`: windowed), redrawing at once.
+    /// Shows (`Some`) or hides the notice box, redrawing right away.
+    pub fn set_notice(&mut self, lines: Option<Vec<String>>) -> Result<()> {
+        self.renderer.set_notice(lines);
+        self.redraw()
+    }
+
+    /// Sets the control bar (`None`: no bar), redrawing at once.
     pub fn set_toolbar(&mut self, view: Option<render::ToolbarView>) -> Result<()> {
         self.renderer.set_toolbar(view);
         self.redraw()

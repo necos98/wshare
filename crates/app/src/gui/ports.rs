@@ -115,6 +115,9 @@ pub trait ViewerLauncher {
     /// Starts a viewer; its progress arrives as [`AppEvent::Viewer`] with
     /// `id`.
     fn launch(&mut self, id: ViewerId, request: &LaunchRequest) -> Result<()>;
+    /// Ends the viewer `id` (still connecting). Its late events are ignored
+    /// by the interface, which has already dropped the entry.
+    fn cancel(&mut self, id: ViewerId);
 }
 
 /// The hosts this PC is remembered by (written by the viewers it launches).

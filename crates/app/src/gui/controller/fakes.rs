@@ -81,6 +81,10 @@ impl ViewerLauncher for FakeLauncher {
         log.launched.push((id, request.clone()));
         Ok(())
     }
+
+    fn cancel(&mut self, id: ViewerId) {
+        self.0.borrow_mut().calls.push(format!("cancel {id}"));
+    }
 }
 
 impl KnownHostsStore for FakeKnownHosts {

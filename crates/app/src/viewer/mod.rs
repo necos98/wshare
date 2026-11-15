@@ -18,11 +18,13 @@ mod input_map;
 mod key_log;
 mod key_router;
 mod keyboard_hook;
+mod notice;
 mod pairing;
 mod remote;
 mod render_thread;
 pub mod report;
 mod sink;
+mod stall;
 mod stats;
 mod toolbar;
 mod window;
@@ -307,7 +309,8 @@ async fn run_control(
                 }
             }
             incoming = rx.recv() => match incoming {
-                Ok(Some(ControlMessage::Bye) | None) => break ViewerFailure::HostLeft,
+                Ok(Some(ControlMessage::Bye)) => break ViewerFailure::HostDisconnected,
+                Ok(None) => break ViewerFailure::HostLeft,
                 Ok(Some(ControlMessage::Cursor(shape))) => {
                     let _ = window.send_event(UserEvent::Cursor(shape));
                 }

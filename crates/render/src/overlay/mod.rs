@@ -3,6 +3,8 @@
 
 mod geometry;
 
+pub(crate) use geometry::Anchor;
+
 use anyhow::{Context, Result};
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::Direct2D::{
@@ -31,11 +33,12 @@ const FOREGROUND: D2D1_COLOR_F = D2D1_COLOR_F {
     a: 1.0,
 };
 
-/// Lines of monospace text in a dark rounded box, top-left of the window.
+/// Lines of monospace text in a dark rounded box at its [`Anchor`] of the window.
 ///
 /// Brushes are created once; the text format only when the window's DPI
 /// changes. While hidden it does nothing.
 pub(crate) struct Overlay {
+    anchor: Anchor,
     lines: Option<Vec<String>>,
     background: ID2D1SolidColorBrush,
     foreground: ID2D1SolidColorBrush,
@@ -44,10 +47,11 @@ pub(crate) struct Overlay {
 }
 
 impl Overlay {
-    pub(crate) fn new(canvas: &Canvas) -> Result<Self> {
+    pub(crate) fn new(canvas: &Canvas, anchor: Anchor) -> Result<Self> {
         let ctx = canvas.context();
         unsafe {
             Ok(Self {
+                anchor,
                 lines: None,
                 background: ctx.CreateSolidColorBrush(&BACKGROUND, None)?,
                 foreground: ctx.CreateSolidColorBrush(&FOREGROUND, None)?,
@@ -87,7 +91,7 @@ impl Overlay {
         };
         let mut metrics = DWRITE_TEXT_METRICS::default();
         unsafe { layout.GetMetrics(&mut metrics)? };
-        let placed = style.place((metrics.width, metrics.height), size);
+        let placed = style.place((metrics.width, metrics.height), size, self.anchor);
 
         let rounded = D2D1_ROUNDED_RECT {
             rect: D2D_RECT_F {

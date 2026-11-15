@@ -21,6 +21,7 @@ use crate::viewer::report::{FailureCause, REPORT_ENABLED, REPORT_ENV, ViewerRepo
 
 use super::model::{ViewerId, ViewerUpdate};
 use super::ports::{AppEvent, Inbox, LaunchRequest, ViewerLauncher};
+use super::viewer_processes::ViewerProcesses;
 
 /// `CREATE_NO_WINDOW`: no console for the child, whatever its subsystem.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -28,12 +29,17 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 pub struct ProcessLauncher {
     exe: PathBuf,
     inbox: Inbox,
+    processes: ViewerProcesses,
 }
 
 impl ProcessLauncher {
     pub fn new(inbox: Inbox) -> Result<Self> {
         let exe = std::env::current_exe().context("locating wshare.exe")?;
-        Ok(Self { exe, inbox })
+        Ok(Self {
+            exe,
+            inbox,
+            processes: ViewerProcesses::default(),
+        })
     }
 }
 
@@ -56,8 +62,14 @@ impl ViewerLauncher for ProcessLauncher {
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .context("starting the viewer")?;
-        let stdout = child.stdout.take().context("viewer stdout")?;
+        let Some(stdout) = child.stdout.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("viewer stdout");
+        };
+        self.processes.insert(id, child);
         let inbox = self.inbox.clone();
+        let processes = self.processes.clone();
         std::thread::Builder::new()
             .name(format!("viewer-{id}"))
             .spawn(move || {
@@ -72,15 +84,21 @@ impl ViewerLauncher for ProcessLauncher {
                         None => {}
                     }
                 }
-                let status = child.wait();
-                let update = exit_update(
-                    status.as_ref().is_ok_and(|s| s.success()),
-                    status.ok().and_then(|s| s.code()),
-                    failure,
-                );
-                inbox.send(AppEvent::Viewer { id, update });
+                // Gone from the registry: it was cancelled, and the
+                // interface no longer listens for it.
+                let status = processes.take(id).map(|mut child| child.wait());
+                let success = matches!(&status, Some(Ok(s)) if s.success());
+                let code = status.and_then(Result::ok).and_then(|s| s.code());
+                inbox.send(AppEvent::Viewer {
+                    id,
+                    update: exit_update(success, code, failure),
+                });
             })?;
         Ok(())
+    }
+
+    fn cancel(&mut self, id: ViewerId) {
+        self.processes.terminate(id);
     }
 }
 

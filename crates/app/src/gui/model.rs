@@ -257,6 +257,9 @@ pub struct GuiState {
     pub viewers: Vec<ViewerSession>,
     /// Hosts this PC connects to without a PIN.
     pub remembered: RememberedHosts,
+    /// Counts the times the selected host asked for the PIN again; the
+    /// window empties and focuses the PIN field whenever it changes.
+    pub pin_prompts: u64,
 }
 
 impl GuiState {
@@ -313,29 +316,47 @@ impl GuiState {
                 let Some(viewer) = self.viewer_mut(id) else {
                     return;
                 };
-                match (cause, viewer.host_id.clone()) {
-                    (Some(FailureCause::PinRequired), Some(host_id)) => {
-                        self.ask_pin_again(id, host_id);
+                // The PIN can be asked again in the row of a host that was
+                // picked from the list and is still there.
+                let listed_host = viewer
+                    .host_id
+                    .clone()
+                    .filter(|host_id| self.host_row(host_id).is_some());
+                let status = match (cause, listed_host) {
+                    (
+                        Some(pin_cause @ (FailureCause::PinRequired | FailureCause::WrongPin)),
+                        Some(host_id),
+                    ) => {
+                        self.ask_pin_again(id, host_id, &pin_cause);
+                        return;
                     }
-                    (Some(cause), _) => {
-                        viewer.status = ViewerStatus::Failed(text::viewer_failure(&cause));
-                    }
-                    (None, _) => {
-                        viewer.status =
-                            ViewerStatus::Failed(text::viewer_exited_unexpectedly(code));
-                    }
+                    (Some(cause), _) => ViewerStatus::Failed(text::viewer_failure(&cause)),
+                    (None, _) => ViewerStatus::Failed(text::viewer_exited_unexpectedly(code)),
+                };
+                if let Some(viewer) = self.viewer_mut(id) {
+                    viewer.status = status;
                 }
             }
         }
     }
 
-    /// A listed host refused to connect without a PIN: its row opens with
-    /// the PIN field and says why, instead of a failed viewer line.
-    fn ask_pin_again(&mut self, viewer: ViewerId, host_id: String) {
+    /// A listed host refused the connection for want of a (right) PIN: its
+    /// row stays selected with an empty PIN field that takes the keyboard
+    /// and says why, instead of a failed viewer line.
+    fn ask_pin_again(&mut self, viewer: ViewerId, host_id: String, cause: &FailureCause) {
         self.viewers.retain(|v| v.id != viewer);
-        self.remembered.pin_required(&host_id);
+        if *cause == FailureCause::PinRequired {
+            self.remembered.pin_required(&host_id);
+        }
         self.selected_host = Some(host_id);
-        self.connect_error = Some(text::PIN_AGAIN.to_string());
+        self.connect_error = Some(
+            match cause {
+                FailureCause::WrongPin => text::PIN_WRONG,
+                _ => text::PIN_AGAIN,
+            }
+            .to_string(),
+        );
+        self.pin_prompts += 1;
     }
 
     /// A viewer already open (or opening) on `address`.
@@ -750,6 +771,65 @@ pub(crate) mod tests {
         });
         state.apply_viewer_update(8, ViewerUpdate::Connected);
         assert!(state.host_row(&id).unwrap().remembered, "admitted again");
+    }
+
+    #[test]
+    fn a_wrong_pin_keeps_the_host_selected_and_asks_again_in_its_row() {
+        let (mut state, id) = remembered_office();
+        state.remembered.pin_required(&id);
+        let prompts = state.pin_prompts;
+        state.apply_viewer_update(7, failed_with(FailureCause::WrongPin));
+        assert_eq!(state.selected_host.as_deref(), Some(id.as_str()));
+        assert_eq!(state.connect_error.as_deref(), Some(text::PIN_WRONG));
+        assert!(state.viewers.is_empty(), "the row says it, not a line");
+        assert_eq!(state.pin_prompts, prompts + 1, "the PIN field is refocused");
+    }
+
+    #[test]
+    fn a_wrong_pin_for_an_address_is_a_failed_line() {
+        let mut state = GuiState::default();
+        state.viewers.push(ViewerSession {
+            id: 2,
+            label: "10.0.0.5".into(),
+            address: addr("10.0.0.5:7420"),
+            host_id: None,
+            status: ViewerStatus::Connecting,
+        });
+        state.apply_viewer_update(2, failed_with(FailureCause::WrongPin));
+        assert_eq!(state.viewers[0].status_line(), "10.0.0.5: PIN errato.");
+        assert_eq!(state.selected_host, None);
+    }
+
+    #[test]
+    fn a_wrong_pin_for_a_host_gone_from_the_list_is_a_failed_line() {
+        let (mut state, id) = remembered_office();
+        state.apply_discovery(DiscoveryEvent::Lost { id });
+        state.apply_viewer_update(7, failed_with(FailureCause::WrongPin));
+        assert_eq!(state.selected_host, None);
+        assert_eq!(state.viewers[0].status_line(), "UFFICIO: PIN errato.");
+    }
+
+    #[test]
+    fn the_end_of_a_session_says_who_ended_it() {
+        let cases = [
+            (
+                FailureCause::HostLeft,
+                "UFFICIO: Il computer ha interrotto la condivisione.",
+            ),
+            (
+                FailureCause::HostDisconnected,
+                "UFFICIO: Disconnesso dall'altro computer.",
+            ),
+            (FailureCause::ConnectionLost, "UFFICIO: Connessione persa."),
+        ];
+        for (cause, line) in cases {
+            let (mut state, _) = remembered_office();
+            state.apply_viewer_update(7, ViewerUpdate::Connected);
+            state.apply_viewer_update(7, failed_with(cause));
+            assert_eq!(state.viewers.len(), 1, "the entry stays, with the reason");
+            assert_eq!(state.viewers[0].status_line(), line);
+            assert!(!state.viewers[0].is_active());
+        }
     }
 
     #[test]

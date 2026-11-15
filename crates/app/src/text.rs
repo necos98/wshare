@@ -33,6 +33,7 @@ pub fn viewer_failure(cause: &FailureCause) -> String {
             "Il computer non risponde: è acceso e raggiungibile? Controlla il firewall.".to_string()
         }
         FailureCause::HostLeft => "Il computer ha interrotto la condivisione.".to_string(),
+        FailureCause::HostDisconnected => "Disconnesso dall'altro computer.".to_string(),
         FailureCause::ConnectionLost => "Connessione persa.".to_string(),
         FailureCause::HostBusy => {
             "Computer già in uso da un altro visualizzatore: riprova quando si libera.".to_string()
@@ -139,6 +140,8 @@ pub fn host_warning(warning: &HostWarning) -> String {
 
 /// Shown under a remembered host that refused to connect without a PIN.
 pub const PIN_AGAIN: &str = "Questo computer richiede di nuovo il PIN.";
+/// Shown under a listed host that refused the PIN just typed.
+pub const PIN_WRONG: &str = "PIN errato: riprova.";
 pub const SHARING_STOPPING: &str = "Arresto in corso…";
 pub const SHARING_OFF_HINT: &str =
     "Attivalo per far vedere e controllare questo PC da un altro computer in rete.";
@@ -224,11 +227,13 @@ pub const ALLOW_REMOTE_CONTROL: &str = "Consenti controllo remoto (mouse e tasti
 pub const INPUT_BLOCKED: &str =
     "Input bloccato da Windows (finestra amministratore o schermata protetta).";
 pub const COMPUTERS_ON_NETWORK: &str = "Computer in rete";
-pub const SEARCHING: &str =
-    "Ricerca in corso… Sull'altro computer apri wshare e attiva la condivisione.";
+pub const SEARCHING: &str = "Ricerca in corso… Sull'altro computer apri wshare e attiva la \
+     condivisione. Se non compare, controlla che il firewall lasci passare mDNS (UDP 5353) su \
+     entrambi i computer, oppure usa «Connetti a un indirizzo IP» qui sotto.";
 pub const CONNECT_TO_ADDRESS: &str = "Connetti a un indirizzo IP";
 pub const CONNECT: &str = "Connetti";
 pub const CLOSE: &str = "Chiudi";
+pub const CANCEL: &str = "Annulla";
 pub const AUTHORIZED_DEVICES: &str = "Dispositivi autorizzati";
 pub const AUTHORIZED_HINT: &str =
     "Si connettono senza PIN. Rimuovendoli, la prossima volta servirà il PIN.";
@@ -277,9 +282,24 @@ pub fn window_failed(detail: &str) -> String {
 
 // --- Viewer window ------------------------------------------------------
 
+pub const BAR_FULLSCREEN: &str = "Schermo intero";
 pub const BAR_WINDOWED: &str = "Finestra";
 pub const BAR_STATS: &str = "Statistiche";
 pub const BAR_DISCONNECT: &str = "Disconnetti";
+
+/// Hover texts of the control bar's buttons, with their shortcuts.
+pub const BAR_TIP_FULLSCREEN: &str = "Schermo intero (Ctrl+Alt+Invio)";
+pub const BAR_TIP_WINDOWED: &str = "Torna alla finestra (Ctrl+Alt+Invio)";
+pub const BAR_TIP_STATS: &str = "Mostra o nascondi le statistiche (Ctrl+Alt+I)";
+pub const BAR_TIP_DISCONNECT: &str = "Chiudi la connessione";
+
+/// Shown over the picture for a few seconds when the session starts.
+pub const NOTICE_SHORTCUTS: [&str; 2] =
+    ["Ctrl+Alt+Invio: schermo intero", "Ctrl+Alt+I: statistiche"];
+/// Shown while the picture does not move on.
+pub const NOTICE_UNSTABLE: &str = "Connessione instabile…";
+pub const NOTICE_CONTROL_OFF: &str = "Controllo remoto disattivato dall'altro computer";
+pub const NOTICE_CONTROL_ON: &str = "Controllo remoto riattivato dall'altro computer";
 
 pub const STAT_FPS: &str = "Frame/s";
 pub const STAT_BITRATE: &str = "Bitrate";
@@ -327,6 +347,10 @@ mod tests {
                 FailureCause::HostLeft,
                 "Il computer ha interrotto la condivisione.",
             ),
+            (
+                FailureCause::HostDisconnected,
+                "Disconnesso dall'altro computer.",
+            ),
             (FailureCause::ConnectionLost, "Connessione persa."),
             (
                 FailureCause::HostBusy,
@@ -346,6 +370,29 @@ mod tests {
         for (cause, text) in cases {
             assert_eq!(viewer_failure(&cause), text);
         }
+    }
+
+    #[test]
+    fn an_empty_list_points_to_the_firewall_mdns_and_the_ip_address() {
+        assert!(SEARCHING.contains("firewall"));
+        assert!(SEARCHING.contains("mDNS (UDP 5353)"));
+        assert!(SEARCHING.contains(&format!("«{CONNECT_TO_ADDRESS}»")));
+    }
+
+    #[test]
+    fn the_viewer_window_notices_and_hints() {
+        assert_eq!(NOTICE_UNSTABLE, "Connessione instabile…");
+        assert_eq!(
+            NOTICE_CONTROL_OFF,
+            "Controllo remoto disattivato dall'altro computer"
+        );
+        assert_eq!(
+            NOTICE_CONTROL_ON,
+            "Controllo remoto riattivato dall'altro computer"
+        );
+        assert!(BAR_TIP_FULLSCREEN.contains("Ctrl+Alt+Invio"));
+        assert!(BAR_TIP_WINDOWED.contains("Ctrl+Alt+Invio"));
+        assert!(BAR_TIP_STATS.contains("Ctrl+Alt+I)"));
     }
 
     #[test]

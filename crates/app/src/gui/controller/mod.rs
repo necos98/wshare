@@ -40,6 +40,8 @@ pub enum Intent {
         id: String,
     },
     DismissViewer(ViewerId),
+    /// Gives up a connection that is still being made.
+    CancelViewer(ViewerId),
     ShowWindow,
     /// The window's close button.
     CloseWindow,
@@ -132,6 +134,7 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore> Controller<S, L, 
             Intent::ConnectAddress { address, pin } => self.connect_address(&address, &pin),
             Intent::ForgetHost { id } => self.forget_host(&id),
             Intent::DismissViewer(id) => self.state.viewers.retain(|v| v.id != id),
+            Intent::CancelViewer(id) => self.cancel_viewer(id),
             Intent::ShowWindow => return Some(WindowCommand::Show),
             Intent::CloseWindow => {
                 let decision = close_decision(self.state.sharing.enabled);
@@ -321,6 +324,20 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore> Controller<S, L, 
         self.state.connect_error = None;
     }
 
+    /// Only a viewer still connecting can be cancelled: a connected one has
+    /// a window of its own, closed there.
+    fn cancel_viewer(&mut self, id: ViewerId) {
+        let connecting = self
+            .state
+            .viewers
+            .iter()
+            .any(|v| v.id == id && v.status == ViewerStatus::Connecting);
+        if connecting {
+            self.launcher.cancel(id);
+            self.state.viewers.retain(|v| v.id != id);
+        }
+    }
+
     fn forget_host(&mut self, id: &str) {
         let Some(host) = self.state.remembered.known(id) else {
             return;
@@ -350,6 +367,8 @@ fn setup_error(error: &anyhow::Error) -> String {
     text::sharing_failed(&HostFailure::of(error))
 }
 
+#[cfg(test)]
+mod connection_tests;
 #[cfg(test)]
 mod fakes;
 #[cfg(test)]

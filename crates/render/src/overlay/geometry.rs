@@ -4,6 +4,15 @@
 /// DPI at which the style below is specified (100 % scaling).
 const BASE_DPI: f32 = 96.0;
 
+/// Where in the window an overlay sits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Anchor {
+    /// Statistics: out of the way of the picture's centre.
+    TopLeft,
+    /// Short notices: where the eye rests, above the window's bottom edge.
+    BottomCenter,
+}
+
 /// Overlay look at 100 % scaling, in pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Style {
@@ -44,15 +53,22 @@ impl Style {
         )
     }
 
-    /// Places a box around text measuring `text` (width, height) pixels in
-    /// the top-left corner of a `target` window. The box is snapped to
-    /// whole pixels (crisp edges) and never extends past the window.
-    pub(crate) fn place(&self, text: (f32, f32), target: (u32, u32)) -> OverlayBox {
+    /// Places a box around text measuring `text` (width, height) pixels at
+    /// `anchor` of a `target` window. The box is snapped to whole pixels
+    /// (crisp edges) and never extends past the window.
+    pub(crate) fn place(&self, text: (f32, f32), target: (u32, u32), anchor: Anchor) -> OverlayBox {
         let (tw, th) = (target.0 as f32, target.1 as f32);
-        let left = self.margin.min(tw);
-        let top = self.margin.min(th);
-        let right = (left + text.0.max(0.0) + 2.0 * self.padding).ceil().min(tw);
-        let bottom = (top + text.1.max(0.0) + 2.0 * self.padding).ceil().min(th);
+        let width = (text.0.max(0.0) + 2.0 * self.padding).ceil().min(tw);
+        let height = (text.1.max(0.0) + 2.0 * self.padding).ceil().min(th);
+        let (left, top) = match anchor {
+            Anchor::TopLeft => (self.margin.min(tw), self.margin.min(th)),
+            Anchor::BottomCenter => (
+                ((tw - width) / 2.0).floor(),
+                (th - height - self.margin).max(0.0),
+            ),
+        };
+        let right = (left + width).min(tw);
+        let bottom = (top + height).min(th);
         OverlayBox {
             rect: RectF {
                 left,
@@ -123,7 +139,7 @@ mod tests {
 
     #[test]
     fn box_wraps_text_with_padding_in_top_left_corner() {
-        let b = STYLE.place((100.0, 40.0), (800, 600));
+        let b = STYLE.place((100.0, 40.0), (800, 600), Anchor::TopLeft);
         assert_eq!(
             b.rect,
             RectF {
@@ -139,7 +155,7 @@ mod tests {
 
     #[test]
     fn box_snaps_outwards_to_whole_pixels() {
-        let b = STYLE.place((100.2, 40.7), (800, 600));
+        let b = STYLE.place((100.2, 40.7), (800, 600), Anchor::TopLeft);
         assert_eq!(b.rect.right, 121.0);
         assert_eq!(b.rect.bottom, 61.0);
         assert!(b.rect.width() >= 100.2 + 12.0);
@@ -148,7 +164,7 @@ mod tests {
     #[test]
     fn box_scales_with_dpi() {
         let s = STYLE.for_dpi(192); // 200 %
-        let b = s.place((200.0, 80.0), (1600, 1200));
+        let b = s.place((200.0, 80.0), (1600, 1200), Anchor::TopLeft);
         assert_eq!(b.rect.left, 16.0);
         assert_eq!(b.rect.width(), 200.0 + 24.0);
         assert_eq!(b.rect.height(), 80.0 + 24.0);
@@ -157,19 +173,39 @@ mod tests {
 
     #[test]
     fn box_never_leaves_the_window() {
-        let b = STYLE.place((1000.0, 500.0), (300, 200));
+        let b = STYLE.place((1000.0, 500.0), (300, 200), Anchor::TopLeft);
         assert_eq!(b.rect.right, 300.0);
         assert_eq!(b.rect.bottom, 200.0);
-        let tiny = STYLE.place((10.0, 10.0), (4, 4));
+        let tiny = STYLE.place((10.0, 10.0), (4, 4), Anchor::TopLeft);
         assert!(tiny.rect.left <= 4.0 && tiny.rect.right <= 4.0);
         assert!(tiny.rect.width() >= 0.0 && tiny.rect.height() >= 0.0);
     }
 
     #[test]
     fn negative_metrics_are_treated_as_empty() {
-        let b = STYLE.place((-5.0, -5.0), (800, 600));
+        let b = STYLE.place((-5.0, -5.0), (800, 600), Anchor::TopLeft);
         assert_eq!(b.rect.width(), 12.0);
         assert_eq!(b.rect.height(), 12.0);
+    }
+
+    #[test]
+    fn a_notice_is_centred_above_the_bottom_edge() {
+        let b = STYLE.place((200.0, 40.0), (800, 600), Anchor::BottomCenter);
+        assert_eq!(b.rect.left, 294.0);
+        assert_eq!(b.rect.right, 506.0);
+        assert_eq!(b.rect.bottom, 600.0 - 8.0);
+        assert_eq!(b.rect.height(), 40.0 + 12.0);
+        assert_eq!(b.text_origin, (b.rect.left + 6.0, b.rect.top + 6.0));
+    }
+
+    #[test]
+    fn a_notice_never_leaves_the_window() {
+        let wide = STYLE.place((2000.0, 500.0), (300, 200), Anchor::BottomCenter);
+        assert_eq!((wide.rect.left, wide.rect.right), (0.0, 300.0));
+        assert!(wide.rect.top >= 0.0 && wide.rect.bottom <= 200.0);
+        let tiny = STYLE.place((10.0, 10.0), (4, 4), Anchor::BottomCenter);
+        assert!(tiny.rect.left >= 0.0 && tiny.rect.right <= 4.0);
+        assert!(tiny.rect.top >= 0.0 && tiny.rect.bottom <= 4.0);
     }
 
     #[test]

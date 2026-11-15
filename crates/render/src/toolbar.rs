@@ -8,6 +8,9 @@ pub struct ToolbarView {
     /// Short labels, left to right (e.g. "Finestra", "Statistiche",
     /// "Disconnetti"). Drawn centred in each button rect.
     pub buttons: Vec<String>,
+    /// Hover text of each button, same order as `buttons` (an empty text or
+    /// a missing one: none). Drawn under the hovered button.
+    pub tooltips: Vec<String>,
     pub expanded: bool,
     /// Button under the pointer, drawn highlighted.
     pub hovered: Option<usize>,

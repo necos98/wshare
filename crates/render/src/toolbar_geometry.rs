@@ -140,11 +140,102 @@ impl ToolbarGeometry {
     }
 }
 
+// Hover text box, at 96 DPI.
+const TIP_GAP: f32 = 6.0;
+const TIP_PADDING: f32 = 6.0;
+
+/// Where the hover text of `button` goes: a box around text measuring
+/// `text` (width, height) pixels, centred under the button and kept inside
+/// the window. `None` when the bar has no such button (collapsed bar).
+/// Pure.
+pub(crate) fn tooltip_rect(
+    geometry: &ToolbarGeometry,
+    button: usize,
+    text: (f32, f32),
+    window: (u32, u32),
+    dpi_scale: f32,
+) -> Option<Rect> {
+    let anchor = geometry.buttons.get(button)?;
+    let scale = if dpi_scale.is_finite() && dpi_scale > 0.0 {
+        dpi_scale.min(16.0)
+    } else {
+        1.0
+    };
+    let window = (window.0.min(1 << 20) as i32, window.1.min(1 << 20) as i32);
+    let (pad, gap) = (px(TIP_PADDING, scale), px(TIP_GAP, scale));
+    let measured = |size: f32| (size.clamp(0.0, 1.0e6).ceil() as i32).saturating_add(2 * pad);
+    let (width, height) = (
+        measured(text.0).min(window.0),
+        measured(text.1).min(window.1),
+    );
+    let centre = (anchor.left + anchor.right) / 2;
+    let left = (centre - width / 2).clamp(0, window.0 - width);
+    let top = (geometry.bar.bottom + gap).min(window.1 - height).max(0);
+    Some(Rect {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const WIN: (u32, u32) = (1920, 1080);
+
+    #[test]
+    fn the_tooltip_hangs_centred_under_its_button() {
+        let g = toolbar_geometry(WIN, 1.0, 3, true);
+        let tip = tooltip_rect(&g, 1, (200.0, 16.0), WIN, 1.0).unwrap();
+        assert_eq!(tip.width(), 212);
+        assert_eq!(tip.height(), 28);
+        let button = &g.buttons[1];
+        assert_eq!(tip.left + tip.right, button.left + button.right, "centred");
+        assert_eq!(tip.top, g.bar.bottom + 6);
+    }
+
+    #[test]
+    fn the_tooltip_of_an_outer_button_stays_in_the_window() {
+        let g = toolbar_geometry((300, 200), 1.0, 3, true);
+        for button in 0..3 {
+            let tip = tooltip_rect(&g, button, (250.0, 16.0), (300, 200), 1.0).unwrap();
+            assert!(tip.left >= 0 && tip.right <= 300, "{tip:?}");
+            assert!(tip.top >= 0 && tip.bottom <= 200, "{tip:?}");
+        }
+        let wide = tooltip_rect(&g, 0, (900.0, 16.0), (300, 200), 1.0).unwrap();
+        assert_eq!((wide.left, wide.right), (0, 300), "cut to the window");
+    }
+
+    #[test]
+    fn the_tooltip_moves_up_when_there_is_no_room_below() {
+        let g = toolbar_geometry((400, 50), 1.0, 3, true);
+        let tip = tooltip_rect(&g, 0, (100.0, 30.0), (400, 50), 1.0).unwrap();
+        assert_eq!(tip.bottom, 50);
+        assert!(tip.top >= 0);
+    }
+
+    #[test]
+    fn a_tooltip_needs_an_expanded_bar_and_a_real_button() {
+        let collapsed = toolbar_geometry(WIN, 1.0, 3, false);
+        assert_eq!(tooltip_rect(&collapsed, 0, (10.0, 10.0), WIN, 1.0), None);
+        let g = toolbar_geometry(WIN, 1.0, 3, true);
+        assert_eq!(tooltip_rect(&g, 3, (10.0, 10.0), WIN, 1.0), None);
+    }
+
+    #[test]
+    fn tooltip_sizes_scale_and_degenerate_input_is_harmless() {
+        let g = toolbar_geometry((3840, 2160), 2.0, 3, true);
+        let tip = tooltip_rect(&g, 0, (100.0, 20.0), (3840, 2160), 2.0).unwrap();
+        assert_eq!(tip.width(), 100 + 24);
+        assert_eq!(tip.top, g.bar.bottom + 12);
+        for text in [(f32::NAN, f32::INFINITY), (-5.0, -5.0), (1.0e30, 1.0e30)] {
+            let tip = tooltip_rect(&g, 0, text, (3840, 2160), f32::NAN).unwrap();
+            assert!(tip.width() >= 0 && tip.height() >= 0, "{tip:?}");
+            assert!(tip.left >= 0 && tip.right <= 3840 && tip.bottom <= 2160);
+        }
+    }
 
     #[test]
     fn handle_is_centred_pill_at_top() {

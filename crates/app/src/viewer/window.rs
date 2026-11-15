@@ -24,6 +24,7 @@ use super::failure::ViewerFailure;
 use super::key_log;
 use super::key_router::Hotkey;
 use super::keyboard_hook::KeyboardHook;
+use super::notice::Notice;
 use super::remote::RemoteControl;
 use super::render_thread::{RenderInput, RenderThread, RttProbe};
 use super::toolbar::{BarAction, ControlBar, LEFT};
@@ -56,6 +57,19 @@ pub struct ControlPolicy {
 impl ControlPolicy {
     pub fn enabled(self) -> bool {
         self.host_allows && !self.view_only
+    }
+
+    /// Records that the host now allows (or forbids) remote control.
+    /// Returns what to tell the user when this changed whether they can
+    /// control the host.
+    pub fn set_host_allows(&mut self, allowed: bool) -> Option<Notice> {
+        let was_enabled = self.enabled();
+        self.host_allows = allowed;
+        match (was_enabled, self.enabled()) {
+            (true, false) => Some(Notice::ControlOff),
+            (false, true) => Some(Notice::ControlOn),
+            _ => None,
+        }
     }
 }
 
@@ -226,13 +240,15 @@ impl ViewerWindow {
 
     fn run_hotkey(&mut self, hotkey: Hotkey) {
         match hotkey {
-            Hotkey::ToggleFullscreen => {
-                let Some(window) = &self.window else { return };
-                let entering = window.fullscreen().is_none();
-                self.set_fullscreen(entering);
-            }
+            Hotkey::ToggleFullscreen => self.toggle_fullscreen(),
             Hotkey::ToggleStats => self.toggle_stats(),
         }
+    }
+
+    fn toggle_fullscreen(&mut self) {
+        let Some(window) = &self.window else { return };
+        let entering = window.fullscreen().is_none();
+        self.set_fullscreen(entering);
     }
 
     fn set_fullscreen(&mut self, on: bool) {
@@ -256,14 +272,14 @@ impl ViewerWindow {
             return;
         };
         if let Some(view) = self.bar.take_changed_view() {
-            render.set_toolbar(view);
+            render.set_toolbar(Some(view));
         }
         self.cursors.set_arrow(window, self.bar.wants_arrow());
     }
 
     fn run_bar_action(&mut self, event_loop: &ActiveEventLoop, action: BarAction) {
         match action {
-            BarAction::LeaveFullscreen => self.set_fullscreen(false),
+            BarAction::ToggleFullscreen => self.toggle_fullscreen(),
             BarAction::ToggleStats => self.toggle_stats(),
             BarAction::Disconnect => self.close(event_loop),
         }
@@ -281,11 +297,14 @@ impl ViewerWindow {
     }
 
     fn set_host_allows(&mut self, allowed: bool) {
-        self.policy.host_allows = allowed;
+        let notice = self.policy.set_host_allows(allowed);
         let enabled = self.policy.enabled();
         self.remote.set_enabled(enabled);
         if let Some(hook) = &self.hook {
             hook.set_forwarding(enabled);
+        }
+        if let (Some(notice), Some(render)) = (notice, &self.render) {
+            render.show_notice(notice);
         }
     }
 }
@@ -451,5 +470,30 @@ mod tests {
         assert!(policy(true, false).enabled());
         assert!(!policy(false, false).enabled());
         assert!(!policy(true, true).enabled());
+    }
+
+    #[test]
+    fn the_user_hears_when_the_host_switches_control_off_and_on() {
+        let mut policy = ControlPolicy {
+            host_allows: true,
+            view_only: false,
+        };
+        assert_eq!(policy.set_host_allows(true), None, "nothing changed");
+        assert_eq!(policy.set_host_allows(false), Some(Notice::ControlOff));
+        assert!(!policy.enabled());
+        assert_eq!(policy.set_host_allows(false), None, "already off");
+        assert_eq!(policy.set_host_allows(true), Some(Notice::ControlOn));
+        assert!(policy.enabled());
+    }
+
+    #[test]
+    fn a_view_only_user_has_nothing_to_hear_about() {
+        let mut policy = ControlPolicy {
+            host_allows: true,
+            view_only: true,
+        };
+        assert_eq!(policy.set_host_allows(false), None);
+        assert_eq!(policy.set_host_allows(true), None);
+        assert!(!policy.enabled());
     }
 }

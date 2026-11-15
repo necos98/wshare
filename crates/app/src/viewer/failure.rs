@@ -22,6 +22,8 @@ pub enum ViewerFailure {
     Unreachable(String),
     /// The host stopped sharing or closed the connection.
     HostLeft,
+    /// The host ended this session on purpose (it said goodbye).
+    HostDisconnected,
     /// The connection broke during the session; the text says how.
     ConnectionLost(String),
 }
@@ -37,6 +39,7 @@ impl fmt::Display for ViewerFailure {
             ),
             Self::TimedOut(text) | Self::Unreachable(text) => f.write_str(text),
             Self::HostLeft => f.write_str("the host stopped sharing"),
+            Self::HostDisconnected => f.write_str("the host ended the session"),
             Self::ConnectionLost(text) => write!(f, "connection lost: {text}"),
         }
     }
@@ -67,6 +70,7 @@ impl ViewerFailure {
             Self::TimedOut(_) => FailureCause::TimedOut,
             Self::Unreachable(_) => FailureCause::Unreachable,
             Self::HostLeft => FailureCause::HostLeft,
+            Self::HostDisconnected => FailureCause::HostDisconnected,
             Self::ConnectionLost(_) => FailureCause::ConnectionLost,
         }
     }
@@ -158,6 +162,10 @@ mod tests {
             ),
             (ViewerFailure::HostLeft, FailureCause::HostLeft),
             (
+                ViewerFailure::HostDisconnected,
+                FailureCause::HostDisconnected,
+            ),
+            (
                 ViewerFailure::ConnectionLost("reset".into()),
                 FailureCause::ConnectionLost,
             ),
@@ -211,6 +219,10 @@ mod tests {
         assert_eq!(
             ViewerFailure::HostLeft.to_string(),
             "the host stopped sharing"
+        );
+        assert_eq!(
+            ViewerFailure::HostDisconnected.to_string(),
+            "the host ended the session"
         );
         assert_eq!(
             ViewerFailure::ConnectionLost("reset".into()).to_string(),

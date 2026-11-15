@@ -38,6 +38,8 @@ pub enum FailureCause {
     HostChanged,
     /// The host stopped sharing or closed the connection.
     HostLeft,
+    /// The host ended this session on purpose (it said goodbye).
+    HostDisconnected,
     /// The connection broke during the session.
     ConnectionLost,
     /// Another viewer is connected to the host.
@@ -51,7 +53,7 @@ pub enum FailureCause {
 }
 
 /// The causes whose exit code identifies them (no detail needed).
-const CODED_CAUSES: [FailureCause; 10] = [
+const CODED_CAUSES: [FailureCause; 11] = [
     FailureCause::PinRequired,
     FailureCause::WrongPin,
     FailureCause::UnsupportedVersion,
@@ -59,6 +61,7 @@ const CODED_CAUSES: [FailureCause; 10] = [
     FailureCause::Unreachable,
     FailureCause::TimedOut,
     FailureCause::HostLeft,
+    FailureCause::HostDisconnected,
     FailureCause::ConnectionLost,
     FailureCause::HostBusy,
     FailureCause::TooManyAttempts,
@@ -79,6 +82,7 @@ impl FailureCause {
             Self::HostCannotStream(_) => 18,
             Self::HostBusy => 19,
             Self::TooManyAttempts => 20,
+            Self::HostDisconnected => 21,
             Self::Other(_) => GENERIC_EXIT_CODE,
         }
     }
@@ -100,6 +104,7 @@ impl FailureCause {
             Self::UnsupportedVersion => "unsupported-version",
             Self::HostChanged => "host-changed",
             Self::HostLeft => "host-left",
+            Self::HostDisconnected => "host-disconnected",
             Self::ConnectionLost => "connection-lost",
             Self::HostBusy => "host-busy",
             Self::TooManyAttempts => "too-many-attempts",
@@ -228,6 +233,10 @@ mod tests {
         assert_eq!(
             ViewerReport::Failed(FailureCause::TooManyAttempts).to_line(),
             "@wshare:failed:too-many-attempts"
+        );
+        assert_eq!(
+            ViewerReport::Failed(FailureCause::HostDisconnected).to_line(),
+            "@wshare:failed:host-disconnected"
         );
         assert_eq!(
             ViewerReport::Failed(FailureCause::HostCannotStream("no encoder".into())).to_line(),

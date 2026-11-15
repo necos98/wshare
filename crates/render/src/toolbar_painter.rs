@@ -10,15 +10,16 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
-    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
-    DWRITE_WORD_WRAPPING_NO_WRAP, IDWriteTextFormat,
+    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+    DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
+    DWRITE_TEXT_METRICS, DWRITE_WORD_WRAPPING_NO_WRAP, IDWriteTextFormat, IDWriteTextLayout,
 };
 use windows::core::w;
 
 use crate::canvas::Canvas;
 use crate::layout::Rect;
 use crate::toolbar::ToolbarView;
-use crate::toolbar_geometry::toolbar_geometry;
+use crate::toolbar_geometry::{ToolbarGeometry, toolbar_geometry, tooltip_rect};
 
 const fn colour(r: f32, g: f32, b: f32, a: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F { r, g, b, a }
@@ -85,6 +86,7 @@ impl ToolbarPainter {
         } else {
             None
         };
+        let tooltip = self.tooltip(canvas, &geometry, size, scale, format.as_ref())?;
         let this = &*self;
         let Some(view) = &this.view else {
             return Ok(());
@@ -123,7 +125,74 @@ impl ToolbarPainter {
                     );
                 }
             }
+            if let Some(tooltip) = &tooltip {
+                ctx.FillRoundedRectangle(
+                    &D2D1_ROUNDED_RECT {
+                        rect: to_f(&tooltip.rect),
+                        radiusX: radius,
+                        radiusY: radius,
+                    },
+                    &this.bar,
+                );
+                ctx.DrawTextLayout(
+                    tooltip.text_origin,
+                    &tooltip.layout,
+                    &this.label,
+                    D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                );
+            }
         })
+    }
+
+    /// The hover text of the hovered button, laid out and placed; `None`
+    /// when no button is hovered or it has no text.
+    fn tooltip(
+        &self,
+        canvas: &Canvas,
+        geometry: &ToolbarGeometry,
+        size: (u32, u32),
+        scale: f32,
+        format: Option<&IDWriteTextFormat>,
+    ) -> Result<Option<Tooltip>> {
+        let (Some(view), Some(format)) = (&self.view, format) else {
+            return Ok(None);
+        };
+        let Some(button) = view.hovered else {
+            return Ok(None);
+        };
+        let Some(text) = view.tooltips.get(button).filter(|text| !text.is_empty()) else {
+            return Ok(None);
+        };
+        let text: Vec<u16> = text.encode_utf16().collect();
+        let layout = unsafe {
+            let layout = canvas
+                .dwrite()
+                .CreateTextLayout(&text, format, size.0 as f32, size.1 as f32)
+                .context("CreateTextLayout")?;
+            layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)?;
+            layout.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
+            layout
+        };
+        let mut metrics = DWRITE_TEXT_METRICS::default();
+        unsafe { layout.GetMetrics(&mut metrics)? };
+        let Some(rect) = tooltip_rect(
+            geometry,
+            button,
+            (metrics.width, metrics.height),
+            size,
+            scale,
+        ) else {
+            return Ok(None);
+        };
+        let text_origin = windows_numerics::Vector2 {
+            X: rect.left as f32 + (rect.width() as f32 - metrics.width) / 2.0,
+            Y: rect.top as f32 + (rect.height() as f32 - metrics.height) / 2.0,
+        };
+        Ok(Some(Tooltip {
+            rect,
+            layout,
+            text_origin,
+        }))
     }
 
     /// Fills `rect` with only its bottom corners rounded (the top edge
@@ -181,6 +250,13 @@ impl ToolbarPainter {
         self.format = Some((dpi, format.clone()));
         Ok(format)
     }
+}
+
+/// The hover text of a button, ready to draw.
+struct Tooltip {
+    rect: Rect,
+    layout: IDWriteTextLayout,
+    text_origin: windows_numerics::Vector2,
 }
 
 fn to_f(r: &Rect) -> D2D_RECT_F {

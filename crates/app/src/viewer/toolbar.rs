@@ -1,10 +1,11 @@
-//! Full-screen control bar: pure state machine (no winit, no GPU).
+//! The viewer's control bar: pure state machine (no winit, no GPU).
 //!
-//! In full screen a handle sits at the top centre; reaching it (or the top
-//! edge next to it) expands a bar with [`BUTTONS`]. Events over the bar are
-//! consumed here and not forwarded to the host. Hit-testing comes from an
-//! injected geometry function (production: `render::toolbar_geometry`), the
-//! same one the renderer draws with.
+//! A handle sits at the top centre of the window, in full screen or not;
+//! reaching it (or the top edge next to it) expands a bar with the
+//! [`buttons`]. Events over the bar are consumed here and not forwarded to
+//! the host. Hit-testing comes from an injected geometry function
+//! (production: `render::toolbar_geometry`), the same one the renderer
+//! draws with.
 
 use std::time::{Duration, Instant};
 
@@ -24,17 +25,49 @@ pub const LEFT: u8 = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BarAction {
-    LeaveFullscreen,
+    /// Full screen on from a window, off from full screen.
+    ToggleFullscreen,
     ToggleStats,
     Disconnect,
 }
 
-/// Buttons, left to right: label and what they do.
-pub const BUTTONS: [(&str, BarAction); 3] = [
-    (text::BAR_WINDOWED, BarAction::LeaveFullscreen),
-    (text::BAR_STATS, BarAction::ToggleStats),
-    (text::BAR_DISCONNECT, BarAction::Disconnect),
-];
+/// One button of the bar: what it says, what it does and its hover text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BarButton {
+    pub label: &'static str,
+    pub tooltip: &'static str,
+    pub action: BarAction,
+}
+
+/// Number of buttons, whatever the mode.
+const BUTTON_COUNT: usize = 3;
+
+/// Buttons, left to right. The first one switches to the other mode, so it
+/// names that.
+pub const fn buttons(fullscreen: bool) -> [BarButton; BUTTON_COUNT] {
+    let (label, tooltip) = if fullscreen {
+        (text::BAR_WINDOWED, text::BAR_TIP_WINDOWED)
+    } else {
+        (text::BAR_FULLSCREEN, text::BAR_TIP_FULLSCREEN)
+    };
+    [
+        BarButton {
+            label,
+            tooltip,
+            action: BarAction::ToggleFullscreen,
+        },
+        BarButton {
+            label: text::BAR_STATS,
+            tooltip: text::BAR_TIP_STATS,
+            action: BarAction::ToggleStats,
+        },
+        BarButton {
+            label: text::BAR_DISCONNECT,
+            tooltip: text::BAR_TIP_DISCONNECT,
+            action: BarAction::Disconnect,
+        },
+    ]
+}
 
 /// Result of feeding one input event to the bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -84,12 +117,11 @@ impl<G: Fn((u32, u32), f32, usize, bool) -> ToolbarGeometry> ControlBar<G> {
         self.window = size;
         self.scale = scale;
         // The bar moved under a stationary pointer.
-        if self.fullscreen {
-            self.refresh(now);
-        }
+        self.refresh(now);
     }
 
-    /// Entering or leaving full screen. Resets the bar (collapsed).
+    /// Entering or leaving full screen. Resets the bar (collapsed) and
+    /// relabels its first button.
     pub fn set_fullscreen(&mut self, on: bool) {
         self.fullscreen = on;
         self.expanded = false;
@@ -101,9 +133,6 @@ impl<G: Fn((u32, u32), f32, usize, bool) -> ToolbarGeometry> ControlBar<G> {
     }
 
     pub fn pointer_moved(&mut self, x: i32, y: i32, now: Instant) -> Outcome {
-        if !self.fullscreen {
-            return Outcome::default();
-        }
         self.pointer = Some((x, y));
         // A drag that started on the video is never interrupted.
         if !self.video_drag() && !self.expanded && self.reveal_zone(x, y) {
@@ -117,17 +146,11 @@ impl<G: Fn((u32, u32), f32, usize, bool) -> ToolbarGeometry> ControlBar<G> {
     }
 
     pub fn pointer_left(&mut self, now: Instant) {
-        if !self.fullscreen {
-            return;
-        }
         self.pointer = None;
         self.refresh(now);
     }
 
     pub fn button(&mut self, id: u8, pressed: bool, now: Instant) -> Outcome {
-        if !self.fullscreen {
-            return Outcome::default();
-        }
         let outcome = if pressed {
             let on_bar = !self.video_drag() && self.over_bar();
             if on_bar && id == LEFT {
@@ -143,7 +166,9 @@ impl<G: Fn((u32, u32), f32, usize, bool) -> ToolbarGeometry> ControlBar<G> {
             let mut action = None;
             if press.on_bar && id == LEFT {
                 if self.pressed.is_some() && self.pressed == self.current_hit_button() {
-                    action = self.pressed.and_then(|b| BUTTONS.get(b)).map(|b| b.1);
+                    action = self
+                        .pressed
+                        .and_then(|b| buttons(self.fullscreen).get(b).map(|b| b.action));
                 }
                 self.pressed = None;
             }
@@ -171,20 +196,22 @@ impl<G: Fn((u32, u32), f32, usize, bool) -> ToolbarGeometry> ControlBar<G> {
         self.deadline
     }
 
-    /// What to draw; `None` in windowed mode.
-    pub fn view(&self) -> Option<ToolbarView> {
-        self.fullscreen.then(|| ToolbarView {
-            buttons: BUTTONS.iter().map(|b| b.0.to_string()).collect(),
+    /// What to draw.
+    pub fn view(&self) -> ToolbarView {
+        let buttons = buttons(self.fullscreen);
+        ToolbarView {
+            buttons: buttons.iter().map(|b| b.label.to_string()).collect(),
+            tooltips: buttons.iter().map(|b| b.tooltip.to_string()).collect(),
             expanded: self.expanded,
             hovered: self.hovered,
-        })
+        }
     }
 
     /// The view if it differs from the last one returned here.
-    pub fn take_changed_view(&mut self) -> Option<Option<ToolbarView>> {
+    pub fn take_changed_view(&mut self) -> Option<ToolbarView> {
         let view = self.view();
-        (view != self.sent).then(|| {
-            self.sent = view.clone();
+        (self.sent.as_ref() != Some(&view)).then(|| {
+            self.sent = Some(view.clone());
             view
         })
     }
@@ -192,7 +219,7 @@ impl<G: Fn((u32, u32), f32, usize, bool) -> ToolbarGeometry> ControlBar<G> {
     /// The pointer is on the bar (not mid-drag from the video): show the
     /// normal arrow instead of the host's cursor.
     pub fn wants_arrow(&self) -> bool {
-        self.fullscreen && self.owns_pointer()
+        self.owns_pointer()
     }
 
     fn video_drag(&self) -> bool {
@@ -204,7 +231,7 @@ impl<G: Fn((u32, u32), f32, usize, bool) -> ToolbarGeometry> ControlBar<G> {
     }
 
     fn geo(&self) -> ToolbarGeometry {
-        (self.geometry)(self.window, self.scale, BUTTONS.len(), self.expanded)
+        (self.geometry)(self.window, self.scale, BUTTON_COUNT, self.expanded)
     }
 
     fn hit(&self) -> ToolbarHit {
@@ -300,6 +327,12 @@ mod tests {
         b
     }
 
+    fn windowed_bar() -> ControlBar<Geo> {
+        let mut b = ControlBar::new(fake as Geo);
+        b.set_window(WIN, 1.0, Instant::now());
+        b
+    }
+
     fn t(ms: u64, base: Instant) -> Instant {
         base + Duration::from_millis(ms)
     }
@@ -316,32 +349,81 @@ mod tests {
     }
 
     #[test]
-    fn windowed_mode_is_inert() {
+    fn a_window_has_the_bar_too() {
         let now = Instant::now();
-        let mut b = ControlBar::new(fake as Geo);
-        b.set_window(WIN, 1.0, now);
-        assert_eq!(mv(&mut b, ON_HANDLE, now), Outcome::default());
+        let mut b = windowed_bar();
+        assert_eq!(mv(&mut b, VIDEO, now), Outcome::default());
+        assert!(!b.view().expanded);
+        mv(&mut b, ON_HANDLE, now);
+        assert!(b.view().expanded, "the handle reveals the bar");
+        assert!(mv(&mut b, ON_BTN1, now).consumed);
+        assert!(b.wants_arrow());
+        assert_eq!(b.view().hovered, Some(1));
+        mv(&mut b, VIDEO, now);
+        assert!(b.next_deadline().is_some(), "and it folds away again");
+    }
+
+    #[test]
+    fn a_window_click_on_the_first_button_asks_for_full_screen() {
+        let now = Instant::now();
+        let mut b = windowed_bar();
+        mv(&mut b, ON_HANDLE, now);
+        mv(&mut b, ON_BTN0, now);
+        assert!(b.button(LEFT, true, now).consumed);
+        let up = b.button(LEFT, false, now);
+        assert_eq!(up.action, Some(BarAction::ToggleFullscreen));
+    }
+
+    #[test]
+    fn a_window_click_on_the_video_still_reaches_the_host() {
+        let now = Instant::now();
+        let mut b = windowed_bar();
+        mv(&mut b, VIDEO, now);
         assert_eq!(b.button(LEFT, true, now), Outcome::default());
-        assert_eq!(b.view(), None);
+        assert_eq!(b.button(LEFT, false, now), Outcome::default());
+    }
+
+    #[test]
+    fn the_first_button_names_the_other_mode_and_hints_the_shortcut() {
+        let windowed = windowed_bar().view();
+        assert_eq!(
+            windowed.buttons,
+            ["Schermo intero", "Statistiche", "Disconnetti"]
+        );
+        assert_eq!(
+            windowed.tooltips,
+            [
+                "Schermo intero (Ctrl+Alt+Invio)",
+                "Mostra o nascondi le statistiche (Ctrl+Alt+I)",
+                "Chiudi la connessione"
+            ]
+        );
+        let fullscreen = bar().view();
+        assert_eq!(fullscreen.buttons[0], "Finestra");
+        assert_eq!(
+            fullscreen.tooltips[0],
+            "Torna alla finestra (Ctrl+Alt+Invio)"
+        );
+    }
+
+    #[test]
+    fn switching_mode_resets_the_bar_and_relabels_it() {
+        let now = Instant::now();
+        let mut b = bar();
+        mv(&mut b, ON_HANDLE, now);
+        assert!(b.view().expanded);
+        b.set_fullscreen(false);
+        let view = b.view();
+        assert!(!view.expanded);
+        assert_eq!(view.buttons[0], "Schermo intero");
         assert_eq!(b.next_deadline(), None);
         assert!(!b.wants_arrow());
     }
 
     #[test]
-    fn leaving_fullscreen_clears_view_and_state() {
-        let now = Instant::now();
-        let mut b = bar();
-        mv(&mut b, ON_HANDLE, now);
-        assert!(b.view().unwrap().expanded);
-        b.set_fullscreen(false);
-        assert_eq!(b.view(), None);
-        assert_eq!(b.next_deadline(), None);
-    }
-
-    #[test]
     fn view_starts_collapsed_in_fullscreen_with_labels() {
         let b = bar();
-        let v = b.view().unwrap();
+        let v = b.view();
         assert!(!v.expanded);
         assert_eq!(v.buttons, ["Finestra", "Statistiche", "Disconnetti"]);
         assert_eq!(v.hovered, None);
@@ -352,30 +434,30 @@ mod tests {
         let mut b = bar();
         let out = mv(&mut b, VIDEO, Instant::now());
         assert_eq!(out, Outcome::default());
-        assert!(!b.view().unwrap().expanded);
+        assert!(!b.view().expanded);
     }
 
     #[test]
     fn handle_hover_reveals() {
         let mut b = bar();
         mv(&mut b, ON_HANDLE, Instant::now());
-        assert!(b.view().unwrap().expanded);
+        assert!(b.view().expanded);
     }
 
     #[test]
     fn top_edge_near_handle_reveals() {
         let mut b = bar();
         mv(&mut b, (400, 0), Instant::now()); // beyond the 24 px margin
-        assert!(!b.view().unwrap().expanded);
+        assert!(!b.view().expanded);
         mv(&mut b, (430, 1), Instant::now());
-        assert!(b.view().unwrap().expanded);
+        assert!(b.view().expanded);
     }
 
     #[test]
     fn top_edge_far_from_handle_does_not_reveal() {
         let mut b = bar();
         mv(&mut b, (50, 0), Instant::now());
-        assert!(!b.view().unwrap().expanded);
+        assert!(!b.view().expanded);
     }
 
     #[test]
@@ -385,13 +467,13 @@ mod tests {
         mv(&mut b, ON_HANDLE, now);
         let out = mv(&mut b, ON_BTN1, now);
         assert!(out.consumed);
-        assert_eq!(b.view().unwrap().hovered, Some(1));
+        assert_eq!(b.view().hovered, Some(1));
         assert_eq!(b.next_deadline(), None);
         mv(&mut b, ON_BAR_GAP, now);
-        assert_eq!(b.view().unwrap().hovered, None);
+        assert_eq!(b.view().hovered, None);
         assert!(b.wants_arrow());
         mv(&mut b, ON_BTN2, now);
-        assert_eq!(b.view().unwrap().hovered, Some(2));
+        assert_eq!(b.view().hovered, Some(2));
     }
 
     #[test]
@@ -403,9 +485,9 @@ mod tests {
         assert!(!out.consumed);
         assert_eq!(b.next_deadline(), Some(t(700, base)));
         b.tick(t(699, base));
-        assert!(b.view().unwrap().expanded);
+        assert!(b.view().expanded);
         b.tick(t(700, base));
-        assert!(!b.view().unwrap().expanded);
+        assert!(!b.view().expanded);
         assert_eq!(b.next_deadline(), None);
     }
 
@@ -418,7 +500,7 @@ mod tests {
         mv(&mut b, ON_BTN0, t(300, base));
         assert_eq!(b.next_deadline(), None);
         b.tick(t(5000, base));
-        assert!(b.view().unwrap().expanded);
+        assert!(b.view().expanded);
     }
 
     #[test]
@@ -440,14 +522,14 @@ mod tests {
         b.pointer_left(t(10, base));
         assert_eq!(b.next_deadline(), Some(t(710, base)));
         b.tick(t(710, base));
-        assert!(!b.view().unwrap().expanded);
+        assert!(!b.view().expanded);
     }
 
     #[test]
     fn click_fires_action_on_release_over_same_button() {
         let now = Instant::now();
         for (pos, action) in [
-            (ON_BTN0, BarAction::LeaveFullscreen),
+            (ON_BTN0, BarAction::ToggleFullscreen),
             (ON_BTN1, BarAction::ToggleStats),
             (ON_BTN2, BarAction::Disconnect),
         ] {
@@ -560,7 +642,7 @@ mod tests {
         b.button(LEFT, true, now);
         let out = mv(&mut b, ON_HANDLE, now);
         assert!(!out.consumed);
-        assert!(!b.view().unwrap().expanded);
+        assert!(!b.view().expanded);
         assert!(!b.wants_arrow());
         assert_eq!(b.button(LEFT, false, now), Outcome::default());
     }
@@ -587,7 +669,7 @@ mod tests {
         b.button(LEFT, true, base);
         mv(&mut b, VIDEO, base);
         b.tick(t(5000, base));
-        assert!(b.view().unwrap().expanded);
+        assert!(b.view().expanded);
     }
 
     #[test]
@@ -603,13 +685,14 @@ mod tests {
         assert!(b.take_changed_view().is_some());
         assert!(b.take_changed_view().is_none());
         mv(&mut b, ON_HANDLE, now);
-        assert!(b.take_changed_view().unwrap().unwrap().expanded);
+        assert!(b.take_changed_view().unwrap().expanded);
         mv(&mut b, ON_BTN2, now);
         assert!(b.take_changed_view().is_some());
         mv(&mut b, (601, 20), now); // same button: no change
         assert!(b.take_changed_view().is_none());
         b.set_fullscreen(false);
-        assert_eq!(b.take_changed_view(), Some(None));
+        let relabelled = b.take_changed_view().unwrap();
+        assert_eq!(relabelled.buttons[0], "Schermo intero");
         assert!(b.take_changed_view().is_none());
     }
 
@@ -619,9 +702,9 @@ mod tests {
         let mut b = bar();
         mv(&mut b, ON_HANDLE, now);
         mv(&mut b, ON_BTN1, now);
-        assert_eq!(b.view().unwrap().hovered, Some(1));
+        assert_eq!(b.view().hovered, Some(1));
         b.set_window((2000, 600), 1.0, now); // bar now centred at x=1000
-        assert_eq!(b.view().unwrap().hovered, None);
+        assert_eq!(b.view().hovered, None);
         assert!(b.next_deadline().is_some());
     }
 
@@ -632,6 +715,6 @@ mod tests {
         b.set_window(WIN, 2.0, now);
         // Strip is 4 px tall at 2x and the margin 48 px.
         mv(&mut b, (400, 3), now);
-        assert!(b.view().unwrap().expanded);
+        assert!(b.view().expanded);
     }
 }

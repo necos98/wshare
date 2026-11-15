@@ -6,7 +6,7 @@ use pipeline::FrameSink;
 use windows::Win32::Foundation::HWND;
 
 use crate::canvas::Canvas;
-use crate::overlay::Overlay;
+use crate::overlay::{Anchor, Overlay};
 use crate::processor::Nv12ToBgra;
 use crate::swapchain::SwapChain;
 use crate::toolbar_painter::ToolbarPainter;
@@ -21,6 +21,7 @@ pub struct Renderer {
     processor: Nv12ToBgra,
     canvas: Canvas,
     overlay: Overlay,
+    notice: Overlay,
     toolbar: ToolbarPainter,
 }
 
@@ -32,7 +33,8 @@ impl Renderer {
         Ok(Self {
             swap_chain: SwapChain::new(gpu, hwnd, width, height)?,
             processor: Nv12ToBgra::new(gpu)?,
-            overlay: Overlay::new(&canvas)?,
+            overlay: Overlay::new(&canvas, Anchor::TopLeft)?,
+            notice: Overlay::new(&canvas, Anchor::BottomCenter)?,
             toolbar: ToolbarPainter::new(&canvas)?,
             canvas,
         })
@@ -45,7 +47,14 @@ impl Renderer {
         self.overlay.set_lines(lines);
     }
 
-    /// Shows (Some) or hides the full-screen control bar; drawn on every
+    /// Shows `lines` in a box at the bottom centre on every subsequent
+    /// present (a short notice for the user); `None` hides it. Drawn like
+    /// the statistics overlay, which it does not replace.
+    pub fn set_notice(&mut self, lines: Option<Vec<String>>) {
+        self.notice.set_lines(lines);
+    }
+
+    /// Shows (Some) or hides the control bar; drawn on every
     /// subsequent present until changed, on top of video and statistics.
     pub fn set_toolbar(&mut self, view: Option<crate::ToolbarView>) {
         self.toolbar.set_view(view);
@@ -80,6 +89,7 @@ impl Renderer {
         // after the blit, and EndDraw flushes them before the present.
         self.processor.blit(frame, &back_buffer, size)?;
         self.overlay.draw(&mut self.canvas, &back_buffer, size)?;
+        self.notice.draw(&mut self.canvas, &back_buffer, size)?;
         self.toolbar.draw(&mut self.canvas, &back_buffer, size)?;
         Ok(true)
     }
@@ -521,6 +531,42 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    #[ignore = "requires GPU"]
+    fn notice_draws_at_the_bottom_centre_next_to_the_statistics() -> Result<()> {
+        let gpu = Gpu::default_adapter()?;
+        let window = HiddenWindow::new(640, 360)?;
+        let mut renderer = Renderer::new(&gpu, window.hwnd(), 640, 360)?;
+        let frame = red_frame(&gpu)?;
+        assert!(renderer.draw(&frame)?);
+        let plain = Image::read(&gpu, &renderer)?;
+
+        renderer.set_notice(Some(vec!["Connessione instabile…".into()]));
+        assert!(renderer.draw(&frame)?);
+        let with = Image::read(&gpu, &renderer)?;
+        let (l, t, r, b) = with.diff_bounds(&plain).expect("notice changed nothing");
+        assert!(t > with.height / 2, "box in the lower half: {t}");
+        assert!(b < with.height, "box above the bottom edge: {b}");
+        let centre = (l + r) / 2;
+        assert!(
+            centre.abs_diff(with.width / 2) <= 2,
+            "box centred: {l}..{r} of {}",
+            with.width
+        );
+        assert!(with.bright_pixels((l, t, r, b), 200) > 20, "white text");
+
+        // Both overlays live side by side; hiding one leaves the other.
+        renderer.set_overlay(stats());
+        assert!(renderer.draw(&frame)?);
+        let both = Image::read(&gpu, &renderer)?;
+        assert_ne!(both, with, "statistics drawn too");
+        renderer.set_notice(None);
+        renderer.set_overlay(None);
+        assert!(renderer.draw(&frame)?);
+        assert_eq!(Image::read(&gpu, &renderer)?, plain, "both off");
+        renderer.present(&frame)
+    }
+
     // ---- control bar ----
 
     use crate::layout::Rect;
@@ -530,6 +576,7 @@ mod tests {
     fn bar_view(expanded: bool, hovered: Option<usize>) -> Option<ToolbarView> {
         Some(ToolbarView {
             buttons: ["Window", "Stats", "Quit"].map(String::from).to_vec(),
+            tooltips: Vec::new(),
             expanded,
             hovered,
         })
@@ -560,6 +607,51 @@ mod tests {
             r.right as usize,
             r.bottom as usize,
         )
+    }
+
+    #[test]
+    #[ignore = "requires GPU"]
+    fn the_hovered_button_gets_its_tooltip_under_the_bar() -> Result<()> {
+        let gpu = Gpu::default_adapter()?;
+        let window = HiddenWindow::new(960, 540)?;
+        let mut renderer = Renderer::new(&gpu, window.hwnd(), 960, 540)?;
+        let frame = red_frame(&gpu)?;
+        let g = bar_geometry(&window, (960, 540), true);
+
+        renderer.set_toolbar(bar_view(true, Some(1)));
+        let without = render(&gpu, &mut renderer, &frame)?;
+        let mut tipped = bar_view(true, Some(1)).unwrap();
+        tipped.tooltips = ["", "Mostra le statistiche (Ctrl+Alt+I)", ""]
+            .map(String::from)
+            .to_vec();
+        renderer.set_toolbar(Some(tipped.clone()));
+        let with = render(&gpu, &mut renderer, &frame)?;
+
+        let (l, t, r, b) = with.diff_bounds(&without).expect("no tooltip drawn");
+        assert!(
+            t as i32 >= g.bar.bottom,
+            "below the bar: {t} vs {:?}",
+            g.bar
+        );
+        let (button, tip_centre) = (&g.buttons[1], (l + r) as i32 / 2);
+        let button_centre = (button.left + button.right) / 2;
+        assert!(
+            (tip_centre - button_centre).abs() <= 2,
+            "centred under its button: {tip_centre} vs {button_centre}"
+        );
+        assert!(with.bright_pixels((l, t, r, b), 200) > 20, "white text");
+
+        // A button without tooltip text, or no hover at all, draws none.
+        tipped.hovered = Some(0);
+        renderer.set_toolbar(Some(tipped.clone()));
+        let silent = render(&gpu, &mut renderer, &frame)?;
+        let (_, silent_top, _, _) = silent.diff_bounds(&without).unwrap_or((0, 0, 0, 0));
+        assert!(silent_top as i32 <= g.bar.bottom, "no tooltip for button 0");
+        tipped.hovered = None;
+        renderer.set_toolbar(Some(tipped));
+        let idle = render(&gpu, &mut renderer, &frame)?;
+        assert_eq!(idle.bright_pixels((l, t, r, b), 200), 0, "no hover, no tip");
+        renderer.present(&frame)
     }
 
     #[test]

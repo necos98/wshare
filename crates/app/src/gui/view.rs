@@ -23,6 +23,8 @@ pub struct Drafts {
     focus_host_pin: bool,
     /// Which form the last connection request came from, to show its error there.
     last_form: Form,
+    /// The `GuiState::pin_prompts` already acted on.
+    seen_pin_prompts: u64,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +150,12 @@ fn sharing_section(ui: &mut Ui, sharing: &Sharing, intents: &mut Vec<Intent>) {
 
 fn network_section(ui: &mut Ui, state: &GuiState, drafts: &mut Drafts, intents: &mut Vec<Intent>) {
     let rows = state.host_rows();
+    if drafts.seen_pin_prompts != state.pin_prompts {
+        // The host asked for the PIN again: an empty field with the keyboard.
+        drafts.seen_pin_prompts = state.pin_prompts;
+        drafts.host_pin.clear();
+        drafts.focus_host_pin = true;
+    }
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(text::COMPUTERS_ON_NETWORK)
@@ -352,13 +360,21 @@ fn viewers_section(ui: &mut Ui, viewers: &[ViewerSession], intents: &mut Vec<Int
     for viewer in viewers {
         match &viewer.status {
             ViewerStatus::Connecting | ViewerStatus::Connected => {
+                let connecting = viewer.status == ViewerStatus::Connecting;
                 ui.horizontal(|ui| {
-                    if viewer.status == ViewerStatus::Connecting {
+                    if connecting {
                         ui.spinner();
                     } else {
                         status_dot(ui, ok_color(ui));
                     }
                     ui.label(viewer.status_line());
+                    if connecting {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.button(text::CANCEL).clicked() {
+                                intents.push(Intent::CancelViewer(viewer.id));
+                            }
+                        });
+                    }
                 });
             }
             ViewerStatus::Failed(_) => {

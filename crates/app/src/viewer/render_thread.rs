@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -17,14 +17,16 @@ use render::{Renderer, ToolbarView};
 use windows::Win32::Foundation::HWND;
 
 use super::Outgoing;
+use super::notice::{Notice, NoticeBoard};
 use super::sink::ViewSink;
+use super::stall::StallWatch;
 use super::stats::{FrameTimer, Labels, RateMeter, Totals, overlay_lines};
 
 /// How often the loop wakes up without datagrams (keyframe retries, resize,
 /// stop flag, overlay refresh).
 const TICK: Duration = Duration::from_millis(50);
-/// Wake-up period while the control bar exists (full screen), so hover and
-/// collapse changes show within a frame or two. Idle windows keep [`TICK`].
+/// Wake-up period while the control bar is open, so hover and collapse
+/// changes show within a frame or two. Otherwise the loop keeps [`TICK`].
 const TOOLBAR_TICK: Duration = Duration::from_millis(16);
 /// How often the statistics overlay is refreshed while visible.
 const OVERLAY_REFRESH: Duration = Duration::from_millis(500);
@@ -48,6 +50,7 @@ pub struct RenderThread {
     size: Arc<AtomicU64>,
     stats_visible: Arc<AtomicBool>,
     toolbar: Arc<ToolbarSlot>,
+    notices: Sender<Notice>,
     thread: Option<JoinHandle<Result<ViewerStats>>>,
 }
 
@@ -63,6 +66,7 @@ impl RenderThread {
         let size = Arc::new(AtomicU64::new(pack(width, height)));
         let stats_visible = Arc::new(AtomicBool::new(false));
         let toolbar = Arc::new(ToolbarSlot::default());
+        let (notices, incoming_notices) = channel();
         let thread = {
             let (stop, size, stats_visible, toolbar) = (
                 stop.clone(),
@@ -78,6 +82,7 @@ impl RenderThread {
                         size: &size,
                         stats_visible: &stats_visible,
                         toolbar: &toolbar,
+                        notices: &incoming_notices,
                     };
                     let result = render_loop(input, shared);
                     if !stop.load(Ordering::Relaxed) {
@@ -92,8 +97,15 @@ impl RenderThread {
             size,
             stats_visible,
             toolbar,
+            notices,
             thread: Some(thread),
         })
+    }
+
+    /// Shows `notice` over the video for its time.
+    pub fn show_notice(&self, notice: Notice) {
+        // The loop is gone only when the window is closing.
+        let _ = self.notices.send(notice);
     }
 
     /// Shows or hides the statistics overlay; returns the new state.
@@ -134,6 +146,7 @@ struct Shared<'a> {
     size: &'a AtomicU64,
     stats_visible: &'a AtomicBool,
     toolbar: &'a ToolbarSlot,
+    notices: &'a Receiver<Notice>,
 }
 
 fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
@@ -142,6 +155,7 @@ fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
         size,
         stats_visible,
         toolbar,
+        notices,
     } = shared;
     let _mf = MediaFoundation::start()?;
     // Decoder and renderer must share one device so decoded textures can
@@ -155,6 +169,10 @@ fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
     let mut overlay =
         StatsOverlay::new(input.stream.clone(), decoder.name().to_string(), input.rtt);
     let mut streamer = ViewerStreamer::new(decoder, ViewSink::new(renderer));
+    let started = Instant::now();
+    let mut stall = StallWatch::new(started);
+    let mut board = NoticeBoard::default();
+    board.show(Notice::Shortcuts, started);
 
     while !stop.load(Ordering::Relaxed) {
         let action =
@@ -163,20 +181,30 @@ fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
                 .recv_timeout(if toolbar.active() { TOOLBAR_TICK } else { TICK })
             {
                 Ok(datagram) => {
-                    let (started, shown) = (Instant::now(), streamer.stats().frames_presented);
-                    let action = streamer.on_datagram(&datagram, started)?;
+                    let (received, shown) = (Instant::now(), streamer.stats().frames_presented);
+                    stall.on_datagram(received);
+                    let action = streamer.on_datagram(&datagram, received)?;
                     overlay.on_datagram(
                         datagram.len(),
                         streamer.stats().frames_presented > shown,
-                        started,
+                        received,
                     );
                     action
                 }
                 Err(RecvTimeoutError::Timeout) => streamer.on_tick(Instant::now()),
                 Err(RecvTimeoutError::Disconnected) => break,
             };
-        if action == ViewerAction::RequestKeyframe {
+        let now = Instant::now();
+        let silence = stall.check(now);
+        if action == ViewerAction::RequestKeyframe || silence.probe {
             let _ = input.outgoing.send(ControlMessage::RequestKeyframe);
+        }
+        board.set_unstable(silence.unstable);
+        while let Ok(notice) = notices.try_recv() {
+            board.show(notice, now);
+        }
+        if let Some(lines) = board.take_changed(now) {
+            streamer.sink_mut().set_notice(lines)?;
         }
         let wanted = unpack(size.load(Ordering::Relaxed));
         if wanted != applied {
@@ -282,21 +310,23 @@ impl StatsOverlay {
 struct ToolbarSlot {
     view: Mutex<Option<ToolbarView>>,
     dirty: AtomicBool,
-    /// Mirrors `view.is_some()` for the loop's cheap per-iteration check.
-    present: AtomicBool,
+    /// Mirrors "the view is expanded" for the loop's cheap per-iteration
+    /// check.
+    expanded: AtomicBool,
 }
 
 impl ToolbarSlot {
     fn set(&self, view: Option<ToolbarView>) {
         let mut slot = self.view.lock().unwrap_or_else(|e| e.into_inner());
-        self.present.store(view.is_some(), Ordering::Relaxed);
+        self.expanded
+            .store(view.as_ref().is_some_and(|v| v.expanded), Ordering::Relaxed);
         *slot = view;
         self.dirty.store(true, Ordering::Release);
     }
 
-    /// A bar exists (full screen): the loop should wake often.
+    /// The bar is open: the loop should wake often.
     fn active(&self) -> bool {
-        self.present.load(Ordering::Relaxed)
+        self.expanded.load(Ordering::Relaxed)
     }
 
     /// The new view if it changed since the last call (outer `Some`).
@@ -324,6 +354,7 @@ mod tests {
     fn view(expanded: bool) -> ToolbarView {
         ToolbarView {
             buttons: vec!["A".into()],
+            tooltips: vec!["Tip".into()],
             expanded,
             hovered: None,
         }
@@ -339,6 +370,7 @@ mod tests {
         assert_eq!(slot.take_change(), Some(Some(view(true))));
         assert_eq!(slot.take_change(), None);
         slot.set(Some(view(false)));
+        assert!(!slot.active(), "a collapsed handle needs no fast wake-ups");
         slot.set(Some(view(true))); // coalesced: only the latest is seen
         assert_eq!(slot.take_change(), Some(Some(view(true))));
         slot.set(None);

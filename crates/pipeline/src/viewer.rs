@@ -10,6 +10,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use bytes::Bytes;
 use protocol::video::{KeyframeRequester, ReassembledFrame, Reassembler, ReassemblyEvent};
 
 use crate::traits::{FrameSink, VideoDecoder};
@@ -80,9 +81,9 @@ where
     ///
     /// Malformed datagrams are ignored (a single corrupt datagram must not
     /// end the session); errors come only from the decoder or the sink.
-    pub fn on_datagrams<'a>(
+    pub fn on_datagrams(
         &mut self,
-        datagrams: impl IntoIterator<Item = &'a [u8]>,
+        datagrams: impl IntoIterator<Item = Bytes>,
         now: Instant,
     ) -> Result<ViewerAction> {
         let mut latest = None;
@@ -219,16 +220,16 @@ mod tests {
             self.base + Duration::from_millis(ms)
         }
 
-        fn packets(&mut self, data: &[u8], keyframe: bool, ts: i64) -> Vec<Vec<u8>> {
+        fn packets(&mut self, data: &[u8], keyframe: bool, ts: i64) -> Vec<Bytes> {
             self.packetizer.packetize(data, keyframe, ts, MAX).unwrap()
         }
 
         /// Feeds all datagrams at time `ms`, returning the actions.
-        fn feed(&mut self, datagrams: &[Vec<u8>], ms: u64) -> Vec<ViewerAction> {
+        fn feed(&mut self, datagrams: &[Bytes], ms: u64) -> Vec<ViewerAction> {
             let now = self.at(ms);
             datagrams
                 .iter()
-                .map(|d| self.viewer.on_datagrams([d.as_slice()], now).unwrap())
+                .map(|d| self.viewer.on_datagrams([d.clone()], now).unwrap())
                 .collect()
         }
 
@@ -324,7 +325,9 @@ mod tests {
         let mut h = harness();
         h.send(b"key", true, 0);
         assert_eq!(
-            h.viewer.on_datagrams([&[1, 2, 3][..]], h.at(10)).unwrap(),
+            h.viewer
+                .on_datagrams([Bytes::from_static(&[1, 2, 3])], h.at(10))
+                .unwrap(),
             ViewerAction::None
         );
         assert_eq!(h.viewer.stats().frames_lost, 0);
@@ -336,7 +339,7 @@ mod tests {
         let packets = h.packets(b"boom", true, 0);
         assert!(
             h.viewer
-                .on_datagrams([packets[0].as_slice()], h.at(0))
+                .on_datagrams([packets[0].clone()], h.at(0))
                 .is_err()
         );
     }
@@ -349,10 +352,7 @@ mod tests {
         for (ts, data) in [(1, &b"d1"[..]), (2, b"d2"), (3, b"d3")] {
             backlog.extend(h.packets(data, false, ts));
         }
-        let action = h
-            .viewer
-            .on_datagrams(backlog.iter().map(Vec::as_slice), h.at(50))
-            .unwrap();
+        let action = h.viewer.on_datagrams(backlog, h.at(50)).unwrap();
         assert_eq!(action, ViewerAction::None);
         // Each frame is a reference for the next: all of them are decoded.
         assert_eq!(*h.decoded.borrow(), [&b"key"[..], b"d1", b"d2", b"d3"]);
@@ -371,7 +371,7 @@ mod tests {
         let mut h = harness();
         h.send(b"key", true, 0);
         let partial = h.packets(b"split frame", false, 1);
-        let action = h.viewer.on_datagrams([partial[0].as_slice()], h.at(10));
+        let action = h.viewer.on_datagrams([partial[0].clone()], h.at(10));
         assert_eq!(action.unwrap(), ViewerAction::None);
         assert_eq!(h.presented.borrow().len(), 1);
         assert_eq!(h.viewer.stats().frames_superseded, 0);
@@ -387,7 +387,7 @@ mod tests {
         h.send(b"key", true, 0);
         let lost = h.packets(b"lost frame", false, 1);
         let next = h.packets(b"next", false, 2);
-        let batch = [lost[0].as_slice(), next[0].as_slice()];
+        let batch = [lost[0].clone(), next[0].clone()];
         let action = h.viewer.on_datagrams(batch, h.at(300)).unwrap();
         assert_eq!(action, ViewerAction::RequestKeyframe);
         assert_eq!(h.viewer.stats().frames_lost, 1);

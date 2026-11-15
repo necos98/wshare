@@ -33,6 +33,7 @@ pub struct HwDecoder {
     /// `None` until the decoder has parsed the stream's parameter sets.
     format: Option<OutputFormat>,
     provides_samples: bool,
+    input: samples::InputSamples,
     name: String,
 }
 
@@ -52,6 +53,7 @@ impl HwDecoder {
             requested: (width, height),
             format: None,
             provides_samples: true,
+            input: samples::InputSamples::default(),
             name,
         };
         // Most decoders accept NV12 right away; others only after parsing
@@ -127,7 +129,7 @@ impl VideoDecoder for HwDecoder {
     type Frame = GpuFrame;
 
     fn decode(&mut self, unit: &[u8], timestamp: i64) -> Result<Option<GpuFrame>> {
-        let sample = samples::compressed_sample(unit, timestamp)?;
+        let sample = self.input.sample(unit, timestamp)?;
         let mut latest = None;
         loop {
             match unsafe { self.transform.ProcessInput(0, &sample, 0) } {

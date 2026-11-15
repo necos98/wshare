@@ -177,6 +177,14 @@ impl DesktopDuplication {
                 return Ok(Acquire::NoChange);
             }
             let texture: ID3D11Texture2D = resource.context("no frame resource")?.cast()?;
+            // Copied on every update, even those the pacer will not send:
+            // DXGI lends the image only until `ReleaseFrame`, and the next
+            // `AcquireNextFrame` (our only way to learn that a newer image
+            // exists) needs the previous one released first. Deferring the
+            // copy to the moment a frame is sent would lose the last image
+            // before the screen goes idle, as no later acquire would
+            // replace it. The copy stays on the GPU, so it costs bandwidth,
+            // not latency.
             unsafe { self.gpu.context.CopyResource(&self.frame, &texture) };
             Ok(Acquire::NewFrame)
         })();

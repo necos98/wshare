@@ -18,6 +18,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 use crate::options::StreamOptions;
+use crate::realtime::{MmcssRegistration, TimerResolution};
 use crate::wire::{pointer_messages, to_wire};
 
 /// What the streaming thread did; `error` is why it stopped early, if so.
@@ -170,6 +171,9 @@ fn stream_loop(
         });
     }
 
+    // Held for the whole streaming loop, released when it ends.
+    let _timer = TimerResolution::raise();
+    let _mmcss = MmcssRegistration::register();
     let mut streamer = HostStreamer::new(source, encoder, video, stream.fps, stream.bitrate_bps());
     let mut error = None;
     while !control.stop.load(Ordering::Relaxed) {

@@ -22,6 +22,7 @@ use super::notice::{Notice, NoticeBoard};
 use super::sink::ViewSink;
 use super::stall::StallWatch;
 use super::stats::{FrameTimer, Labels, RateMeter, Totals, overlay_lines};
+use crate::realtime::MmcssRegistration;
 
 /// How often the loop wakes up without datagrams (keyframe retries, resize,
 /// stop flag, overlay refresh).
@@ -158,14 +159,16 @@ fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
         toolbar,
         notices,
     } = shared;
+    let _mmcss = MmcssRegistration::register();
     let _mf = MediaFoundation::start()?;
     // Decoder and renderer must share one device so decoded textures can
     // be drawn directly.
-    let gpu = Gpu::default_adapter()?;
+    let hwnd = HWND(input.hwnd as *mut _);
+    let gpu = Gpu::for_window(hwnd)?;
     let codec = crate::wire::from_wire(input.stream.codec);
     let decoder = HwDecoder::new(&gpu, codec, input.stream.width, input.stream.height)?;
     let mut applied = unpack(size.load(Ordering::Relaxed));
-    let renderer = Renderer::new(&gpu, HWND(input.hwnd as *mut _), applied.0, applied.1)?;
+    let renderer = Renderer::new(&gpu, hwnd, applied.0, applied.1)?;
     println!("Decoding with {} on {}", decoder.name(), gpu.adapter_name);
     let mut overlay =
         StatsOverlay::new(input.stream.clone(), decoder.name().to_string(), input.rtt);
@@ -182,8 +185,7 @@ fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
             Ok(()) => {
                 let (received, shown) = (Instant::now(), streamer.stats().frames_presented);
                 stall.on_datagram(received);
-                let action =
-                    streamer.on_datagrams(batch.iter().map(|datagram| &datagram[..]), received)?;
+                let action = streamer.on_datagrams(batch.iter().cloned(), received)?;
                 overlay.on_batch(
                     batch.iter().map(Bytes::len).sum(),
                     streamer.stats().frames_presented > shown,

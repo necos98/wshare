@@ -3,6 +3,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
+use bytes::Bytes;
 use net::{ConnectError, Fingerprint, HostEndpoint, Identity, IdentityMismatch, Session, connect};
 use pipeline::DatagramSink;
 use protocol::control::{ControlMessage, PROTOCOL_VERSION, StreamInfo, VideoCodec};
@@ -141,17 +142,17 @@ async fn datagram_roundtrip_including_max_size() {
     let host_video = &c.host.2;
     let viewer_video = &c.viewer.2;
     timeout(TIMEOUT, async {
-        DatagramSink::send(host_video, b"small".to_vec()).unwrap();
+        DatagramSink::send(host_video, Bytes::from_static(b"small")).unwrap();
         assert_eq!(&viewer_video.recv().await.unwrap()[..], b"small");
 
         let max = DatagramSink::max_datagram_size(host_video);
         assert!(max >= 1000, "max datagram size {max} unexpectedly small");
         let big: Vec<u8> = (0..max).map(|i| i as u8).collect();
-        DatagramSink::send(host_video, big.clone()).unwrap();
+        DatagramSink::send(host_video, Bytes::from(big.clone())).unwrap();
         assert_eq!(viewer_video.recv().await.unwrap(), big);
 
         // Viewer -> host works too (e.g. for future feedback packets).
-        DatagramSink::send(viewer_video, vec![42]).unwrap();
+        DatagramSink::send(viewer_video, Bytes::from_static(&[42])).unwrap();
         assert_eq!(&host_video.recv().await.unwrap()[..], [42]);
     })
     .await
@@ -172,7 +173,7 @@ async fn send_backlog_is_reported_and_drains() {
     let max = DatagramSink::max_datagram_size(host_video);
     let mut peak = 0;
     for _ in 0..BURST {
-        DatagramSink::send(host_video, vec![0; max]).unwrap();
+        DatagramSink::send(host_video, Bytes::from(vec![0; max])).unwrap();
         peak = peak.max(DatagramSink::backlog_bytes(host_video));
     }
     assert!(peak > max, "backlog peaked at {peak} bytes");
@@ -190,8 +191,8 @@ async fn send_backlog_is_reported_and_drains() {
 async fn oversized_datagram_errors() {
     let c = connected().await;
     let max = DatagramSink::max_datagram_size(&c.host.2);
-    assert!(DatagramSink::send(&c.host.2, vec![0; max + 1]).is_err());
-    assert!(DatagramSink::send(&c.host.2, vec![0; 65_536]).is_err());
+    assert!(DatagramSink::send(&c.host.2, Bytes::from(vec![0; max + 1])).is_err());
+    assert!(DatagramSink::send(&c.host.2, Bytes::from(vec![0; 65_536])).is_err());
 }
 
 #[tokio::test(flavor = "multi_thread")]

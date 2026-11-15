@@ -10,6 +10,7 @@ mod tuning;
 use std::collections::VecDeque;
 
 use anyhow::{Context, Result, bail};
+use bytes::BytesMut;
 use pipeline::{EncodedFrame, VideoEncoder};
 use windows::Win32::Foundation::LUID;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
@@ -38,6 +39,9 @@ pub struct HwEncoder {
     frame_duration: i64,
     inputs_wanted: u32,
     drained: bool,
+    /// Staging area for encoded frames, reused so that a steady stream does
+    /// not allocate per frame (see [`read_encoded`]).
+    scratch: BytesMut,
     name: String,
 }
 
@@ -79,6 +83,7 @@ impl HwEncoder {
             frame_duration: 10_000_000 / config.fps.max(1) as i64,
             inputs_wanted: 0,
             drained: false,
+            scratch: BytesMut::new(),
             name,
         })
     }
@@ -118,7 +123,7 @@ impl HwEncoder {
             Err(e) => return Err(e).context("ProcessOutput"),
         }
         let sample = sample.context("encoder produced no sample")?;
-        out.push_back(read_encoded(&sample)?);
+        out.push_back(read_encoded(&sample, &mut self.scratch)?);
         Ok(())
     }
 }
@@ -196,8 +201,10 @@ impl Drop for HwEncoder {
     }
 }
 
-/// Copies the bitstream of an output sample.
-fn read_encoded(sample: &IMFSample) -> Result<EncodedFrame> {
+/// Copies the bitstream of an output sample into `scratch` and hands it out
+/// as an immutable slice. Once the previous frame has been dropped, `scratch`
+/// takes its memory back, so no allocation is needed in steady state.
+fn read_encoded(sample: &IMFSample, scratch: &mut BytesMut) -> Result<EncodedFrame> {
     unsafe {
         let timestamp = sample.GetSampleTime().unwrap_or(0);
         let keyframe = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) != 0;
@@ -206,8 +213,9 @@ fn read_encoded(sample: &IMFSample) -> Result<EncodedFrame> {
         let mut len = 0u32;
         buffer.Lock(&mut ptr, None, Some(&mut len))?;
         // SAFETY: Lock returned `len` readable bytes at `ptr` until Unlock.
-        let data = std::slice::from_raw_parts(ptr, len as usize).to_vec();
+        scratch.extend_from_slice(std::slice::from_raw_parts(ptr, len as usize));
         buffer.Unlock()?;
+        let data = scratch.split().freeze();
         Ok(EncodedFrame {
             data,
             timestamp,

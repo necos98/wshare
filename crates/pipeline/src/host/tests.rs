@@ -5,6 +5,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use protocol::video::{HEADER_LEN, ReassembledFrame, Reassembler, ReassemblyEvent};
 
 use super::*;
@@ -76,7 +77,7 @@ impl VideoEncoder for FakeEncoder {
         let keyframe = std::mem::take(&mut s.force_keyframe) || s.submitted.is_empty();
         s.submitted.push(timestamp);
         s.in_flight.push_back(EncodedFrame {
-            data: frame.clone(),
+            data: Bytes::copy_from_slice(frame),
             timestamp,
             keyframe,
         });
@@ -102,7 +103,7 @@ impl VideoEncoder for FakeEncoder {
 /// the test drains them, like a link that has not sent them yet.
 struct FakeSink {
     max_size: Rc<RefCell<usize>>,
-    sent: Rc<RefCell<Vec<Vec<u8>>>>,
+    sent: Rc<RefCell<Vec<Bytes>>>,
     backlog: Rc<Cell<usize>>,
 }
 
@@ -111,7 +112,7 @@ impl DatagramSink for FakeSink {
         *self.max_size.borrow()
     }
 
-    fn send(&self, datagram: Vec<u8>) -> Result<()> {
+    fn send(&self, datagram: Bytes) -> Result<()> {
         self.backlog.set(self.backlog.get() + datagram.len());
         self.sent.borrow_mut().push(datagram);
         Ok(())
@@ -126,7 +127,7 @@ struct Harness {
     source: Rc<RefCell<SourceState>>,
     encoder: Rc<RefCell<EncoderState>>,
     max_size: Rc<RefCell<usize>>,
-    sent: Rc<RefCell<Vec<Vec<u8>>>>,
+    sent: Rc<RefCell<Vec<Bytes>>>,
     backlog: Rc<Cell<usize>>,
     streamer: HostStreamer<FakeSource, FakeEncoder, FakeSink>,
 }
@@ -201,7 +202,7 @@ impl Harness {
         self.sent
             .borrow()
             .iter()
-            .flat_map(|d| r.push(d).unwrap())
+            .flat_map(|d| r.push(d.clone()).unwrap())
             .map(|e| match e {
                 ReassemblyEvent::Frame(f) => f,
                 other => panic!("unexpected {other:?}"),
@@ -251,7 +252,7 @@ fn frames_reach_sink_and_reassemble_identically() {
     h.step_until(|h| h.streamer.stats().frames_sent == 3);
 
     let frames = h.reassemble();
-    let data: Vec<&[u8]> = frames.iter().map(|f| f.data.as_slice()).collect();
+    let data: Vec<&[u8]> = frames.iter().map(|f| &f.data[..]).collect();
     assert_eq!(data, vec![&b"first image!"[..], b"second", b"third image"]);
     assert_eq!(
         frames.iter().map(|f| f.frame_id).collect::<Vec<_>>(),
@@ -282,10 +283,10 @@ fn timestamps_increase_and_respect_frame_interval() {
     h.change_and_submit(b"c");
     let ts = h.encoder.borrow().submitted.clone();
     let interval_100ns = 10_000_000 / i64::from(FPS);
-    assert!(
-        ts.windows(2).all(|w| w[1] - w[0] >= interval_100ns),
-        "{ts:?}"
-    );
+    // A frame may land up to the pacer tolerance (a quarter interval at this
+    // rate) ahead of its slot.
+    let earliest_gap = interval_100ns - interval_100ns / 4;
+    assert!(ts.windows(2).all(|w| w[1] - w[0] >= earliest_gap), "{ts:?}");
 }
 
 #[test]
@@ -297,7 +298,7 @@ fn max_datagram_size_is_reread_per_frame() {
     h.change_and_submit(b"abcdefgh");
     h.step_until(|h| h.streamer.stats().frames_sent == 2);
     assert_eq!(h.sent.borrow().len(), 3);
-    assert_eq!(h.reassemble()[1].data, b"abcdefgh");
+    assert_eq!(h.reassemble()[1].data[..], *b"abcdefgh");
 }
 
 #[test]
@@ -322,7 +323,7 @@ fn keyframe_request_on_static_screen_produces_keyframe() {
     assert_eq!(h.streamer.stats().keyframes_sent, 2);
     let frames = h.reassemble();
     assert!(frames[1].keyframe);
-    assert_eq!(frames[1].data, b"still");
+    assert_eq!(frames[1].data[..], *b"still");
 }
 
 #[test]
@@ -360,7 +361,7 @@ fn faster_changes_than_fps_send_latest_image() {
         "changes should be coalesced, got {}",
         frames.len()
     );
-    assert_eq!(frames.last().unwrap().data, b"z");
+    assert_eq!(frames.last().unwrap().data[..], *b"z");
 }
 
 #[test]
@@ -382,7 +383,7 @@ fn congested_sink_skips_frames_before_capture_and_encoding() {
     h.backlog.set(0);
     h.step_until(|h| h.streamer.stats().frames_sent == 2);
     assert_eq!(h.streamer.stats().frames_skipped, 3);
-    assert_eq!(h.reassemble()[1].data, b"second");
+    assert_eq!(h.reassemble()[1].data[..], *b"second");
 }
 
 #[test]

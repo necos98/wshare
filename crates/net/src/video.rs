@@ -63,9 +63,9 @@ impl DatagramSink for VideoChannel {
     /// dropped later under congestion are not reported. Errors when the
     /// datagram exceeds the current limit, the peer does not accept
     /// datagrams, or the connection is lost.
-    fn send(&self, datagram: Vec<u8>) -> Result<()> {
+    fn send(&self, datagram: Bytes) -> Result<()> {
         let len = datagram.len();
-        match self.conn.send_datagram(Bytes::from(datagram)) {
+        match self.conn.send_datagram(datagram) {
             Ok(()) => Ok(()),
             Err(SendDatagramError::TooLarge) => bail!(
                 "video datagram of {len} bytes exceeds the current limit of {}",

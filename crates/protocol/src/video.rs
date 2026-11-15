@@ -17,6 +17,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
+use bytes::{BufMut, Bytes, BytesMut};
+
 use crate::ProtocolError;
 
 pub const VIDEO_VERSION: u8 = 1;
@@ -41,15 +43,14 @@ pub struct PacketHeader {
 
 impl PacketHeader {
     /// Appends the `HEADER_LEN`-byte encoding of this header to `out`.
-    pub fn write(&self, out: &mut Vec<u8>) {
+    pub fn write(&self, out: &mut impl BufMut) {
         let flags = if self.keyframe { FLAG_KEYFRAME } else { 0 };
-        out.reserve(HEADER_LEN);
-        out.push(VIDEO_VERSION);
-        out.push(flags);
-        out.extend_from_slice(&self.frame_id.to_le_bytes());
-        out.extend_from_slice(&self.packet_index.to_le_bytes());
-        out.extend_from_slice(&self.packet_count.to_le_bytes());
-        out.extend_from_slice(&self.timestamp.to_le_bytes());
+        out.put_u8(VIDEO_VERSION);
+        out.put_u8(flags);
+        out.put_u32_le(self.frame_id);
+        out.put_u16_le(self.packet_index);
+        out.put_u16_le(self.packet_count);
+        out.put_i64_le(self.timestamp);
     }
 
     /// Splits a datagram into its header and payload.
@@ -92,7 +93,7 @@ pub struct ReassembledFrame {
     pub frame_id: u32,
     pub timestamp: i64,
     pub keyframe: bool,
-    pub data: Vec<u8>,
+    pub data: Bytes,
 }
 
 /// Splits encoded frames into datagrams.
@@ -119,7 +120,7 @@ impl Packetizer {
         keyframe: bool,
         timestamp: i64,
         max_datagram_size: usize,
-    ) -> Result<Vec<Vec<u8>>, ProtocolError> {
+    ) -> Result<Vec<Bytes>, ProtocolError> {
         assert!(
             max_datagram_size > HEADER_LEN,
             "max_datagram_size ({max_datagram_size}) must exceed the {HEADER_LEN}-byte header"
@@ -132,16 +133,14 @@ impl Packetizer {
         let frame_id = self.next_frame_id;
         self.next_frame_id = self.next_frame_id.wrapping_add(1);
 
-        let chunks: Vec<&[u8]> = if data.is_empty() {
-            vec![&[]]
-        } else {
-            data.chunks(payload_size).collect()
-        };
-        let datagrams = chunks
-            .into_iter()
-            .zip(0u16..)
-            .map(|(chunk, packet_index)| {
-                let mut datagram = Vec::with_capacity(HEADER_LEN + chunk.len());
+        // One allocation for the whole frame: every datagram is a slice of
+        // it, and it is freed when the last datagram has been sent.
+        let mut frame = BytesMut::with_capacity(data.len() + chunk_count * HEADER_LEN);
+        // Not `data.chunks()`: an empty frame still needs one (empty) chunk.
+        let datagrams = (0..packet_count)
+            .map(|packet_index| {
+                let start = (usize::from(packet_index) * payload_size).min(data.len());
+                let chunk = &data[start..(start + payload_size).min(data.len())];
                 PacketHeader {
                     keyframe,
                     frame_id,
@@ -149,9 +148,9 @@ impl Packetizer {
                     packet_count,
                     timestamp,
                 }
-                .write(&mut datagram);
-                datagram.extend_from_slice(chunk);
-                datagram
+                .write(&mut frame);
+                frame.put_slice(chunk);
+                frame.split_to(HEADER_LEN + chunk.len()).freeze()
             })
             .collect();
         Ok(datagrams)
@@ -179,7 +178,8 @@ pub enum ReassemblyEvent {
 struct PendingFrame {
     keyframe: bool,
     timestamp: i64,
-    packets: Vec<Option<Vec<u8>>>,
+    /// Payloads, as slices of the received datagrams (no copy).
+    packets: Vec<Option<Bytes>>,
     received: usize,
 }
 
@@ -194,7 +194,7 @@ impl PendingFrame {
     }
 
     /// Stores a packet; returns false for duplicates or count mismatches.
-    fn insert(&mut self, header: &PacketHeader, payload: &[u8]) -> bool {
+    fn insert(&mut self, header: &PacketHeader, payload: Bytes) -> bool {
         if usize::from(header.packet_count) != self.packets.len() {
             return false;
         }
@@ -202,7 +202,7 @@ impl PendingFrame {
         if slot.is_some() {
             return false;
         }
-        *slot = Some(payload.to_vec());
+        *slot = Some(payload);
         self.received += 1;
         true
     }
@@ -211,8 +211,19 @@ impl PendingFrame {
         self.received == self.packets.len()
     }
 
+    /// Joins the payloads: a single-packet frame is handed over as is, a
+    /// larger one is copied once into a buffer of the exact size.
     fn into_frame(self, frame_id: u32) -> ReassembledFrame {
-        let data = self.packets.into_iter().flatten().flatten().collect();
+        let mut payloads: Vec<Bytes> = self.packets.into_iter().flatten().collect();
+        let data = if payloads.len() == 1 {
+            payloads.swap_remove(0)
+        } else {
+            let mut joined = BytesMut::with_capacity(payloads.iter().map(Bytes::len).sum());
+            for payload in &payloads {
+                joined.put_slice(payload);
+            }
+            joined.freeze()
+        };
         ReassembledFrame {
             frame_id,
             timestamp: self.timestamp,
@@ -221,7 +232,6 @@ impl PendingFrame {
         }
     }
 }
-
 /// Rebuilds frames from datagrams, optimising for latency over completeness.
 ///
 /// Policy:
@@ -262,8 +272,13 @@ impl Reassembler {
 
     /// Processes one datagram. Malformed datagrams return an error and leave
     /// the state unchanged.
-    pub fn push(&mut self, datagram: &[u8]) -> Result<Vec<ReassemblyEvent>, ProtocolError> {
-        let (header, payload) = PacketHeader::parse(datagram)?;
+    pub fn push(
+        &mut self,
+        datagram: impl Into<Bytes>,
+    ) -> Result<Vec<ReassemblyEvent>, ProtocolError> {
+        let datagram = datagram.into();
+        let (header, _) = PacketHeader::parse(&datagram)?;
+        let payload = datagram.slice(HEADER_LEN..);
         let mut events = Vec::new();
         if self.is_resolved(header.frame_id) || header.packet_index >= header.packet_count {
             return Ok(events);
@@ -401,7 +416,7 @@ mod tests {
             frame_id,
             timestamp: 7,
             keyframe,
-            data: data.to_vec(),
+            data: Bytes::copy_from_slice(data),
         })
     }
 
@@ -413,7 +428,7 @@ mod tests {
     fn primed(max_pending: usize) -> Reassembler {
         let mut r = Reassembler::new(max_pending);
         assert_eq!(
-            r.push(&single(0, true)).unwrap(),
+            r.push(single(0, true)).unwrap(),
             vec![frame_event(0, true, &[0])]
         );
         r
@@ -487,7 +502,7 @@ mod tests {
 
     // ---- packetizer ----
 
-    fn parsed(datagrams: &[Vec<u8>]) -> Vec<(PacketHeader, Vec<u8>)> {
+    fn parsed(datagrams: &[Bytes]) -> Vec<(PacketHeader, Vec<u8>)> {
         datagrams
             .iter()
             .map(|d| {
@@ -526,7 +541,7 @@ mod tests {
             .packetize(&data, false, 0, HEADER_LEN + 100)
             .unwrap();
         assert_eq!(
-            out.iter().map(Vec::len).collect::<Vec<_>>(),
+            out.iter().map(Bytes::len).collect::<Vec<_>>(),
             vec![HEADER_LEN + 100, HEADER_LEN + 1]
         );
         let packets = parsed(&out);
@@ -610,10 +625,10 @@ mod tests {
         let packets = Packetizer::new()
             .packetize(&data, true, 7, HEADER_LEN + 100)
             .unwrap();
-        assert!(r.push(&packets[0]).unwrap().is_empty());
-        assert!(r.push(&packets[1]).unwrap().is_empty());
+        assert!(r.push(packets[0].clone()).unwrap().is_empty());
+        assert!(r.push(packets[1].clone()).unwrap().is_empty());
         assert_eq!(
-            r.push(&packets[2]).unwrap(),
+            r.push(packets[2].clone()).unwrap(),
             vec![frame_event(0, true, &data)]
         );
         assert!(!r.awaiting_keyframe());
@@ -626,10 +641,10 @@ mod tests {
         let packets = Packetizer::new()
             .packetize(&data, true, 7, HEADER_LEN + 100)
             .unwrap();
-        assert!(r.push(&packets[2]).unwrap().is_empty());
-        assert!(r.push(&packets[0]).unwrap().is_empty());
+        assert!(r.push(packets[2].clone()).unwrap().is_empty());
+        assert!(r.push(packets[0].clone()).unwrap().is_empty());
         assert_eq!(
-            r.push(&packets[1]).unwrap(),
+            r.push(packets[1].clone()).unwrap(),
             vec![frame_event(0, true, &data)]
         );
     }
@@ -639,12 +654,15 @@ mod tests {
         let mut r = Reassembler::new(8);
         let a = datagram(header(0, 0, 2, true), &[1]);
         let a_dup = datagram(header(0, 0, 2, true), &[9]);
-        assert!(r.push(&a).unwrap().is_empty());
-        assert!(r.push(&a_dup).unwrap().is_empty());
+        assert!(r.push(a.clone()).unwrap().is_empty());
+        assert!(r.push(a_dup.clone()).unwrap().is_empty());
         let b = datagram(header(0, 1, 2, true), &[2]);
-        assert_eq!(r.push(&b).unwrap(), vec![frame_event(0, true, &[1, 2])]);
+        assert_eq!(
+            r.push(b.clone()).unwrap(),
+            vec![frame_event(0, true, &[1, 2])]
+        );
         // Duplicate of an already emitted frame.
-        assert!(r.push(&b).unwrap().is_empty());
+        assert!(r.push(b.clone()).unwrap().is_empty());
     }
 
     #[test]
@@ -652,16 +670,16 @@ mod tests {
         let mut r = Reassembler::new(8);
         assert!(r.awaiting_keyframe());
         assert_eq!(
-            r.push(&single(5, false)).unwrap(),
+            r.push(single(5, false)).unwrap(),
             vec![ReassemblyEvent::Skipped { frame_id: 5 }]
         );
         assert!(r.awaiting_keyframe());
         assert_eq!(
-            r.push(&single(6, true)).unwrap(),
+            r.push(single(6, true)).unwrap(),
             vec![frame_event(6, true, &[6])]
         );
         assert_eq!(
-            r.push(&single(7, false)).unwrap(),
+            r.push(single(7, false)).unwrap(),
             vec![frame_event(7, false, &[7])]
         );
         assert!(!r.awaiting_keyframe());
@@ -671,23 +689,23 @@ mod tests {
     fn older_incomplete_frame_is_lost_when_newer_completes() {
         let mut r = primed(8);
         assert!(
-            r.push(&datagram(header(1, 0, 2, false), &[1]))
+            r.push(datagram(header(1, 0, 2, false), &[1]))
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            r.push(&single(2, false)).unwrap(),
+            r.push(single(2, false)).unwrap(),
             vec![lost(1), ReassemblyEvent::Skipped { frame_id: 2 }]
         );
         assert!(r.awaiting_keyframe());
         // Late packet of the lost frame is ignored.
         assert!(
-            r.push(&datagram(header(1, 1, 2, false), &[1]))
+            r.push(datagram(header(1, 1, 2, false), &[1]))
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            r.push(&single(3, true)).unwrap(),
+            r.push(single(3, true)).unwrap(),
             vec![frame_event(3, true, &[3])]
         );
         assert!(!r.awaiting_keyframe());
@@ -697,7 +715,7 @@ mod tests {
     fn entirely_missing_frames_are_lost() {
         let mut r = primed(8);
         assert_eq!(
-            r.push(&single(3, false)).unwrap(),
+            r.push(single(3, false)).unwrap(),
             vec![lost(1), lost(2), ReassemblyEvent::Skipped { frame_id: 3 }]
         );
     }
@@ -705,7 +723,7 @@ mod tests {
     #[test]
     fn huge_gap_reports_bounded_losses() {
         let mut r = primed(8);
-        let events = r.push(&single(u32::MAX, false)).unwrap();
+        let events = r.push(single(u32::MAX, false)).unwrap();
         assert_eq!(events.len(), MAX_REPORTED_GAP as usize + 1);
         assert_eq!(events[0], lost(1));
         assert_eq!(
@@ -718,12 +736,12 @@ mod tests {
     fn first_frames_without_history_report_only_pending_losses() {
         let mut r = Reassembler::new(8);
         assert!(
-            r.push(&datagram(header(10, 0, 2, true), &[1]))
+            r.push(datagram(header(10, 0, 2, true), &[1]))
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            r.push(&single(12, false)).unwrap(),
+            r.push(single(12, false)).unwrap(),
             vec![lost(10), ReassemblyEvent::Skipped { frame_id: 12 }]
         );
     }
@@ -732,30 +750,30 @@ mod tests {
     fn max_pending_evicts_oldest() {
         let mut r = primed(2);
         assert!(
-            r.push(&datagram(header(1, 0, 2, false), &[1]))
+            r.push(datagram(header(1, 0, 2, false), &[1]))
                 .unwrap()
                 .is_empty()
         );
         assert!(
-            r.push(&datagram(header(2, 0, 2, false), &[2]))
+            r.push(datagram(header(2, 0, 2, false), &[2]))
                 .unwrap()
                 .is_empty()
         );
         assert!(!r.awaiting_keyframe());
         assert_eq!(
-            r.push(&datagram(header(3, 0, 2, false), &[3])).unwrap(),
+            r.push(datagram(header(3, 0, 2, false), &[3])).unwrap(),
             vec![lost(1)]
         );
         assert!(r.awaiting_keyframe());
         // Evicted frame's remaining packet is ignored.
         assert!(
-            r.push(&datagram(header(1, 1, 2, false), &[1]))
+            r.push(datagram(header(1, 1, 2, false), &[1]))
                 .unwrap()
                 .is_empty()
         );
         // Frame 2 can still complete (but must be skipped).
         assert_eq!(
-            r.push(&datagram(header(2, 1, 2, false), &[2])).unwrap(),
+            r.push(datagram(header(2, 1, 2, false), &[2])).unwrap(),
             vec![ReassemblyEvent::Skipped { frame_id: 2 }]
         );
     }
@@ -764,12 +782,12 @@ mod tests {
     fn max_pending_zero_behaves_as_one() {
         let mut r = primed(0);
         assert!(
-            r.push(&datagram(header(1, 0, 2, false), &[1]))
+            r.push(datagram(header(1, 0, 2, false), &[1]))
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            r.push(&datagram(header(2, 0, 2, false), &[2])).unwrap(),
+            r.push(datagram(header(2, 0, 2, false), &[2])).unwrap(),
             vec![lost(1)]
         );
     }
@@ -779,23 +797,23 @@ mod tests {
         let mut r = primed(8);
         // index >= count
         assert!(
-            r.push(&datagram(header(1, 2, 2, false), &[1]))
+            r.push(datagram(header(1, 2, 2, false), &[1]))
                 .unwrap()
                 .is_empty()
         );
         assert!(
-            r.push(&datagram(header(1, 0, 2, false), &[1]))
+            r.push(datagram(header(1, 0, 2, false), &[1]))
                 .unwrap()
                 .is_empty()
         );
         // count mismatch with the first packet of the frame
         assert!(
-            r.push(&datagram(header(1, 1, 3, false), &[1]))
+            r.push(datagram(header(1, 1, 3, false), &[1]))
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            r.push(&datagram(header(1, 1, 2, false), &[2])).unwrap(),
+            r.push(datagram(header(1, 1, 2, false), &[2])).unwrap(),
             vec![frame_event(1, false, &[1, 2])]
         );
     }
@@ -804,20 +822,20 @@ mod tests {
     fn malformed_datagram_errors_and_keeps_state() {
         let mut r = primed(8);
         assert!(
-            r.push(&datagram(header(1, 0, 2, false), &[1]))
+            r.push(datagram(header(1, 0, 2, false), &[1]))
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            r.push(&[VIDEO_VERSION, 0]),
+            r.push(&[VIDEO_VERSION, 0][..]),
             Err(ProtocolError::Truncated(2))
         );
         let mut bad = datagram(header(1, 1, 2, false), &[2]);
         bad[0] = 0;
-        assert_eq!(r.push(&bad), Err(ProtocolError::BadVersion(0)));
+        assert_eq!(r.push(bad.clone()), Err(ProtocolError::BadVersion(0)));
         assert!(!r.awaiting_keyframe());
         assert_eq!(
-            r.push(&datagram(header(1, 1, 2, false), &[2])).unwrap(),
+            r.push(datagram(header(1, 1, 2, false), &[2])).unwrap(),
             vec![frame_event(1, false, &[1, 2])]
         );
     }
@@ -832,19 +850,65 @@ mod tests {
                 .packetize(&data, i == 0, i64::from(i), HEADER_LEN + 50)
                 .unwrap();
             packets.reverse();
-            let events: Vec<_> = packets.iter().flat_map(|d| r.push(d).unwrap()).collect();
+            let events: Vec<_> = packets
+                .iter()
+                .flat_map(|d| r.push(d.clone()).unwrap())
+                .collect();
             assert_eq!(
                 events,
                 vec![ReassemblyEvent::Frame(ReassembledFrame {
                     frame_id: i,
                     timestamp: i64::from(i),
                     keyframe: i == 0,
-                    data
+                    data: data.into()
                 })]
             );
         }
     }
 
+    #[test]
+    fn packetizer_slices_one_allocation_per_frame() {
+        let data: Vec<u8> = (0..250).map(|b| b as u8).collect();
+        let out = Packetizer::new()
+            .packetize(&data, true, 0, HEADER_LEN + 100)
+            .unwrap();
+        assert_eq!(out.len(), 3);
+        for pair in out.windows(2) {
+            let end_of_first = pair[0].as_ptr().wrapping_add(pair[0].len());
+            assert_eq!(end_of_first, pair[1].as_ptr(), "datagrams are contiguous");
+        }
+    }
+
+    #[test]
+    fn single_packet_frame_reuses_the_datagram_memory() {
+        let datagram = Bytes::from(datagram(header(0, 0, 1, true), b"picture"));
+        let payload_address = datagram[HEADER_LEN..].as_ptr();
+        let events = Reassembler::new(4).push(datagram).unwrap();
+        let [ReassemblyEvent::Frame(frame)] = &events[..] else {
+            panic!("expected one frame, got {events:?}");
+        };
+        assert_eq!(&frame.data[..], b"picture");
+        assert_eq!(frame.data.as_ptr(), payload_address, "no copy");
+    }
+
+    #[test]
+    fn multi_packet_frame_is_joined_into_an_exact_buffer() {
+        let data: Vec<u8> = (0..1000u32).map(|b| (b * 7) as u8).collect();
+        let mut packets = Packetizer::new()
+            .packetize(&data, true, 3, HEADER_LEN + 64)
+            .unwrap();
+        packets.reverse();
+        let mut r = Reassembler::new(4);
+        let events: Vec<_> = packets
+            .into_iter()
+            .flat_map(|d| r.push(d).unwrap())
+            .collect();
+        let [ReassemblyEvent::Frame(frame)] = &events[..] else {
+            panic!("expected one frame, got {events:?}");
+        };
+        assert_eq!(frame.data, data);
+        assert_eq!(frame.data.len(), 1000);
+    }
     // ---- keyframe requester ----
 
     #[test]

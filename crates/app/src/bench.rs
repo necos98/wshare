@@ -13,6 +13,7 @@ use codec::{
 use pipeline::FramePacer;
 
 use crate::cli::BenchOptions;
+use crate::realtime::{MmcssRegistration, TimerResolution};
 
 /// Accumulates what the encoder produced.
 #[derive(Default)]
@@ -99,6 +100,9 @@ pub fn run(options: BenchOptions) -> Result<()> {
         Ok(())
     };
 
+    // The same scheduling the host's streaming thread runs with.
+    let _timer = TimerResolution::raise();
+    let _mmcss = MmcssRegistration::register();
     let mut pacer = FramePacer::new(stream.fps);
     let start = Instant::now();
     let end = start + Duration::from_secs(options.seconds);

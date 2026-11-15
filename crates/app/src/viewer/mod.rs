@@ -21,6 +21,7 @@ mod key_log;
 mod key_router;
 mod keyboard_hook;
 mod notice;
+mod outbox;
 mod pairing;
 mod remote;
 mod render_thread;
@@ -290,16 +291,17 @@ async fn run_control(
     mut outgoing: UnboundedReceiver<ControlMessage>,
     window: EventLoopProxy<UserEvent>,
 ) {
-    let reason = loop {
+    let reason = 'control: loop {
         tokio::select! {
             message = outgoing.recv() => {
-                let Some(message) = message else { return };
-                let is_bye = message == ControlMessage::Bye;
-                if let Err(e) = tx.send(&message).await {
-                    break ViewerFailure::ConnectionLost(format!("{e:#}"));
-                }
-                if is_bye {
-                    return;
+                let Some(first) = message else { return };
+                for message in outbox::next_batch(first, &mut outgoing) {
+                    if let Err(e) = tx.send(&message).await {
+                        break 'control ViewerFailure::ConnectionLost(format!("{e:#}"));
+                    }
+                    if message == ControlMessage::Bye {
+                        return;
+                    }
                 }
             }
             incoming = rx.recv() => match incoming {

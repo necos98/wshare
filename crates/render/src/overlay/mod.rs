@@ -2,6 +2,7 @@
 //! back buffer, after the video blit, through the shared [`Canvas`].
 
 mod geometry;
+mod layout_cache;
 
 pub(crate) use geometry::Anchor;
 
@@ -13,12 +14,13 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
-    DWRITE_TEXT_METRICS, DWRITE_WORD_WRAPPING_NO_WRAP, IDWriteTextFormat,
+    DWRITE_TEXT_METRICS, DWRITE_WORD_WRAPPING_NO_WRAP, IDWriteTextFormat, IDWriteTextLayout,
 };
 use windows::core::w;
 
 use crate::canvas::Canvas;
 use geometry::{STYLE, Style};
+use layout_cache::{LayoutCache, LayoutKey};
 
 const BACKGROUND: D2D1_COLOR_F = D2D1_COLOR_F {
     r: 0.0,
@@ -36,7 +38,8 @@ const FOREGROUND: D2D1_COLOR_F = D2D1_COLOR_F {
 /// Lines of monospace text in a dark rounded box at its [`Anchor`] of the window.
 ///
 /// Brushes are created once; the text format only when the window's DPI
-/// changes. While hidden it does nothing.
+/// changes, and the text layout only when the text, the window size or the
+/// DPI change. While hidden it does nothing.
 pub(crate) struct Overlay {
     anchor: Anchor,
     lines: Option<Vec<String>>,
@@ -44,6 +47,14 @@ pub(crate) struct Overlay {
     foreground: ID2D1SolidColorBrush,
     /// Text format with the DPI it was made for.
     format: Option<(u32, IDWriteTextFormat)>,
+    layout: LayoutCache<PlacedLayout>,
+}
+
+/// A laid-out text and its extent in device-independent pixels.
+#[derive(Clone)]
+struct PlacedLayout {
+    layout: IDWriteTextLayout,
+    extent: (f32, f32),
 }
 
 impl Overlay {
@@ -56,6 +67,7 @@ impl Overlay {
                 background: ctx.CreateSolidColorBrush(&BACKGROUND, None)?,
                 foreground: ctx.CreateSolidColorBrush(&FOREGROUND, None)?,
                 format: None,
+                layout: LayoutCache::new(),
             })
         }
     }
@@ -63,7 +75,10 @@ impl Overlay {
     /// `None` hides the overlay; otherwise `lines` are drawn by every
     /// [`Overlay::draw`] until changed.
     pub(crate) fn set_lines(&mut self, lines: Option<Vec<String>>) {
-        self.lines = lines;
+        if self.lines != lines {
+            self.layout.invalidate();
+            self.lines = lines;
+        }
     }
 
     /// Draws the overlay onto `back_buffer` (`size` pixels), on top of
@@ -75,23 +90,18 @@ impl Overlay {
         back_buffer: &ID3D11Texture2D,
         size: (u32, u32),
     ) -> Result<()> {
-        let Some(lines) = &self.lines else {
+        if self.lines.is_none() {
             return Ok(());
-        };
-        let text: Vec<u16> = lines.join("\n").encode_utf16().collect();
+        }
         let dpi = canvas.dpi();
         let style = STYLE.for_dpi(dpi);
         let format = self.format(canvas, dpi, &style)?;
-        let (max_width, max_height) = style.text_space(size);
-        let layout = unsafe {
-            canvas
-                .dwrite()
-                .CreateTextLayout(&text, &format, max_width, max_height)
-                .context("CreateTextLayout")?
-        };
-        let mut metrics = DWRITE_TEXT_METRICS::default();
-        unsafe { layout.GetMetrics(&mut metrics)? };
-        let placed = style.place((metrics.width, metrics.height), size, self.anchor);
+        let lines = self.lines.as_deref().unwrap_or_default();
+        let PlacedLayout { layout, extent } =
+            self.layout.get_or_try_insert(LayoutKey { dpi, size }, || {
+                Self::lay_out(canvas, lines, &format, style.text_space(size))
+            })?;
+        let placed = style.place(extent, size, self.anchor);
 
         let rounded = D2D1_ROUNDED_RECT {
             rect: D2D_RECT_F {
@@ -115,6 +125,27 @@ impl Overlay {
                 &self.foreground,
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
             );
+        })
+    }
+
+    fn lay_out(
+        canvas: &Canvas,
+        lines: &[String],
+        format: &IDWriteTextFormat,
+        (max_width, max_height): (f32, f32),
+    ) -> Result<PlacedLayout> {
+        let text: Vec<u16> = lines.join("\n").encode_utf16().collect();
+        let layout = unsafe {
+            canvas
+                .dwrite()
+                .CreateTextLayout(&text, format, max_width, max_height)
+                .context("CreateTextLayout")?
+        };
+        let mut metrics = DWRITE_TEXT_METRICS::default();
+        unsafe { layout.GetMetrics(&mut metrics)? };
+        Ok(PlacedLayout {
+            layout,
+            extent: (metrics.width, metrics.height),
         })
     }
 

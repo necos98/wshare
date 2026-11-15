@@ -7,6 +7,11 @@
 //!   faster, intermediate images are skipped and the latest one is sent at
 //!   the next slot (the latest image is never lost, only delayed to its slot).
 //! - The very first frame may be sent immediately.
+//! - Slots sit on a fixed grid (`slot += interval`), not at "last submit +
+//!   interval": vsync jitter that delivers a frame a little early or late
+//!   must not shift every following slot. A slot is honoured up to
+//!   [`SLOT_TOLERANCE`] early, and the grid restarts from "now" when a frame
+//!   is more than one interval late (or after an idle period).
 //! - A due slot can be given up (e.g. the network is congested): the image
 //!   stays pending and is retried one interval later, never in a busy loop.
 //!
@@ -14,20 +19,34 @@
 
 use std::time::{Duration, Instant};
 
+/// How much earlier than its slot a frame may be submitted. Covers the vsync
+/// jitter and the coarse wake-up granularity of the capture wait, either of
+/// which would otherwise cost a whole interval of latency.
+pub const SLOT_TOLERANCE: Duration = Duration::from_millis(2);
+
+/// The tolerance never exceeds this fraction of the interval, so very high
+/// rates still cannot run ahead of their grid.
+const MAX_TOLERANCE_DIVISOR: u32 = 4;
+
 pub struct FramePacer {
     interval: Duration,
+    /// [`SLOT_TOLERANCE`], capped so it stays a fraction of the interval.
+    tolerance: Duration,
     dirty: bool,
-    last_slot: Option<Instant>,
+    /// Grid position of the next frame (`None`: right away).
+    next_slot: Option<Instant>,
 }
 
 impl FramePacer {
     /// Panics if `fps` is 0.
     pub fn new(fps: u32) -> Self {
         assert!(fps > 0, "fps must be positive");
+        let interval = Duration::from_secs(1) / fps;
         Self {
-            interval: Duration::from_secs(1) / fps,
+            interval,
+            tolerance: SLOT_TOLERANCE.min(interval / MAX_TOLERANCE_DIVISOR),
             dirty: false,
-            last_slot: None,
+            next_slot: None,
         }
     }
 
@@ -47,24 +66,30 @@ impl FramePacer {
 
     /// How long the capture may block waiting for a change before the
     /// caller must come back and check [`Self::should_submit`]. When dirty,
-    /// this is the time left until the next slot (zero if already due);
-    /// otherwise one interval.
+    /// this is the time left until the next slot is within tolerance (zero
+    /// if it already is); otherwise one interval. Non-zero whenever
+    /// `should_submit` is false.
     pub fn capture_timeout(&self, now: Instant) -> Duration {
         if !self.dirty {
             return self.interval;
         }
-        self.next_slot()
-            .map_or(Duration::ZERO, |slot| slot.saturating_duration_since(now))
+        self.next_slot.map_or(Duration::ZERO, |slot| {
+            slot.saturating_duration_since(now + self.tolerance)
+        })
     }
 
-    /// True when dirty and the next slot has been reached.
+    /// True when dirty and the next slot is reached, give or take
+    /// [`SLOT_TOLERANCE`].
     pub fn should_submit(&self, now: Instant) -> bool {
-        self.dirty && self.next_slot().is_none_or(|slot| now >= slot)
+        self.dirty
+            && self
+                .next_slot
+                .is_none_or(|slot| now + self.tolerance >= slot)
     }
 
     /// Records that a frame was submitted at `now`; clears the dirty flag.
     pub fn on_submitted(&mut self, now: Instant) {
-        self.last_slot = Some(now);
+        self.advance_grid(now);
         self.dirty = false;
     }
 
@@ -72,12 +97,18 @@ impl FramePacer {
     /// the next attempt waits one interval, and the dirty flag stays so the
     /// latest image is still sent once a slot is used.
     pub fn on_skipped(&mut self, now: Instant) {
-        self.last_slot = Some(now);
+        self.advance_grid(now);
     }
 
-    /// Earliest time the next frame may be submitted (`None`: right away).
-    fn next_slot(&self) -> Option<Instant> {
-        self.last_slot.map(|last| last + self.interval)
+    /// Moves to the next grid slot; when `now` is already past it the grid
+    /// restarts from `now`.
+    fn advance_grid(&mut self, now: Instant) {
+        let next = self.next_slot.unwrap_or(now) + self.interval;
+        self.next_slot = Some(if now > next {
+            now + self.interval
+        } else {
+            next
+        });
     }
 }
 
@@ -111,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn rate_is_capped() {
+    fn rate_is_capped_within_tolerance() {
         let t0 = Instant::now();
         let mut p = FramePacer::new(50);
         p.mark_dirty();
@@ -119,10 +150,28 @@ mod tests {
         assert!(!p.is_dirty());
         p.mark_dirty();
         assert!(!p.should_submit(t0 + 5 * MS));
-        assert_eq!(p.capture_timeout(t0 + 5 * MS), 15 * MS);
-        assert!(!p.should_submit(t0 + 19 * MS));
-        assert!(p.should_submit(t0 + 20 * MS));
+        assert_eq!(p.capture_timeout(t0 + 5 * MS), 13 * MS);
+        assert!(!p.should_submit(t0 + 17 * MS));
+        assert!(p.should_submit(t0 + 18 * MS));
+        assert_eq!(p.capture_timeout(t0 + 18 * MS), Duration::ZERO);
         assert_eq!(p.capture_timeout(t0 + 25 * MS), Duration::ZERO);
+    }
+
+    #[test]
+    fn timeout_is_never_zero_while_not_due() {
+        let t0 = Instant::now();
+        let mut p = FramePacer::new(60);
+        p.mark_dirty();
+        p.on_submitted(t0);
+        p.mark_dirty();
+        for micros in (0..20_000).step_by(250) {
+            let now = t0 + Duration::from_micros(micros);
+            assert_eq!(
+                p.should_submit(now),
+                p.capture_timeout(now).is_zero(),
+                "at {micros} us"
+            );
+        }
     }
 
     #[test]
@@ -138,7 +187,52 @@ mod tests {
         }
         assert!(p.should_submit(t0 + 20 * MS));
         p.on_submitted(t0 + 20 * MS);
-        assert!(!p.should_submit(t0 + 40 * MS));
+        assert!(!p.should_submit(t0 + 40 * MS - 3 * MS));
+    }
+
+    #[test]
+    fn early_frames_do_not_drift_the_grid() {
+        let t0 = Instant::now();
+        let mut p = FramePacer::new(50);
+        p.mark_dirty();
+        p.on_submitted(t0);
+        // Frames land 1 ms early every time: the slots stay at 20, 40, 60 ms
+        // instead of sliding earlier by 1 ms per frame.
+        for slot in 1..=5u32 {
+            p.mark_dirty();
+            let early = t0 + slot * 20 * MS - MS;
+            assert!(p.should_submit(early), "slot {slot}");
+            p.on_submitted(early);
+        }
+        p.mark_dirty();
+        assert!(!p.should_submit(t0 + 6 * 20 * MS - 3 * MS));
+        assert!(p.should_submit(t0 + 6 * 20 * MS - 2 * MS));
+    }
+
+    #[test]
+    fn late_frame_within_an_interval_keeps_the_grid() {
+        let t0 = Instant::now();
+        let mut p = FramePacer::new(50);
+        p.mark_dirty();
+        p.on_submitted(t0);
+        p.mark_dirty();
+        p.on_submitted(t0 + 30 * MS); // 10 ms late for the 20 ms slot
+        p.mark_dirty();
+        // Next slot is still 40 ms, so it is due again at once.
+        assert!(p.should_submit(t0 + 38 * MS));
+    }
+
+    #[test]
+    fn frame_later_than_an_interval_realigns_the_grid() {
+        let t0 = Instant::now();
+        let mut p = FramePacer::new(50);
+        p.mark_dirty();
+        p.on_submitted(t0);
+        p.mark_dirty();
+        p.on_submitted(t0 + 65 * MS); // more than one interval late
+        p.mark_dirty();
+        assert!(!p.should_submit(t0 + 65 * MS + 17 * MS));
+        assert!(p.should_submit(t0 + 65 * MS + 18 * MS));
     }
 
     #[test]
@@ -148,9 +242,9 @@ mod tests {
         p.mark_dirty();
         p.on_skipped(t0);
         assert!(p.is_dirty());
-        assert!(!p.should_submit(t0 + 19 * MS));
-        assert_eq!(p.capture_timeout(t0 + 5 * MS), 15 * MS);
-        assert!(p.should_submit(t0 + 20 * MS));
+        assert!(!p.should_submit(t0 + 17 * MS));
+        assert_eq!(p.capture_timeout(t0 + 5 * MS), 13 * MS);
+        assert!(p.should_submit(t0 + 18 * MS));
     }
 
     #[test]
@@ -166,12 +260,17 @@ mod tests {
     }
 
     #[test]
-    fn change_after_idle_is_immediate() {
+    fn change_after_idle_is_immediate_and_restarts_the_grid() {
         let t0 = Instant::now();
         let mut p = FramePacer::new(50);
         p.mark_dirty();
         p.on_submitted(t0);
+        let later = t0 + Duration::from_secs(1);
         p.mark_dirty();
-        assert!(p.should_submit(t0 + Duration::from_secs(1)));
+        assert!(p.should_submit(later));
+        p.on_submitted(later);
+        p.mark_dirty();
+        assert!(!p.should_submit(later + 10 * MS));
+        assert!(p.should_submit(later + 18 * MS));
     }
 }

@@ -8,3 +8,4 @@ edition.workspace = true
 [dependencies]
 anyhow.workspace = true
 protocol.workspace = true
+bytes = "1.12.1"

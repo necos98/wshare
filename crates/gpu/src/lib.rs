@@ -6,7 +6,7 @@ mod frame;
 pub use frame::{GpuFrame, array_slice};
 
 use anyhow::{Context, Result};
-use windows::Win32::Foundation::{HMODULE, LUID};
+use windows::Win32::Foundation::{HMODULE, HWND, LUID};
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
@@ -15,6 +15,7 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread,
 };
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1};
+use windows::Win32::Graphics::Gdi::{HMONITOR, MONITOR_DEFAULTTONEAREST, MonitorFromWindow};
 use windows::core::Interface;
 
 /// A D3D11 device (with video support) and the adapter it lives on.
@@ -68,6 +69,32 @@ impl Gpu {
         let adapter = unsafe { factory.EnumAdapters1(0)? };
         Self::on_adapter(&adapter)
     }
+
+    /// Creates a device on the adapter that drives the monitor showing
+    /// `window`, so decoded frames need no copy between GPUs on hybrid
+    /// laptops. Falls back to the default adapter when that adapter cannot
+    /// be found or opened.
+    pub fn for_window(window: HWND) -> Result<Self> {
+        adapter_showing(window)
+            .and_then(|adapter| Self::on_adapter(&adapter).ok())
+            .map_or_else(Self::default_adapter, Ok)
+    }
+}
+
+/// The adapter owning the output (monitor) `window` is mostly on.
+fn adapter_showing(window: HWND) -> Option<IDXGIAdapter1> {
+    // SAFETY: plain query; an invalid handle yields the nearest monitor.
+    let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) };
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
+    (0..)
+        .map_while(|index| unsafe { factory.EnumAdapters1(index) }.ok())
+        .find(|adapter| drives_monitor(adapter, monitor))
+}
+
+fn drives_monitor(adapter: &IDXGIAdapter1, monitor: HMONITOR) -> bool {
+    (0..)
+        .map_while(|index| unsafe { adapter.EnumOutputs(index) }.ok())
+        .any(|output| unsafe { output.GetDesc() }.is_ok_and(|desc| desc.Monitor == monitor))
 }
 
 /// Converts a NUL-terminated UTF-16 buffer from a Win32 struct.
@@ -90,5 +117,13 @@ mod tests {
     fn wide_to_string_without_nul_uses_whole_buffer() {
         let wide: Vec<u16> = "NVIDIA".encode_utf16().collect();
         assert_eq!(wide_to_string(&wide), "NVIDIA");
+    }
+
+    #[test]
+    #[ignore = "requires GPU"]
+    fn device_for_a_window_falls_back_to_a_working_adapter() {
+        // No window at all: the nearest monitor's adapter, or the default.
+        let gpu = Gpu::for_window(HWND::default()).unwrap();
+        assert!(!gpu.adapter_name.is_empty());
     }
 }

@@ -32,6 +32,7 @@ eframe = { version = "0.37.0", default-features = false, features = ["glow", "de
 tray-icon = { version = "0.26.1", default-features = false }
 windows = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_Media",
     "Win32_System_Console",
     "Win32_System_LibraryLoader",
     "Win32_System_SystemInformation",

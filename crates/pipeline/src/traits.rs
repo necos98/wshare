@@ -5,11 +5,12 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use anyhow::Result;
+use bytes::Bytes;
 
 /// One encoded access unit in Annex-B format (start codes included).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodedFrame {
-    pub data: Vec<u8>,
+    pub data: Bytes,
     /// Presentation timestamp in 100 ns units (Media Foundation convention).
     pub timestamp: i64,
     pub keyframe: bool,
@@ -53,8 +54,9 @@ pub trait DatagramSink {
     /// Largest datagram the transport can currently carry, in bytes.
     fn max_datagram_size(&self) -> usize;
 
-    /// Sends one datagram. May silently drop it under congestion.
-    fn send(&self, datagram: Vec<u8>) -> Result<()>;
+    /// Sends one datagram. May silently drop it under congestion. Taking
+    /// `Bytes` lets a frame's datagrams share one allocation.
+    fn send(&self, datagram: Bytes) -> Result<()>;
 
     /// Bytes handed to [`Self::send`] that are still waiting to leave. It
     /// grows while the network is slower than the stream, so the sender can

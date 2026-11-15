@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+bytes = "1.12.1"
 capture.workspace = true
 gpu.workspace = true
 pipeline.workspace = true

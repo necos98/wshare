@@ -50,6 +50,8 @@ pub struct Sharing {
     pub error: Option<String>,
     /// Viewers that connect without a PIN (known while sharing).
     pub authorized: Vec<AuthorizedDevice>,
+    /// The screen being shared, as a line for people (known while sharing).
+    pub screen: Option<String>,
 }
 
 impl Default for Sharing {
@@ -65,6 +67,7 @@ impl Default for Sharing {
             notice: None,
             error: None,
             authorized: Vec::new(),
+            screen: None,
         }
     }
 }
@@ -108,10 +111,16 @@ impl Sharing {
     pub fn apply(&mut self, event: HostEvent) -> Option<String> {
         match event {
             HostEvent::Listening {
-                pin, fingerprint, ..
+                pin,
+                fingerprint,
+                monitor,
+                width,
+                height,
+                ..
             } => {
                 self.listening = true;
                 self.pin = Some(pin);
+                self.screen = Some(text::shared_screen(&monitor, width, height));
                 return Some(Fingerprint::host_id_of_hex(&fingerprint));
             }
             HostEvent::PinChanged { pin } => self.pin = Some(pin),
@@ -135,6 +144,11 @@ impl Sharing {
                 self.input_blocked = false;
                 self.notice = error.map(|e| text::session_ended(&e));
             }
+            HostEvent::ScreenChanged {
+                monitor,
+                width,
+                height,
+            } => self.screen = Some(text::shared_screen(&monitor, width, height)),
             HostEvent::InputBlocked => self.input_blocked = true,
             HostEvent::Warning(warning) => self.notice = Some(text::host_warning(&warning)),
             HostEvent::Stopped { error } => {
@@ -466,6 +480,37 @@ pub(crate) mod tests {
             pin: "222222".into(),
         });
         assert_eq!(s.pin.as_deref(), Some("222222"));
+    }
+
+    #[test]
+    fn the_screen_shared_is_known_from_listening_and_follows_changes() {
+        let mut s = Sharing::default();
+        s.started();
+        assert_eq!(s.screen, None);
+        s.apply(HostEvent::Listening {
+            computer_name: "QUESTO-PC".into(),
+            port: 7420,
+            pin: "111111".into(),
+            fingerprint: "ff".into(),
+            monitor: r"\\.\DISPLAY1".into(),
+            width: 1920,
+            height: 1080,
+        });
+        assert_eq!(
+            s.screen.as_deref(),
+            Some("Schermo condiviso: DISPLAY1 (1920×1080)")
+        );
+        s.apply(HostEvent::ScreenChanged {
+            monitor: "DISPLAY2".into(),
+            width: 2560,
+            height: 1440,
+        });
+        assert_eq!(
+            s.screen.as_deref(),
+            Some("Schermo condiviso: DISPLAY2 (2560×1440)")
+        );
+        s.stopped(None);
+        assert_eq!(s.screen, None, "known only while sharing");
     }
 
     #[test]

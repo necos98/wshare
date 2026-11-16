@@ -104,6 +104,9 @@ pub enum HostWarning {
     ClipboardTooLarge,
     /// Reading or writing the clipboard failed.
     ClipboardFailed(String),
+    /// The monitor or quality the viewer chose could not be streamed: the
+    /// stream went on as it was.
+    ScreenUnavailable(String),
 }
 
 impl fmt::Display for HostWarning {
@@ -145,6 +148,9 @@ impl fmt::Display for HostWarning {
                 protocol::control::MAX_CLIPBOARD_BYTES / 1024
             ),
             Self::ClipboardFailed(detail) => write!(f, "clipboard sharing failed: {detail}"),
+            Self::ScreenUnavailable(detail) => {
+                write!(f, "the screen the viewer chose cannot be shared: {detail}")
+            }
         }
     }
 }
@@ -261,6 +267,10 @@ mod tests {
         assert_eq!(
             HostWarning::ClipboardFailed("busy".into()).to_string(),
             "clipboard sharing failed: busy"
+        );
+        assert_eq!(
+            HostWarning::ScreenUnavailable("in use".into()).to_string(),
+            "the screen the viewer chose cannot be shared: in use"
         );
     }
 }

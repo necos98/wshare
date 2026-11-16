@@ -43,8 +43,23 @@ const PADDING: f32 = 8.0;
 const BUTTON_W: f32 = 110.0;
 const GAP: f32 = 6.0;
 
+/// A usable DPI scale: `dpi_scale`, or 1.0 when it is not a positive
+/// number; at most 16.
+pub(crate) fn sane_scale(dpi_scale: f32) -> f32 {
+    if dpi_scale.is_finite() && dpi_scale > 0.0 {
+        dpi_scale.min(16.0)
+    } else {
+        1.0
+    }
+}
+
+/// A window size kept far from i32 overflow in every sum made with it.
+pub(crate) fn sane_window(window: (u32, u32)) -> (i32, i32) {
+    (window.0.min(1 << 20) as i32, window.1.min(1 << 20) as i32)
+}
+
 /// A 96-DPI size scaled and snapped to whole pixels.
-fn px(size: f32, scale: f32) -> i32 {
+pub(crate) fn px(size: f32, scale: f32) -> i32 {
     (size * scale).round() as i32
 }
 
@@ -69,13 +84,8 @@ pub fn toolbar_geometry(
     button_count: usize,
     expanded: bool,
 ) -> ToolbarGeometry {
-    let scale = if dpi_scale.is_finite() && dpi_scale > 0.0 {
-        dpi_scale.min(16.0)
-    } else {
-        1.0
-    };
-    // Keep every intermediate sum far from i32 overflow.
-    let window = (window.0.min(1 << 20) as i32, window.1.min(1 << 20) as i32);
+    let scale = sane_scale(dpi_scale);
+    let window = sane_window(window);
     let handle = top_centered(window, px(HANDLE_W, scale), px(HANDLE_H, scale));
 
     let (bar, buttons) = if expanded && button_count > 0 {
@@ -156,12 +166,8 @@ pub(crate) fn tooltip_rect(
     dpi_scale: f32,
 ) -> Option<Rect> {
     let anchor = geometry.buttons.get(button)?;
-    let scale = if dpi_scale.is_finite() && dpi_scale > 0.0 {
-        dpi_scale.min(16.0)
-    } else {
-        1.0
-    };
-    let window = (window.0.min(1 << 20) as i32, window.1.min(1 << 20) as i32);
+    let scale = sane_scale(dpi_scale);
+    let window = sane_window(window);
     let (pad, gap) = (px(TIP_PADDING, scale), px(TIP_GAP, scale));
     let measured = |size: f32| (size.clamp(0.0, 1.0e6).ceil() as i32).saturating_add(2 * pad);
     let (width, height) = (

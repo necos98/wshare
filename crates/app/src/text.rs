@@ -6,6 +6,7 @@
 //! that prints it.
 
 use protocol::control::RejectReason;
+use protocol::session::{MonitorEntry, Quality};
 
 use crate::host::{HostFailure, HostWarning, SessionFailure};
 use crate::viewer::report::FailureCause;
@@ -147,6 +148,10 @@ pub fn host_warning(warning: &HostWarning) -> String {
         HostWarning::ClipboardFailed(detail) => {
             format!("Condivisione degli appunti non riuscita: {detail}")
         }
+        HostWarning::ScreenUnavailable(detail) => format!(
+            "Impossibile condividere lo schermo scelto dal visualizzatore: resta quello di \
+             prima ({detail})."
+        ),
     }
 }
 
@@ -164,6 +169,14 @@ pub const SHARING_WAITING: &str = "In attesa di connessioni…";
 
 pub fn sharing_connected(name: &str, ip: impl std::fmt::Display) -> String {
     format!("Connesso: {name} ({ip})")
+}
+
+/// The monitor being shared; `device_name` as the capture names it.
+pub fn shared_screen(device_name: &str, width: u32, height: u32) -> String {
+    format!(
+        "Schermo condiviso: {} ({width}×{height})",
+        capture::display_name(device_name)
+    )
 }
 
 pub const HOST_INCOMPATIBLE: &str = "Versione di wshare diversa: non compatibile";
@@ -312,6 +325,34 @@ pub const BAR_TIP_FULLSCREEN: &str = "Schermo intero (Ctrl+Alt+Invio)";
 pub const BAR_TIP_WINDOWED: &str = "Torna alla finestra (Ctrl+Alt+Invio)";
 pub const BAR_TIP_STATS: &str = "Mostra o nascondi le statistiche (Ctrl+Alt+I)";
 pub const BAR_TIP_DISCONNECT: &str = "Chiudi la connessione";
+
+pub const BAR_SCREEN: &str = "Schermo";
+pub const BAR_QUALITY: &str = "Qualità";
+pub const BAR_TIP_SCREEN: &str = "Scegli quale monitor dell'altro computer guardare";
+pub const BAR_TIP_QUALITY: &str = "Scegli la qualità del video";
+
+/// A row of the control bar's "Qualità" menu.
+pub fn quality_label(quality: Quality) -> &'static str {
+    match quality {
+        Quality::Automatic => "Automatica",
+        Quality::High => "Alta",
+        Quality::Medium => "Media",
+        Quality::Low => "Bassa",
+    }
+}
+
+/// A row of the control bar's "Schermo" menu: the host's monitor at
+/// `position` (0-based) of its list.
+pub fn monitor_entry_label(position: usize, monitor: &MonitorEntry) -> String {
+    let main = if monitor.primary { ", principale" } else { "" };
+    format!(
+        "{}. {} ({}×{}{main})",
+        position + 1,
+        monitor.name,
+        monitor.width,
+        monitor.height
+    )
+}
 
 /// Shown over the picture for a few seconds when the session starts.
 pub const NOTICE_SHORTCUTS: [&str; 2] =
@@ -510,6 +551,20 @@ mod tests {
     }
 
     #[test]
+    fn the_session_menus_name_monitors_and_qualities() {
+        assert_eq!(
+            monitor_entry_label(0, &MonitorEntry::new("DISPLAY1", 1920, 1080, true)),
+            "1. DISPLAY1 (1920×1080, principale)"
+        );
+        assert_eq!(
+            monitor_entry_label(1, &MonitorEntry::new("DISPLAY2", 2560, 1440, false)),
+            "2. DISPLAY2 (2560×1440)"
+        );
+        let labels: Vec<&str> = Quality::ALL.into_iter().map(quality_label).collect();
+        assert_eq!(labels, ["Automatica", "Alta", "Media", "Bassa"]);
+    }
+
+    #[test]
     fn an_unexplained_exit_shows_its_code() {
         assert_eq!(
             viewer_exited_unexpectedly(Some(3)),
@@ -632,6 +687,11 @@ mod tests {
             (
                 HostWarning::ClipboardFailed("busy".into()),
                 "Condivisione degli appunti non riuscita: busy",
+            ),
+            (
+                HostWarning::ScreenUnavailable("in use".into()),
+                "Impossibile condividere lo schermo scelto dal visualizzatore: resta quello di \
+                 prima (in use).",
             ),
         ];
         for (warning, text) in cases {

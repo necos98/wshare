@@ -16,8 +16,10 @@
 //!   (see `feed`); it also reports to the host how the video arrives, for
 //!   the host's bitrate adaptation (see `rate`).
 
+mod bar_menu;
 mod clipboard;
 mod control;
+mod control_policy;
 mod cursor;
 pub mod failure;
 mod feed;
@@ -59,6 +61,7 @@ use crate::options::DEFAULT_PORT;
 use crate::target::{self, Resolved, parse_target};
 use clipboard::ViewerClipboard;
 use control::{ControlLink, ControlTask, Reconnection, VideoFeed};
+use control_policy::ControlPolicy;
 use failure::ViewerFailure;
 use feed::VideoIn;
 use live_handle::LiveHandle;
@@ -66,7 +69,7 @@ use pairing::Pairing;
 use rate::TargetRate;
 use report::{REPORT_ENV, ViewerReport};
 use stats::LinkProbe;
-use window::{ControlPolicy, UserEvent, ViewerWindow, WindowOptions};
+use window::{UserEvent, ViewerWindow, WindowOptions};
 
 /// Environment variable holding the PIN when `--pin` is absent (used by
 /// the desktop interface, so the PIN is not visible on the command line).

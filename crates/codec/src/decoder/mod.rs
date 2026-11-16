@@ -77,6 +77,14 @@ impl HwDecoder {
         &self.name
     }
 
+    /// The visible size the host announced for the stream from now on (it
+    /// changed mid-session). The pictures themselves follow the stream; the
+    /// size only settles how padded pictures are cropped when the stream
+    /// reports no display aperture.
+    pub fn expect_size(&mut self, width: u32, height: u32) {
+        self.requested = (width, height);
+    }
+
     /// Visible size of the pictures, once the stream has been parsed.
     pub fn display_size(&self) -> Option<(u32, u32)> {
         self.format.map(|f| f.display)

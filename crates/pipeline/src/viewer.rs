@@ -151,6 +151,12 @@ where
         self.decoder.reset()
     }
 
+    /// Access to the decoder for concerns outside the datagrams (e.g. the
+    /// host announced the size of the stream that follows).
+    pub fn decoder_mut(&mut self) -> &mut Dec {
+        &mut self.decoder
+    }
+
     /// Access to the sink for presentation concerns outside the stream
     /// (e.g. the window was resized and the last picture must be redrawn).
     pub fn sink_mut(&mut self) -> &mut Sink {

@@ -18,6 +18,13 @@
 //!   viewer -> host  Nack(nack)              (video datagrams to send again)
 //!   either          Clipboard(text)         (the text just copied, at most
 //!                                            MAX_CLIPBOARD_BYTES)
+//!   host -> viewer  MonitorList { .. }      (right after Welcome, and again
+//!                                            whenever it changed)
+//!   viewer -> host  SelectMonitor(index)    (also from view-only viewers)
+//!   viewer -> host  SetQuality(quality)     (also from view-only viewers)
+//!   host -> viewer  StreamChanged(stream)   (capture and encoder started
+//!                                            over: another monitor, quality
+//!                                            or resolution; same connection)
 //!   either          Bye
 //!
 //! Compatibility: peers of different protocol versions must still understand
@@ -37,6 +44,7 @@ use crate::ProtocolError;
 use crate::feedback::ReceptionReport;
 use crate::input::{CursorShape, InputEvent};
 use crate::recovery::Nack;
+use crate::session::{MonitorEntry, Quality};
 
 /// 2: remote control (Input, Cursor, CursorVisible; Welcome.input_allowed).
 /// 3: InputAllowed; StreamInfo.encoder.
@@ -49,7 +57,10 @@ use crate::recovery::Nack;
 /// 6: Nack (viewer): lost video datagrams are sent again instead of
 ///    waiting for a keyframe.
 /// 7: Clipboard (either side): copied text crosses to the other PC.
-pub const PROTOCOL_VERSION: u16 = 7;
+/// 8: MonitorList and StreamChanged (host), SelectMonitor and SetQuality
+///    (viewer): the viewer picks the monitor and the quality mid-session,
+///    and a resolution change on the host no longer ends it.
+pub const PROTOCOL_VERSION: u16 = 8;
 
 /// Upper bound for one control message; protects against garbage lengths.
 /// Sized for the largest cursor image (256x256 RGBA = 256 KiB) plus margin.
@@ -208,6 +219,18 @@ pub enum ControlMessage {
     /// The text just copied on the sender's PC, for the other PC's
     /// clipboard. At most [`MAX_CLIPBOARD_BYTES`] bytes.
     Clipboard(String),
+    /// The host's monitors (at most [`crate::session::MAX_MONITORS`]) and
+    /// the position in that list of the one being shared.
+    MonitorList {
+        monitors: Vec<MonitorEntry>,
+        current: u32,
+    },
+    /// Share the monitor at this position of the latest `MonitorList`.
+    SelectMonitor(u32),
+    SetQuality(Quality),
+    /// The host restarted capture and encoder: the video from now on is
+    /// this stream, beginning with a keyframe. Frame ids go on counting.
+    StreamChanged(StreamInfo),
 }
 
 /// Serializes `msg` as one length-prefixed frame.
@@ -313,6 +336,7 @@ fn decode_exact(payload: &[u8]) -> Result<ControlMessage, ProtocolError> {
 mod tests {
     use super::*;
     use crate::recovery::Missing;
+    use crate::session::{MAX_MONITOR_NAME, MAX_MONITORS};
 
     fn samples() -> Vec<ControlMessage> {
         vec![
@@ -369,6 +393,26 @@ mod tests {
             }),
             ControlMessage::Clipboard("copiato \u{e8} \u{1F5A5}\r\nseconda riga".into()),
             ControlMessage::Clipboard(String::new()),
+            ControlMessage::MonitorList {
+                monitors: vec![
+                    MonitorEntry::new("DISPLAY1", 1920, 1080, true),
+                    MonitorEntry::new("DISPLAY2", 2560, 1440, false),
+                ],
+                current: 1,
+            },
+            ControlMessage::MonitorList {
+                monitors: Vec::new(),
+                current: 0,
+            },
+            ControlMessage::SelectMonitor(1),
+            ControlMessage::SetQuality(Quality::Medium),
+            ControlMessage::StreamChanged(StreamInfo {
+                codec: VideoCodec::H264,
+                width: 1280,
+                height: 1024,
+                fps: 30,
+                encoder: "Test Encoder".into(),
+            }),
             ControlMessage::Rejected {
                 reason: RejectReason::PinRequired,
             },
@@ -649,6 +693,85 @@ mod tests {
             11
         );
         assert_eq!(index(ControlMessage::Clipboard(String::new())), 12);
+        assert_eq!(
+            index(ControlMessage::MonitorList {
+                monitors: Vec::new(),
+                current: 0
+            }),
+            13
+        );
+        assert_eq!(index(ControlMessage::SelectMonitor(0)), 14);
+        assert_eq!(index(ControlMessage::SetQuality(Quality::Automatic)), 15);
+        assert_eq!(index(ControlMessage::StreamChanged(sample_stream())), 16);
+    }
+
+    fn sample_stream() -> StreamInfo {
+        StreamInfo {
+            codec: VideoCodec::Hevc,
+            width: 1280,
+            height: 1024,
+            fps: 30,
+            encoder: "E".into(),
+        }
+    }
+
+    #[test]
+    fn monitor_list_layout_is_stable() {
+        // Variant 13, the list (length, then per monitor: name as length +
+        // bytes, width and height as varints, primary as a byte), then the
+        // current position as a varint. 1920 = 0x80 0x0F, 1080 = 0xB8 0x08.
+        let frame = encode_frame(&ControlMessage::MonitorList {
+            monitors: vec![MonitorEntry::new("D1", 1920, 1080, true)],
+            current: 0,
+        });
+        assert_eq!(
+            frame,
+            frame_of(&[13, 1, 2, b'D', b'1', 0x80, 0x0F, 0xB8, 0x08, 1, 0])
+        );
+    }
+
+    #[test]
+    fn select_monitor_and_set_quality_layouts_are_stable() {
+        assert_eq!(
+            encode_frame(&ControlMessage::SelectMonitor(300)),
+            frame_of(&[14, 0xAC, 0x02])
+        );
+        // Quality: 0 = automatic, 1 = high, 2 = medium, 3 = low.
+        for (quality, byte) in [
+            (Quality::Automatic, 0),
+            (Quality::High, 1),
+            (Quality::Medium, 2),
+            (Quality::Low, 3),
+        ] {
+            assert_eq!(
+                encode_frame(&ControlMessage::SetQuality(quality)),
+                frame_of(&[15, byte])
+            );
+        }
+    }
+
+    #[test]
+    fn stream_changed_layout_is_stable() {
+        // Variant 16, then the StreamInfo laid out as in Welcome: codec
+        // (0 = H.264, 1 = HEVC), width, height and fps as varints, the
+        // encoder name. 1280 = 0x80 0x0A, 1024 = 0x80 0x08.
+        let frame = encode_frame(&ControlMessage::StreamChanged(sample_stream()));
+        assert_eq!(
+            frame,
+            frame_of(&[16, 1, 0x80, 0x0A, 0x80, 0x08, 30, 1, b'E'])
+        );
+    }
+
+    #[test]
+    fn the_longest_monitor_list_fits_in_one_frame() {
+        let name = "\u{1F5A5}".repeat(MAX_MONITOR_NAME);
+        let message = ControlMessage::MonitorList {
+            monitors: vec![MonitorEntry::new(&name, u32::MAX, u32::MAX, true); MAX_MONITORS],
+            current: u32::MAX,
+        };
+        let frame = encode_frame(&message);
+        assert!(frame.len() - LENGTH_PREFIX <= MAX_CONTROL_MESSAGE);
+        assert_eq!(decode_one(&frame).unwrap(), Some(message));
     }
 
     #[test]

@@ -10,6 +10,7 @@
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::{Sender, channel};
 use std::thread::{self, JoinHandle};
 
@@ -216,6 +217,7 @@ fn serve(
         let context = Arc::new(SessionContext {
             host_name: host.name.clone(),
             stream: options.stream.clone(),
+            monitor: AtomicUsize::new(options.stream.monitor),
             state: Arc::clone(state),
             devices: Arc::clone(devices),
             pin_guard: PinGuard::new(Arc::clone(state), events.clone()),

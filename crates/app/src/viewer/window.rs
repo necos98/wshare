@@ -6,8 +6,9 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use pipeline::ViewerStats;
-use protocol::control::StreamInfo;
+use protocol::control::{ControlMessage, StreamInfo};
 use protocol::input::CursorShape;
+use protocol::session::MonitorEntry;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{MouseButton, WindowEvent};
@@ -17,13 +18,13 @@ use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{Fullscreen, Window, WindowId};
 
 use super::Outgoing;
+use super::control_policy::ControlPolicy;
 use super::cursor::CursorCache;
 use super::failure::ViewerFailure;
 use super::feed::VideoIn;
 use super::key_log;
 use super::key_router::Hotkey;
 use super::keyboard_hook::KeyboardHook;
-use super::notice::Notice;
 use super::remote::RemoteControl;
 use super::render_thread::{RenderInput, RenderThread};
 use super::stats::LinkProbe;
@@ -47,34 +48,14 @@ pub enum UserEvent {
     CursorVisible(bool),
     /// The host switched remote control on/off mid-session.
     InputAllowed(bool),
+    /// The host's monitors and the one it shares.
+    Monitors {
+        monitors: Vec<MonitorEntry>,
+        current: u32,
+    },
+    /// The host started its stream over: the video is `StreamInfo` now.
+    StreamChanged(StreamInfo),
     Hotkey(Hotkey),
-}
-
-/// Who may enable remote control: both the host and the viewer's user.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ControlPolicy {
-    pub host_allows: bool,
-    /// The viewer chose `--view-only`.
-    pub view_only: bool,
-}
-
-impl ControlPolicy {
-    pub fn enabled(self) -> bool {
-        self.host_allows && !self.view_only
-    }
-
-    /// Records that the host now allows (or forbids) remote control.
-    /// Returns what to tell the user when this changed whether they can
-    /// control the host.
-    pub fn set_host_allows(&mut self, allowed: bool) -> Option<Notice> {
-        let was_enabled = self.enabled();
-        self.host_allows = allowed;
-        match (was_enabled, self.enabled()) {
-            (true, false) => Some(Notice::ControlOff),
-            (false, true) => Some(Notice::ControlOn),
-            _ => None,
-        }
-    }
 }
 
 /// How the window starts.
@@ -294,7 +275,26 @@ impl ViewerWindow {
             BarAction::ToggleFullscreen => self.toggle_fullscreen(),
             BarAction::ToggleStats => self.toggle_stats(),
             BarAction::Disconnect => self.close(event_loop),
+            BarAction::SelectMonitor(index) => self.ask_host(ControlMessage::SelectMonitor(index)),
+            BarAction::SetQuality(quality) => self.ask_host(ControlMessage::SetQuality(quality)),
         }
+    }
+
+    /// Sends a request the user made to the host.
+    fn ask_host(&self, request: ControlMessage) {
+        // Fails only once the session is over; nothing left to ask then.
+        let _ = self.outgoing.send(request);
+    }
+
+    /// The host streams `stream` from now on (another monitor, quality or
+    /// resolution): the pointer maps onto its size and the statistics show
+    /// it. The window keeps the size the user gave it.
+    fn follow_stream(&mut self, stream: StreamInfo) {
+        self.remote.set_stream((stream.width, stream.height));
+        if let Some(render) = &self.render {
+            render.set_stream(stream.clone());
+        }
+        self.stream = stream;
     }
 
     fn update_bar_window(&mut self) {
@@ -418,6 +418,11 @@ impl ApplicationHandler<UserEvent> for ViewerWindow {
                 }
             }
             UserEvent::InputAllowed(allowed) => self.set_host_allows(allowed),
+            UserEvent::Monitors { monitors, current } => {
+                self.bar.set_monitors(monitors, current, Instant::now());
+                self.sync_bar();
+            }
+            UserEvent::StreamChanged(stream) => self.follow_stream(stream),
             UserEvent::Reconnecting => self.set_reconnecting(true),
             UserEvent::Reconnected => self.set_reconnecting(false),
             UserEvent::Hotkey(hotkey) => self.run_hotkey(hotkey),
@@ -483,41 +488,5 @@ mod tests {
     fn degenerate_size_does_not_divide_by_zero() {
         let (w, h) = initial_size(0, 0);
         assert!(w > 0.0 && h > 0.0);
-    }
-
-    #[test]
-    fn control_needs_host_permission_and_viewer_consent() {
-        let policy = |host_allows, view_only| ControlPolicy {
-            host_allows,
-            view_only,
-        };
-        assert!(policy(true, false).enabled());
-        assert!(!policy(false, false).enabled());
-        assert!(!policy(true, true).enabled());
-    }
-
-    #[test]
-    fn the_user_hears_when_the_host_switches_control_off_and_on() {
-        let mut policy = ControlPolicy {
-            host_allows: true,
-            view_only: false,
-        };
-        assert_eq!(policy.set_host_allows(true), None, "nothing changed");
-        assert_eq!(policy.set_host_allows(false), Some(Notice::ControlOff));
-        assert!(!policy.enabled());
-        assert_eq!(policy.set_host_allows(false), None, "already off");
-        assert_eq!(policy.set_host_allows(true), Some(Notice::ControlOn));
-        assert!(policy.enabled());
-    }
-
-    #[test]
-    fn a_view_only_user_has_nothing_to_hear_about() {
-        let mut policy = ControlPolicy {
-            host_allows: true,
-            view_only: true,
-        };
-        assert_eq!(policy.set_host_allows(false), None);
-        assert_eq!(policy.set_host_allows(true), None);
-        assert!(!policy.enabled());
     }
 }

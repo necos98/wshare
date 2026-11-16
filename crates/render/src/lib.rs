@@ -6,7 +6,9 @@
 //! - [`fit_rect`], the letterbox geometry, exposed for input mapping (the
 //!   app needs it to translate mouse positions into host coordinates).
 //! - [`toolbar_geometry`] / [`ToolbarView`]: the full-screen control bar,
-//!   drawn by the renderer and hit-tested by the app with the same geometry.
+//!   drawn by the renderer and hit-tested by the app with the same geometry;
+//!   [`menu_geometry`] / [`MenuView`]: the drop-down list of one of its
+//!   buttons, likewise.
 //!
 //! Depends on `gpu` (frame type) and `pipeline` (the [`FrameSink`] trait it
 //! implements), not on the decoder that produces the frames.
@@ -14,6 +16,8 @@
 mod cache;
 mod canvas;
 mod layout;
+mod menu_geometry;
+mod menu_painter;
 mod overlay;
 mod processor;
 mod renderer;
@@ -25,7 +29,8 @@ mod toolbar_geometry;
 mod toolbar_painter;
 
 pub use layout::{Rect, fit_rect};
+pub use menu_geometry::{MenuGeometry, MenuHit, menu_geometry};
 pub use pipeline::FrameSink;
 pub use renderer::Renderer;
-pub use toolbar::ToolbarView;
+pub use toolbar::{MenuView, ToolbarView};
 pub use toolbar_geometry::{ToolbarGeometry, ToolbarHit, toolbar_geometry};

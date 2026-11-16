@@ -54,6 +54,7 @@ pub struct RenderThread {
     reconnecting: Arc<AtomicBool>,
     toolbar: Arc<ToolbarSlot>,
     notices: Sender<Notice>,
+    streams: Sender<StreamInfo>,
     thread: Option<JoinHandle<Result<ViewerStats>>>,
 }
 
@@ -71,6 +72,7 @@ impl RenderThread {
         let reconnecting = Arc::new(AtomicBool::new(false));
         let toolbar = Arc::new(ToolbarSlot::default());
         let (notices, incoming_notices) = channel();
+        let (streams, incoming_streams) = channel();
         let thread = {
             let (stop, size, stats_visible, reconnecting, toolbar) = (
                 stop.clone(),
@@ -89,6 +91,7 @@ impl RenderThread {
                         reconnecting: &reconnecting,
                         toolbar: &toolbar,
                         notices: &incoming_notices,
+                        streams: &incoming_streams,
                     };
                     let result = render_loop(input, shared);
                     if !stop.load(Ordering::Relaxed) {
@@ -105,6 +108,7 @@ impl RenderThread {
             reconnecting,
             toolbar,
             notices,
+            streams,
             thread: Some(thread),
         })
     }
@@ -113,6 +117,13 @@ impl RenderThread {
     pub fn show_notice(&self, notice: Notice) {
         // The loop is gone only when the window is closing.
         let _ = self.notices.send(notice);
+    }
+
+    /// The host streams `stream` from now on: the decoder expects its size
+    /// and the statistics show it.
+    pub fn set_stream(&self, stream: StreamInfo) {
+        // The loop is gone only when the window is closing.
+        let _ = self.streams.send(stream);
     }
 
     /// Shows or hides the statistics overlay; returns the new state.
@@ -161,6 +172,7 @@ struct Shared<'a> {
     reconnecting: &'a AtomicBool,
     toolbar: &'a ToolbarSlot,
     notices: &'a Receiver<Notice>,
+    streams: &'a Receiver<StreamInfo>,
 }
 
 fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
@@ -171,6 +183,7 @@ fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
         reconnecting,
         toolbar,
         notices,
+        streams,
     } = shared;
     let _mmcss = MmcssRegistration::register();
     let _mf = MediaFoundation::start()?;
@@ -234,6 +247,12 @@ fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
         while let Ok(notice) = notices.try_recv() {
             board.show(notice, now);
         }
+        while let Ok(stream) = streams.try_recv() {
+            streamer
+                .decoder_mut()
+                .expect_size(stream.width, stream.height);
+            overlay.set_stream(stream);
+        }
         if let Some(lines) = board.take_changed(now) {
             streamer.sink_mut().set_notice(lines)?;
         }
@@ -277,6 +296,12 @@ impl StatsOverlay {
             shown: false,
             next_refresh: Instant::now(),
         }
+    }
+
+    /// The stream to describe from now on; shown at the next refresh.
+    fn set_stream(&mut self, stream: StreamInfo) {
+        self.stream = stream;
+        self.next_refresh = Instant::now();
     }
 
     /// presented: the batch of `len` bytes put a new frame on screen; the
@@ -388,6 +413,7 @@ mod tests {
             tooltips: vec!["Tip".into()],
             expanded,
             hovered: None,
+            menu: None,
         }
     }
 

@@ -18,7 +18,7 @@ pub mod traits;
 pub mod viewer;
 
 pub use bitrate::{BitrateController, NetworkSample};
-pub use host::{HostStats, HostStreamer};
+pub use host::{HostStats, HostStreamer, StreamContinuation};
 pub use pacer::FramePacer;
 pub use retransmit::RecentFrames;
 pub use traits::{DatagramSink, EncodedFrame, FrameSink, FrameSource, VideoDecoder, VideoEncoder};

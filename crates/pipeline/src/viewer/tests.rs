@@ -408,3 +408,25 @@ fn reset_keeps_the_statistics_counting() {
     h.viewer.reset().unwrap();
     assert_eq!(h.viewer.stats().frames_presented, presented);
 }
+
+#[test]
+fn a_stream_changed_mid_session_is_followed_without_a_reset() {
+    // The host restarted capture and encoder (another monitor): frame ids
+    // go on and the new stream opens with a keyframe.
+    let mut h = Harness::started();
+    h.send(b"old delta", false, 10);
+    let actions = h.send(b"new keyframe", true, 20);
+    h.send(b"new delta", false, 30);
+    assert_eq!(Harness::requests(&actions), 0);
+    assert_eq!(h.resets.get(), 0, "the decoder follows the stream as is");
+    assert_eq!(h.last_presented(), b"new delta");
+    assert_eq!(h.viewer.stats().frames_lost, 0);
+}
+
+#[test]
+fn the_decoder_is_reachable_between_datagrams() {
+    let mut h = Harness::started();
+    h.viewer.decoder_mut().decoded.borrow_mut().clear();
+    h.send(b"delta", false, 10);
+    assert_eq!(*h.decoded.borrow(), [b"delta".to_vec()]);
+}

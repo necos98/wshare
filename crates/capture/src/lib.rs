@@ -10,7 +10,9 @@
 
 pub mod pointer;
 
-use anyhow::{Context, Result, bail};
+use std::fmt;
+
+use anyhow::{Context, Result};
 pub use gpu::Gpu;
 use gpu::wide_to_string;
 pub use pointer::{MAX_POINTER_SIDE, PointerChanges, PointerImage};
@@ -38,6 +40,9 @@ pub struct MonitorInfo {
     pub top: i32,
     pub width: u32,
     pub height: u32,
+    /// The main monitor: Windows puts it at the origin of the virtual
+    /// desktop.
+    pub primary: bool,
 }
 
 struct OutputHandle {
@@ -78,11 +83,23 @@ fn enumerate_outputs() -> Result<Vec<OutputHandle>> {
                     top: r.top,
                     width: (r.right - r.left) as u32,
                     height: (r.bottom - r.top) as u32,
+                    primary: r.left == 0 && r.top == 0,
                 },
             });
         }
     }
     Ok(found)
+}
+
+/// Prefix of the GDI device names DXGI reports (`\\.\DISPLAY1`).
+const DEVICE_PREFIX: &str = r"\\.\";
+
+/// `device_name` ([`MonitorInfo::name`]) as people read it: `\\.\DISPLAY1`
+/// becomes `DISPLAY1`.
+pub fn display_name(device_name: &str) -> &str {
+    device_name
+        .strip_prefix(DEVICE_PREFIX)
+        .unwrap_or(device_name)
 }
 
 pub fn list_monitors() -> Result<Vec<MonitorInfo>> {
@@ -104,6 +121,8 @@ pub struct DesktopDuplication {
     pointer: PointerTracker,
     /// Reused across `GetFramePointerShape` calls (shapes change often).
     pointer_buffer: Vec<u8>,
+    /// Pixel format of the duplicated surface (and of `frame`).
+    format: DXGI_FORMAT,
     pub width: u32,
     pub height: u32,
 }
@@ -127,6 +146,7 @@ impl DesktopDuplication {
             frame,
             pointer: PointerTracker::default(),
             pointer_buffer: Vec::new(),
+            format: mode.Format,
             width: mode.Width,
             height: mode.Height,
         })
@@ -153,7 +173,8 @@ impl DesktopDuplication {
 
     /// Waits up to `timeout_ms` for the desktop to change. Pointer updates
     /// are recorded even when only the mouse changed (which still returns
-    /// [`Acquire::NoChange`]).
+    /// [`Acquire::NoChange`]). Fails with [`ModeChanged`] once the monitor
+    /// switched to another resolution or pixel format.
     pub fn acquire(&mut self, timeout_ms: u32) -> Result<Acquire> {
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource: Option<IDXGIResource> = None;
@@ -254,13 +275,39 @@ impl DesktopDuplication {
             }
         };
         let mode = unsafe { dup.GetDesc() }.ModeDesc;
-        if mode.Width != self.width || mode.Height != self.height {
-            bail!("resolution changed to {}x{}", mode.Width, mode.Height);
+        if mode.Width != self.width || mode.Height != self.height || mode.Format != self.format {
+            return Err(ModeChanged {
+                width: mode.Width,
+                height: mode.Height,
+            }
+            .into());
         }
         self.dup = dup;
         Ok(())
     }
 }
+
+/// The monitor's resolution or pixel format changed: this capture cannot go
+/// on (its texture has the old mode), a new [`DesktopDuplication`] must be
+/// opened. Returned, inside the `anyhow::Error`, by
+/// [`DesktopDuplication::acquire`]; find it with `downcast_ref`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModeChanged {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl fmt::Display for ModeChanged {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the display mode changed to {}x{}",
+            self.width, self.height
+        )
+    }
+}
+
+impl std::error::Error for ModeChanged {}
 
 fn create_texture(
     device: &ID3D11Device,
@@ -287,6 +334,18 @@ fn create_texture(
     let mut texture = None;
     unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture))? };
     texture.context("CreateTexture2D returned nothing")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_names_drop_the_device_prefix() {
+        assert_eq!(display_name(r"\\.\DISPLAY2"), "DISPLAY2");
+        assert_eq!(display_name("Monitor"), "Monitor");
+        assert_eq!(display_name(""), "");
+    }
 }
 
 #[cfg(test)]

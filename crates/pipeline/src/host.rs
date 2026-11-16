@@ -13,6 +13,11 @@
 //! Large frames leave in a few bursts ([`crate::burst`]), and keyframe
 //! requests are merged ([`crate::keyframe_gate`]), so one loss does not
 //! snowball into a train of keyframes.
+//!
+//! Capture and encoder can be replaced while streaming (another monitor, a
+//! new resolution, another frame rate): [`HostStreamer::into_continuation`]
+//! and [`HostStreamer::resume`] keep the frame ids counting, so the viewer
+//! sees one stream whose next frame is a keyframe of the new size.
 
 use std::collections::VecDeque;
 use std::time::Instant;
@@ -46,6 +51,26 @@ pub struct HostStats {
     pub keyframe_requests_merged: u64,
 }
 
+/// What one stream hands to the next when capture and encoder start over
+/// (see [`HostStreamer::into_continuation`] and [`HostStreamer::resume`]):
+/// the sink, the frame numbering, the frames kept for resends, the clock
+/// of the timestamps and the statistics.
+pub struct StreamContinuation<D> {
+    sink: D,
+    packetizer: Packetizer,
+    recent: RecentFrames,
+    start: Instant,
+    stats: HostStats,
+}
+
+impl<D> StreamContinuation<D> {
+    /// What the streams so far did, e.g. to report them when no new
+    /// stream can be started.
+    pub fn stats(&self) -> &HostStats {
+        &self.stats
+    }
+}
+
 pub struct HostStreamer<S, E, D>
 where
     S: FrameSource,
@@ -61,6 +86,8 @@ where
     keyframes: KeyframeGate,
     start: Instant,
     encoded: VecDeque<EncodedFrame>,
+    /// Frames submitted to the current encoder and not sent yet.
+    in_flight: u64,
     fps: u32,
     /// Send backlog, in bytes, above which due frames are skipped.
     backlog_limit: usize,
@@ -87,6 +114,37 @@ where
         bitrate_bps: u32,
         recent: RecentFrames,
     ) -> Self {
+        let continuation = StreamContinuation {
+            sink,
+            packetizer: Packetizer::new(),
+            recent,
+            start: Instant::now(),
+            stats: HostStats::default(),
+        };
+        Self::resume(continuation, source, encoder, fps, bitrate_bps)
+    }
+
+    /// Goes on with the stream `continuation` left off, from a new source
+    /// and encoder (e.g. another monitor, or the same one in a new
+    /// resolution) at `fps` and `bitrate_bps`. Frame ids, timestamps and
+    /// statistics carry on, so a viewer follows without starting over; the
+    /// first `step` sends a picture at once, like after [`Self::new`]. The
+    /// new encoder must begin with a keyframe (every encoder does).
+    /// Panics if `fps` is 0.
+    pub fn resume(
+        continuation: StreamContinuation<D>,
+        source: S,
+        encoder: E,
+        fps: u32,
+        bitrate_bps: u32,
+    ) -> Self {
+        let StreamContinuation {
+            sink,
+            packetizer,
+            recent,
+            start,
+            stats,
+        } = continuation;
         let mut pacer = FramePacer::new(fps);
         pacer.mark_dirty();
         Self {
@@ -94,14 +152,30 @@ where
             encoder,
             sink,
             pacer,
-            packetizer: Packetizer::new(),
+            packetizer,
             recent,
             keyframes: KeyframeGate::new(),
-            start: Instant::now(),
+            start,
             encoded: VecDeque::new(),
+            in_flight: 0,
             fps,
             backlog_limit: send_backlog_limit(bitrate_bps, fps),
-            stats: HostStats::default(),
+            stats,
+        }
+    }
+
+    /// Ends this source and encoder (both are dropped here, so the next
+    /// ones can open the same devices) and keeps what the stream that
+    /// follows needs, for [`Self::resume`]. Frames the old encoder still
+    /// holds are thrown away unsent: they would only precede the new
+    /// stream's keyframe.
+    pub fn into_continuation(self) -> StreamContinuation<D> {
+        StreamContinuation {
+            sink: self.sink,
+            packetizer: self.packetizer,
+            recent: self.recent,
+            start: self.start,
+            stats: self.stats,
         }
     }
 
@@ -181,6 +255,7 @@ where
         self.recent.record(frame_id, &datagrams, Instant::now());
         self.send_in_bursts(datagrams)?;
         self.stats.frames_sent += 1;
+        self.in_flight = self.in_flight.saturating_sub(1);
         if frame.keyframe {
             self.stats.keyframes_sent += 1;
             self.keyframes.on_keyframe_sent(Instant::now());
@@ -237,6 +312,7 @@ where
         self.encoder.submit(&frame, self.timestamp(now))?;
         self.pacer.on_submitted(now);
         self.stats.frames_submitted += 1;
+        self.in_flight += 1;
         self.flush_in_flight()
     }
 
@@ -246,7 +322,7 @@ where
     /// so an encoder that buffers frames internally cannot stall the loop.
     fn flush_in_flight(&mut self) -> Result<()> {
         for _ in 0..MAX_FLUSH_EVENTS {
-            if self.stats.frames_sent >= self.stats.frames_submitted {
+            if self.in_flight == 0 {
                 break;
             }
             self.encoder.poll(true, &mut self.encoded)?;

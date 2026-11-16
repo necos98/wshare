@@ -273,3 +273,38 @@ fn an_error_that_is_not_a_known_failure_counts_as_a_lost_connection() {
         ViewerFailure::ConnectionLost("socket".into())
     );
 }
+
+#[test]
+fn the_window_hears_of_monitors_and_stream_changes() {
+    let monitors = vec![protocol::session::MonitorEntry::new("D1", 1920, 1080, true)];
+    let Some(UserEvent::Monitors {
+        monitors: told,
+        current,
+    }) = window_event(ControlMessage::MonitorList {
+        monitors: monitors.clone(),
+        current: 0,
+    })
+    else {
+        panic!("monitors not passed on")
+    };
+    assert_eq!((told, current), (monitors, 0));
+    let changed = stream(VideoCodec::Hevc);
+    assert!(matches!(
+        window_event(ControlMessage::StreamChanged(changed.clone())),
+        Some(UserEvent::StreamChanged(stream)) if stream == changed
+    ));
+    assert!(matches!(
+        window_event(ControlMessage::CursorVisible(false)),
+        Some(UserEvent::CursorVisible(false))
+    ));
+    assert!(window_event(ControlMessage::RequestKeyframe).is_none());
+}
+
+#[test]
+fn only_a_quality_other_than_automatic_is_asked_for_again() {
+    assert_eq!(quality_request(Quality::Automatic), None);
+    assert_eq!(
+        quality_request(Quality::Low),
+        Some(ControlMessage::SetQuality(Quality::Low))
+    );
+}

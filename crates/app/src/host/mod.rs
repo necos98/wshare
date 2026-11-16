@@ -13,13 +13,17 @@
 //!   too many overall, rotate the PIN.
 //! - `session`: one viewer from Hello to goodbye.
 //! - `devices`: the viewers admitted without a PIN, shared with the handle.
-//! - `streaming`: the capture/encode thread of a session.
+//! - `streaming`: the capture/encode thread of a session; `stream_setup`
+//!   opens its capture and encoder.
+//! - `screen_choice`: the monitor and quality a viewer chose.
+//! - `monitor_list`: the monitors as the viewer and remote input see them.
+//! - `screen_switch`: a session switching screens (requests, aftermath).
 //! - `rate_adaptation`: the encoder's bitrate fitted to the network.
 //! - `input_gate`: remote input behind the "allow input" switch.
 //! - `input_switch`: what a session does when that switch flips.
 //! - `clipboard`: the shared clipboard of a session.
-//! - `state`: PIN, input and clipboard flags and end signals shared with the
-//!   handle.
+//! - `state`: PIN, input and clipboard flags, the shared monitor and end
+//!   signals shared with the handle.
 //! - `cause`: the typed reasons of failures and warnings.
 //! - `events`: delivery to the observer, rate limiting.
 //! - `console` + `interrupt`: the CLI front-end (`run`).
@@ -34,13 +38,17 @@ mod events;
 mod input_gate;
 mod input_switch;
 mod interrupt;
+mod monitor_list;
 mod pin_attempts;
 mod pin_guard;
 mod rate_adaptation;
+mod screen_choice;
+mod screen_switch;
 mod service;
 mod session;
 mod sessions;
 mod state;
+mod stream_setup;
 mod streaming;
 #[cfg(test)]
 mod tests;
@@ -90,6 +98,14 @@ pub enum HostEvent {
         address: SocketAddr,
         stats: HostStats,
         error: Option<SessionFailure>,
+    },
+    /// The screen being shared changed: the viewer chose another monitor,
+    /// or the monitor switched resolution. Viewers that connect later get
+    /// this monitor too.
+    ScreenChanged {
+        monitor: String,
+        width: u32,
+        height: u32,
     },
     /// Windows refused injected input (elevated window, UAC, lock screen).
     /// Sent once per blocked stretch.

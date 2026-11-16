@@ -139,6 +139,11 @@ pub(super) fn describe(event: &HostEvent) -> Vec<(Output, String)> {
                 format!("{address}: session ended with error: {error}"),
             )]
         }
+        HostEvent::ScreenChanged {
+            monitor,
+            width,
+            height,
+        } => vec![(Stdout, format!("Now sharing {monitor} ({width}x{height})"))],
         HostEvent::InputBlocked => vec![(
             Stdout,
             "Remote input blocked by Windows (elevated window, UAC or lock screen); \
@@ -261,6 +266,14 @@ mod tests {
                 pin: "654321".into()
             }),
             ["New PIN: 654321"]
+        );
+        assert_eq!(
+            texts(HostEvent::ScreenChanged {
+                monitor: "DISPLAY2".into(),
+                width: 1280,
+                height: 1024
+            }),
+            ["Now sharing DISPLAY2 (1280x1024)"]
         );
         assert_eq!(describe(&HostEvent::InputBlocked).len(), 1);
         let device = |name: &str| AuthorizedDevice {

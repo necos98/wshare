@@ -541,3 +541,97 @@ fn backlog_stays_bounded_when_the_link_is_slower_than_the_stream() {
     assert_eq!(stats.frames_sent, stats.frames_submitted);
     assert_eq!(h.reassemble().len() as u64, stats.frames_sent);
 }
+
+/// A fresh scripted screen showing `image` and a fresh encoder, for a
+/// stream that resumes another one.
+fn fresh_parts(
+    image: &[u8],
+) -> (
+    Rc<RefCell<SourceState>>,
+    Rc<RefCell<EncoderState>>,
+    FakeSource,
+    FakeEncoder,
+) {
+    let source = Rc::new(RefCell::new(SourceState {
+        current: image.to_vec(),
+        ..Default::default()
+    }));
+    let encoder = Rc::new(RefCell::new(EncoderState {
+        capacity: 1,
+        in_flight: VecDeque::new(),
+        force_keyframe: false,
+        submitted: Vec::new(),
+        polls: Vec::new(),
+        hold_output: false,
+        bitrate: None,
+        refuse_bitrate: false,
+    }));
+    let (fake_source, fake_encoder) = (FakeSource(source.clone()), FakeEncoder(encoder.clone()));
+    (source, encoder, fake_source, fake_encoder)
+}
+
+#[test]
+fn a_resumed_stream_keeps_counting_frames_and_starts_with_a_keyframe() {
+    let mut h = harness(b"old", 1);
+    h.streamer.step().unwrap();
+    h.change_and_submit(b"old2");
+    let (_, encoder, source, fake_encoder) = fresh_parts(b"new");
+    let continuation = h.streamer.into_continuation();
+    assert_eq!(continuation.stats().frames_sent, 2);
+    let mut streamer = HostStreamer::resume(continuation, source, fake_encoder, FPS, BITRATE);
+    streamer.step().unwrap();
+    assert_eq!(encoder.borrow().submitted.len(), 1, "sent at once");
+    let frames = {
+        let mut r = Reassembler::new(8);
+        h.sent
+            .borrow()
+            .iter()
+            .flat_map(|d| r.push(d.clone()).unwrap())
+            .filter_map(|e| match e {
+                ReassemblyEvent::Frame(f) => Some(f),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let ids: Vec<u32> = frames.iter().map(|f| f.frame_id).collect();
+    assert_eq!(ids, [0, 1, 2], "no restart of the numbering");
+    assert_eq!(&frames[2].data[..], b"new");
+    assert!(frames[2].keyframe);
+    assert!(frames[2].timestamp >= frames[1].timestamp, "one clock");
+    assert_eq!(streamer.stats().frames_sent, 3, "statistics carry on");
+}
+
+#[test]
+fn frames_the_old_encoder_held_are_dropped_and_do_not_stall_the_new_one() {
+    let mut h = harness(b"old", 1);
+    h.encoder.borrow_mut().hold_output = true;
+    h.streamer.step().unwrap();
+    assert_eq!(h.streamer.stats().frames_sent, 0);
+    let (_, encoder, source, fake_encoder) = fresh_parts(b"new");
+    let continuation = h.streamer.into_continuation();
+    let mut streamer = HostStreamer::resume(continuation, source, fake_encoder, FPS, BITRATE);
+    streamer.step().unwrap();
+    assert_eq!(streamer.stats().frames_sent, 1);
+    // One blocking poll for the new frame, not a wait for the lost one.
+    assert_eq!(encoder.borrow().polls.iter().filter(|b| **b).count(), 1);
+    assert_eq!(h.sent.borrow().len(), 1);
+}
+
+#[test]
+fn a_resumed_stream_runs_at_its_own_rate_and_frame_rate() {
+    let h = harness(b"old", 1);
+    let (_, encoder, source, fake_encoder) = fresh_parts(b"new");
+    let mut streamer = HostStreamer::resume(
+        h.streamer.into_continuation(),
+        source,
+        fake_encoder,
+        10,
+        BITRATE / 4,
+    );
+    streamer.step().unwrap();
+    streamer.step().unwrap();
+    let waited = encoder.borrow().submitted.len();
+    assert_eq!(waited, 1, "the next slot of 10 fps is 100 ms away");
+    streamer.set_bitrate(BITRATE / 8).unwrap();
+    assert_eq!(encoder.borrow().bitrate, Some(BITRATE / 8));
+}

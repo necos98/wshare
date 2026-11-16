@@ -579,6 +579,7 @@ mod tests {
             tooltips: Vec::new(),
             expanded,
             hovered,
+            menu: None,
         })
     }
 
@@ -651,6 +652,59 @@ mod tests {
         renderer.set_toolbar(Some(tipped));
         let idle = render(&gpu, &mut renderer, &frame)?;
         assert_eq!(idle.bright_pixels((l, t, r, b), 200), 0, "no hover, no tip");
+        renderer.present(&frame)
+    }
+
+    #[test]
+    #[ignore = "requires GPU"]
+    fn an_open_menu_hangs_under_its_button_and_hides_the_tooltip() -> Result<()> {
+        let gpu = Gpu::default_adapter()?;
+        let window = HiddenWindow::new(960, 540)?;
+        let mut renderer = Renderer::new(&gpu, window.hwnd(), 960, 540)?;
+        let frame = red_frame(&gpu)?;
+        let g = bar_geometry(&window, (960, 540), true);
+        let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(window.hwnd()) };
+        let mut view = bar_view(true, Some(1)).unwrap();
+        view.tooltips = ["", "Tip", ""].map(String::from).to_vec();
+        renderer.set_toolbar(Some(view.clone()));
+        let closed = render(&gpu, &mut renderer, &frame)?;
+
+        view.menu = Some(crate::toolbar::MenuView {
+            button: 1,
+            items: ["Automatica", "Alta"].map(String::from).to_vec(),
+            checked: Some(0),
+            hovered: Some(1),
+        });
+        renderer.set_toolbar(Some(view));
+        let open = render(&gpu, &mut renderer, &frame)?;
+        let layout =
+            crate::menu_geometry::menu_geometry(&g, 1, 2, (960, 540), dpi as f32 / 96.0).unwrap();
+        let below = (0, g.bar.bottom as usize, 960, 540);
+        let changed = open.diff_bounds(&closed).expect("no menu drawn");
+        assert!(
+            changed.1 as i32 >= g.bar.bottom,
+            "below the bar: {changed:?}"
+        );
+        let tip_or_menu = Rect {
+            left: layout.panel.left.min(g.buttons[1].left - 60),
+            right: layout.panel.right.max(g.buttons[1].right + 60),
+            ..layout.panel
+        };
+        assert!(inside(
+            changed,
+            &Rect {
+                top: g.bar.bottom,
+                bottom: 540,
+                ..tip_or_menu
+            }
+        ));
+        for (i, row) in layout.items.iter().enumerate() {
+            assert!(
+                open.bright_pixels(rect_bounds(row), 200) > 10,
+                "label of row {i}"
+            );
+        }
+        assert!(open.bright_pixels(below, 200) > closed.bright_pixels(below, 200));
         renderer.present(&frame)
     }
 

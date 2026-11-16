@@ -1,6 +1,7 @@
 //! One viewer, from Hello to goodbye: admission (see [`super::admission`]),
-//! stream setup, Welcome, then the control loop (keyframe requests,
-//! reception reports, remote input, pointer and bitrate updates) until the
+//! stream setup, Welcome and the monitor list, then the control loop
+//! (keyframe requests, reception reports, remote input, the viewer's choice
+//! of monitor and quality, pointer, bitrate and stream updates) until the
 //! viewer, the stream or the host ends it. A viewer admitted with the PIN
 //! and a certificate is authorized from then on.
 //!
@@ -8,10 +9,12 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
-use input::{RemoteInput, ScreenArea};
+use anyhow::Result;
+use capture::MonitorInfo;
+use input::RemoteInput;
 use net::{ControlReceiver, ControlSender, Session, SessionHandle, VideoChannel};
 use pipeline::HostStats;
 use protocol::control::{ControlMessage, RejectReason, StreamInfo};
@@ -24,10 +27,13 @@ use super::devices::Devices;
 use super::events::EventSink;
 use super::input_gate::InputGate;
 use super::input_switch::InputSwitch;
+use super::monitor_list::{area, find};
 use super::pin_guard::PinGuard;
+use super::screen_choice::{ScreenChoice, start_monitor};
+use super::screen_switch::{InputTarget, SessionScreens};
 use super::state::{Cancelled, SessionTicket, SharedState};
-use super::streaming::{StreamEnd, StreamingThread};
-use super::{HostEvent, SessionFailure};
+use super::streaming::{StreamEnd, StreamPlan, StreamUpdate, StreamingThread};
+use super::{HostEvent, HostWarning, SessionFailure};
 use crate::options::StreamOptions;
 
 /// Grace period to tell "viewer left" from "our stream failed" when the
@@ -41,6 +47,9 @@ const FAREWELL_GRACE: Duration = Duration::from_secs(1);
 pub(super) struct SessionContext {
     pub(super) host_name: String,
     pub(super) stream: StreamOptions,
+    /// The monitor sessions start on: the one in `stream` until a viewer
+    /// picks another, which the next viewers then get too.
+    pub(super) monitor: AtomicUsize,
     pub(super) state: Arc<SharedState>,
     pub(super) devices: Arc<Devices>,
     pub(super) pin_guard: PinGuard,
@@ -128,13 +137,23 @@ async fn serve_admitted(
     let prepared = async {
         // Looked up per session: the monitor layout may change while the
         // service runs.
-        let input = remote_input(ctx.stream.monitor)?;
-        let mut streaming =
-            StreamingThread::start(ctx.stream.clone(), video, updates_tx, ctx.events.clone())?;
+        let monitors = capture::list_monitors()?;
+        let first = start_monitor(
+            ctx.monitor.load(Ordering::Relaxed),
+            ctx.stream.monitor,
+            monitors.len(),
+        );
+        let screens = SessionScreens::new(first);
+        let input = RemoteInput::new(area(find(&monitors, screens.current().monitor)?));
+        let plan = StreamPlan {
+            base: ctx.stream.clone(),
+            choice: screens.current(),
+        };
+        let mut streaming = StreamingThread::start(plan, video, updates_tx, ctx.events.clone())?;
         let info = streaming.ready().await?;
-        anyhow::Ok((input, streaming, info))
+        anyhow::Ok((monitors, screens, input, streaming, info))
     };
-    let (input, streaming, info) = match prepared.await {
+    let (monitors, screens, input, streaming, info) = match prepared.await {
         Ok(parts) => parts,
         Err(e) => {
             refuse(&mut tx, RejectReason::CannotStream(format!("{e:#}"))).await;
@@ -156,7 +175,11 @@ async fn serve_admitted(
     let mut allowed = ctx.state.watch_input();
     let told = *allowed.borrow_and_update();
     let welcome = welcome(&ctx.host_name, info, told);
-    if let Err(e) = tx.send(&welcome).await {
+    let sent = async {
+        tx.send(&welcome).await?;
+        tx.send(&screens.list(&monitors)).await
+    };
+    if let Err(e) = sent.await {
         let reason = RejectReason::Other(format!("viewer left before Welcome: {e:#}"));
         ctx.events
             .emit(HostEvent::ViewerRejected { address, reason });
@@ -180,6 +203,8 @@ async fn serve_admitted(
         allowed,
         switch: InputSwitch::new(told),
         clipboard,
+        screens,
+        monitor: &ctx.monitor,
         cancel: &mut cancel,
         handle: &viewer.handle,
         events: &ctx.events,
@@ -211,21 +236,6 @@ fn welcome(host_name: &str, stream: StreamInfo, input_allowed: bool) -> ControlM
     }
 }
 
-/// Injection into the shared monitor's area of the virtual desktop.
-/// Creating it injects nothing.
-fn remote_input(monitor: usize) -> Result<RemoteInput> {
-    let info = capture::list_monitors()?
-        .into_iter()
-        .nth(monitor)
-        .with_context(|| format!("monitor {monitor} not found"))?;
-    Ok(RemoteInput::new(ScreenArea {
-        left: info.left,
-        top: info.top,
-        width: info.width,
-        height: info.height,
-    }))
-}
-
 /// Gives our last message time to arrive: waits (bounded) for the viewer
 /// to close the connection after reading it.
 async fn farewell(handle: &SessionHandle, cancel: &mut Cancelled) {
@@ -253,14 +263,19 @@ fn session_error(
 struct ControlLoop<'a> {
     tx: &'a mut ControlSender,
     rx: &'a mut ControlReceiver,
-    /// What the streaming thread has for the viewer (pointer, bitrate).
-    updates: &'a mut UnboundedReceiver<ControlMessage>,
+    /// What the streaming thread has for the viewer (pointer, bitrate) and
+    /// for the session (the stream started over).
+    updates: &'a mut UnboundedReceiver<StreamUpdate>,
     streaming: &'a StreamingThread,
     gate: &'a mut InputGate<RemoteInput>,
     allowed: watch::Receiver<bool>,
     switch: InputSwitch,
     /// The text copied on either PC, while the session lasts.
     clipboard: SessionClipboard,
+    /// The monitor and quality the viewer chose.
+    screens: SessionScreens,
+    /// Where the monitor chosen is kept for the next sessions.
+    monitor: &'a AtomicUsize,
     cancel: &'a mut Cancelled,
     handle: &'a SessionHandle,
     events: &'a EventSink,
@@ -286,10 +301,20 @@ impl ControlLoop<'_> {
                         let allowed = *self.allowed.borrow();
                         self.clipboard.remote_text(&text, allowed).await;
                     }
+                    // Watching is choosing too: allowed without remote control.
+                    Some(ControlMessage::SelectMonitor(index)) => {
+                        let monitors = self.monitors();
+                        let choice = self.screens.select_monitor(index, &monitors);
+                        self.reconfigure(choice);
+                    }
+                    Some(ControlMessage::SetQuality(quality)) => {
+                        let choice = self.screens.set_quality(quality);
+                        self.reconfigure(choice);
+                    }
                     Some(ControlMessage::Bye) | None => return Ok(SessionEnd::ViewerLeft),
                     Some(_) => {} // ignore unexpected messages
                 },
-                Some(update) = self.updates.recv() => self.tx.send(&update).await?,
+                Some(update) = self.updates.recv() => self.forward(update).await?,
                 () = self.clipboard.changed() => {
                     let allowed = *self.allowed.borrow();
                     if let Some(message) = self.clipboard.local_change(allowed).await {
@@ -324,6 +349,52 @@ impl ControlLoop<'_> {
                 }
             }
         }
+    }
+
+    /// The host's monitors now. If Windows cannot list them, that is
+    /// reported and none are known: a choice cannot be checked then, and
+    /// remote input lets go rather than aim at a stale area.
+    fn monitors(&self) -> Vec<MonitorInfo> {
+        capture::list_monitors().unwrap_or_else(|e| {
+            let warning = HostWarning::ScreenUnavailable(format!("{e:#}"));
+            self.events.emit(HostEvent::Warning(warning));
+            Vec::new()
+        })
+    }
+
+    /// Has the streaming thread start over for `choice`, if there is one.
+    fn reconfigure(&self, choice: Option<ScreenChoice>) {
+        if let Some(choice) = choice {
+            self.streaming.reconfigure(choice);
+        }
+    }
+
+    /// Passes on what the streaming thread has: to the viewer as it is, or,
+    /// when the stream started over, the new stream and monitor list, with
+    /// remote input aimed at the screen now shared.
+    async fn forward(&mut self, update: StreamUpdate) -> Result<()> {
+        let (choice, info) = match update {
+            StreamUpdate::Viewer(message) => return self.tx.send(&message).await,
+            StreamUpdate::Restarted { choice, info } => (choice, info),
+        };
+        // The layout may have changed with the mode: looked up now.
+        let monitors = self.monitors();
+        let switched = self.screens.restarted(choice, info, &monitors);
+        self.monitor.store(choice.monitor, Ordering::Relaxed);
+        match switched.input {
+            InputTarget::Aim {
+                area,
+                other_monitor,
+            } => self.report(|gate, now| gate.retarget(area, other_monitor, now)),
+            InputTarget::Unknown => self.report(|gate, now| gate.release_all(now)),
+        }
+        if let Some(event) = switched.event {
+            self.events.emit(event);
+        }
+        for message in &switched.messages {
+            self.tx.send(message).await?;
+        }
+        Ok(())
     }
 
     fn report(

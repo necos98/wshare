@@ -144,6 +144,9 @@ fn sharing_section(ui: &mut Ui, sharing: &Sharing, intents: &mut Vec<Intent>) {
                 });
             }
         });
+        if let Some(screen) = &sharing.screen {
+            ui.label(RichText::new(screen).size(DETAIL_SIZE).weak());
+        }
         ui.add_space(4.0);
         let mut allowed = sharing.input_allowed;
         if ui

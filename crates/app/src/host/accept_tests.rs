@@ -3,6 +3,7 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
@@ -62,6 +63,7 @@ impl Host {
         let ctx = Arc::new(SessionContext {
             host_name: "HOST".into(),
             stream: StreamOptions::default(),
+            monitor: AtomicUsize::new(0),
             state: Arc::clone(&state),
             devices: Arc::new(Devices::new(store, sink.clone())),
             pin_guard: PinGuard::new(Arc::clone(&state), sink.clone()),

@@ -7,6 +7,11 @@
 //! growing wait until [`reconnect::RECONNECT_BUDGET`] is spent. What the
 //! host or the user decided (goodbye, sharing stopped, a refusal, the
 //! disconnect button) ends the session at once and for good.
+//!
+//! The quality the user picked is asked for again on the new connection
+//! (the host forgets it with the old one); the monitor needs nothing, the
+//! host keeps it. When the new connection streams another size, the window
+//! hears of it as of any stream change.
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -14,6 +19,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use net::{ControlReceiver, ControlSender, Fingerprint, Identity, VideoChannel};
 use protocol::control::{ControlMessage, StreamInfo};
+use protocol::session::Quality;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 use winit::event_loop::EventLoopProxy;
@@ -44,7 +50,8 @@ pub struct Reconnection {
     /// (also for a host never remembered, so another PC cannot take its
     /// place in the middle of a session).
     pub host: Fingerprint,
-    /// What the first connection streamed; the decoder is set up for it.
+    /// The stream followed now (as the first connection streamed it, or as
+    /// a later Welcome or `StreamChanged` said).
     pub stream: StreamInfo,
     pub identity: Option<Identity>,
     /// The PIN that came from `--pin` or the environment, in memory only:
@@ -117,9 +124,17 @@ pub async fn run(task: ControlTask) {
         mut reconnection,
         mut feed,
     } = task;
+    let mut quality = Quality::Automatic;
     let reason = loop {
-        let failure = match serve(&mut link, &mut outgoing, &window, &target, &mut clipboard).await
-        {
+        let turn = Turn {
+            outgoing: &mut outgoing,
+            window: &window,
+            target: &target,
+            clipboard: &mut clipboard,
+            quality: &mut quality,
+            stream: &mut reconnection.stream,
+        };
+        let failure = match serve(&mut link, turn).await {
             Served::Finished => return,
             Served::Ended(failure) => failure,
         };
@@ -134,10 +149,21 @@ pub async fn run(task: ControlTask) {
             Err(stop) => Err(stop),
         };
         match resumed {
-            Ok((new_link, input_allowed)) => {
+            Ok(Resumed {
+                link: new_link,
+                input_allowed,
+                stream,
+            }) => {
                 link = new_link;
                 clipboard.set_host_allows(input_allowed);
                 let _ = window.send_event(UserEvent::InputAllowed(input_allowed));
+                if let Some(stream) = stream {
+                    let _ = window.send_event(UserEvent::StreamChanged(stream));
+                }
+                if let Some(request) = quality_request(quality) {
+                    // A link already broken again shows in the next `serve`.
+                    let _ = link.tx.send(&request).await;
+                }
                 let _ = window.send_event(UserEvent::Reconnected);
                 println!("Reconnected.");
             }
@@ -148,17 +174,32 @@ pub async fn run(task: ControlTask) {
     let _ = window.send_event(UserEvent::HostLeft(reason));
 }
 
+/// What a connection's turn works with, besides its link.
+struct Turn<'a> {
+    outgoing: &'a mut UnboundedReceiver<ControlMessage>,
+    window: &'a EventLoopProxy<UserEvent>,
+    target: &'a TargetRate,
+    clipboard: &'a mut ViewerClipboard,
+    /// The quality last asked for, to ask for it again after a break.
+    quality: &'a mut Quality,
+    /// The stream followed, kept up to date with `StreamChanged`.
+    stream: &'a mut StreamInfo,
+}
+
 /// Serves one connection: forwards our requests, applies what the host
 /// sends. The host's target bitrate goes to `target`, for the statistics.
-/// Copied text travels both ways through `clipboard`.
-async fn serve(
-    link: &mut ControlLink,
-    outgoing: &mut UnboundedReceiver<ControlMessage>,
-    window: &EventLoopProxy<UserEvent>,
-    target: &TargetRate,
-    clipboard: &mut ViewerClipboard,
-) -> Served {
+/// Copied text travels both ways through `clipboard`; `quality` and
+/// `stream` follow what the user asks and the host streams.
+async fn serve(link: &mut ControlLink, turn: Turn<'_>) -> Served {
     let ControlLink { tx, rx } = link;
+    let Turn {
+        outgoing,
+        window,
+        target,
+        clipboard,
+        quality,
+        stream,
+    } = turn;
     loop {
         tokio::select! {
             message = outgoing.recv() => {
@@ -167,8 +208,10 @@ async fn serve(
                     if let Err(e) = tx.send(&message).await {
                         return Served::Ended(ViewerFailure::ConnectionLost(format!("{e:#}")));
                     }
-                    if message == ControlMessage::Bye {
-                        return Served::Finished;
+                    match message {
+                        ControlMessage::Bye => return Served::Finished,
+                        ControlMessage::SetQuality(asked) => *quality = asked,
+                        _ => {}
                     }
                 }
             }
@@ -184,12 +227,6 @@ async fn serve(
                     return Served::Ended(ViewerFailure::HostDisconnected);
                 }
                 Ok(None) => return Served::Ended(ViewerFailure::HostLeft),
-                Ok(Some(ControlMessage::Cursor(shape))) => {
-                    let _ = window.send_event(UserEvent::Cursor(shape));
-                }
-                Ok(Some(ControlMessage::CursorVisible(visible))) => {
-                    let _ = window.send_event(UserEvent::CursorVisible(visible));
-                }
                 Ok(Some(ControlMessage::InputAllowed(allowed))) => {
                     clipboard.set_host_allows(allowed);
                     let _ = window.send_event(UserEvent::InputAllowed(allowed));
@@ -198,13 +235,40 @@ async fn serve(
                 Ok(Some(ControlMessage::Clipboard(text))) => {
                     clipboard.remote_text(&text).await;
                 }
-                Ok(Some(_)) => {}
+                Ok(Some(message)) => {
+                    if let ControlMessage::StreamChanged(changed) = &message {
+                        *stream = changed.clone();
+                    }
+                    if let Some(event) = window_event(message) {
+                        let _ = window.send_event(event);
+                    }
+                }
                 Err(e) => {
                     return Served::Ended(ViewerFailure::ConnectionLost(format!("{e:#}")));
                 }
             }
         }
     }
+}
+
+/// What the window does with a message of the host, if it is one of
+/// those: the pointer, the monitors, the stream starting over.
+fn window_event(message: ControlMessage) -> Option<UserEvent> {
+    Some(match message {
+        ControlMessage::Cursor(shape) => UserEvent::Cursor(shape),
+        ControlMessage::CursorVisible(visible) => UserEvent::CursorVisible(visible),
+        ControlMessage::MonitorList { monitors, current } => {
+            UserEvent::Monitors { monitors, current }
+        }
+        ControlMessage::StreamChanged(stream) => UserEvent::StreamChanged(stream),
+        _ => return None,
+    })
+}
+
+/// What a new connection is asked first: the quality the user picked, as
+/// a new connection starts at the host's own.
+fn quality_request(quality: Quality) -> Option<ControlMessage> {
+    (quality != Quality::Automatic).then_some(ControlMessage::SetQuality(quality))
 }
 
 /// Connects to the host again, trying after 0, 0.5, 1, 2, 4... seconds (see
@@ -248,14 +312,24 @@ async fn reestablish(
     }
 }
 
-/// Puts a welcomed connection to work: checks it is the same stream, has
-/// the render thread start over on it and returns its control channel and
-/// whether the host allows remote control now.
+/// A welcomed connection put to work.
+struct Resumed {
+    link: ControlLink,
+    /// Whether the host allows remote control now.
+    input_allowed: bool,
+    /// The stream, when it is not the one followed before the break (e.g.
+    /// another resolution).
+    stream: Option<StreamInfo>,
+}
+
+/// Puts a welcomed connection to work: checks its stream can be decoded
+/// as the old one (same codec), has the render thread start over on it and
+/// returns what changed.
 async fn resume(
     connected: Connected,
     plan: &mut Reconnection,
     feed: &mut VideoFeed,
-) -> Result<(ControlLink, bool), Stop> {
+) -> Result<Resumed, Stop> {
     let Connected {
         stream,
         input_allowed,
@@ -273,7 +347,15 @@ async fn resume(
     }
     feed.switch_to(video, handle).await;
     plan.pin = None;
-    Ok((ControlLink { tx, rx }, input_allowed))
+    let changed = (stream != plan.stream).then(|| {
+        plan.stream = stream.clone();
+        stream
+    });
+    Ok(Resumed {
+        link: ControlLink { tx, rx },
+        input_allowed,
+        stream: changed,
+    })
 }
 
 /// Resolves when the user ends the session (goodbye, or the window is gone).

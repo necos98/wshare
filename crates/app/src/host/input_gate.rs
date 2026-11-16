@@ -8,7 +8,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use input::{DesktopMetrics, InputBackend, Outcome, RemoteInput};
+use input::{DesktopMetrics, InputBackend, Outcome, RemoteInput, ScreenArea};
 use protocol::input::InputEvent;
 
 use super::events::Throttle;
@@ -22,6 +22,8 @@ pub(super) trait Injector {
     fn inject(&mut self, event: &InputEvent) -> Result<Outcome>;
     /// Releases every key and button the viewer holds.
     fn release_all(&mut self) -> Result<Outcome>;
+    /// Aims the pointer at `area` of the virtual desktop from now on.
+    fn retarget(&mut self, area: ScreenArea);
 }
 
 impl<B: InputBackend, M: DesktopMetrics> Injector for RemoteInput<B, M> {
@@ -31,6 +33,10 @@ impl<B: InputBackend, M: DesktopMetrics> Injector for RemoteInput<B, M> {
 
     fn release_all(&mut self) -> Result<Outcome> {
         RemoteInput::release_all(self)
+    }
+
+    fn retarget(&mut self, area: ScreenArea) {
+        self.set_area(area);
     }
 }
 
@@ -71,6 +77,25 @@ impl<I: Injector> InputGate<I> {
         self.report(outcome, now)
     }
 
+    /// The shared screen is now `area`. Switching to another monitor
+    /// (`other_monitor`) first lets go of everything the viewer holds, so
+    /// nothing stays pressed on the monitor left behind; the same monitor
+    /// in a new resolution keeps a drag going.
+    pub(super) fn retarget(
+        &mut self,
+        area: ScreenArea,
+        other_monitor: bool,
+        now: Instant,
+    ) -> Option<HostEvent> {
+        let event = if other_monitor {
+            self.release_all(now)
+        } else {
+            None
+        };
+        self.injector.retarget(area);
+        event
+    }
+
     fn report(&mut self, outcome: Result<Outcome>, now: Instant) -> Option<HostEvent> {
         match outcome {
             Ok(Outcome::Blocked { first: true }) => Some(HostEvent::InputBlocked),
@@ -100,6 +125,8 @@ mod tests {
         outcomes: VecDeque<Result<Outcome>>,
         injected: Vec<InputEvent>,
         releases: usize,
+        /// Each area aimed at, with the releases made before it.
+        areas: Vec<(ScreenArea, usize)>,
     }
 
     impl Fake {
@@ -124,6 +151,10 @@ mod tests {
         fn release_all(&mut self) -> Result<Outcome> {
             self.releases += 1;
             self.next()
+        }
+
+        fn retarget(&mut self, area: ScreenArea) {
+            self.areas.push((area, self.releases));
         }
     }
 
@@ -179,5 +210,32 @@ mod tests {
         let mut gate = InputGate::new(Fake::default());
         assert_eq!(gate.release_all(Instant::now()), None);
         assert_eq!(gate.injector.releases, 1);
+    }
+
+    const SECOND: ScreenArea = ScreenArea::new(1920, 0, 2560, 1440);
+
+    #[test]
+    fn another_monitor_releases_everything_before_aiming_at_it() {
+        let mut gate = InputGate::new(Fake::default());
+        assert_eq!(gate.retarget(SECOND, true, Instant::now()), None);
+        assert_eq!(gate.injector.areas, vec![(SECOND, 1)]);
+    }
+
+    #[test]
+    fn a_new_resolution_of_the_same_monitor_keeps_what_is_held() {
+        let mut gate = InputGate::new(Fake::default());
+        gate.retarget(SECOND, false, Instant::now());
+        assert_eq!(gate.injector.areas, vec![(SECOND, 0)]);
+    }
+
+    #[test]
+    fn a_failed_release_on_a_monitor_switch_is_reported_and_still_retargets() {
+        let mut gate = InputGate::new(Fake::returning(vec![Err(anyhow!("no input"))]));
+        let event = gate.retarget(SECOND, true, Instant::now());
+        assert!(matches!(
+            event,
+            Some(HostEvent::Warning(HostWarning::InputFailed { .. }))
+        ));
+        assert_eq!(gate.injector.areas.len(), 1);
     }
 }

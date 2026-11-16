@@ -1,5 +1,6 @@
 //! Paints the control bar with Direct2D through the shared [`Canvas`],
-//! using exactly the rectangles of [`toolbar_geometry`].
+//! using exactly the rectangles of [`toolbar_geometry`], and the drop-down
+//! list of a button when one is open (see `menu_painter`).
 
 use anyhow::{Context, Result};
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
@@ -11,13 +12,16 @@ use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
     DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-    DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
-    DWRITE_TEXT_METRICS, DWRITE_WORD_WRAPPING_NO_WRAP, IDWriteTextFormat, IDWriteTextLayout,
+    DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_ALIGNMENT_CENTER,
+    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS, DWRITE_WORD_WRAPPING_NO_WRAP,
+    IDWriteTextFormat, IDWriteTextLayout,
 };
 use windows::core::w;
 
 use crate::canvas::Canvas;
 use crate::layout::Rect;
+use crate::menu_geometry::menu_geometry;
+use crate::menu_painter::{MenuBrushes, MenuPainter, paint_menu};
 use crate::toolbar::ToolbarView;
 use crate::toolbar_geometry::{ToolbarGeometry, toolbar_geometry, tooltip_rect};
 
@@ -47,6 +51,7 @@ pub(crate) struct ToolbarPainter {
     label: ID2D1SolidColorBrush,
     /// Label format with the DPI it was made for.
     format: Option<(u32, IDWriteTextFormat)>,
+    menu: MenuPainter,
 }
 
 impl ToolbarPainter {
@@ -61,6 +66,7 @@ impl ToolbarPainter {
             hover: brush(BUTTON_HOVER)?,
             label: brush(LABEL)?,
             format: None,
+            menu: MenuPainter::default(),
         })
     }
 
@@ -86,7 +92,23 @@ impl ToolbarPainter {
         } else {
             None
         };
-        let tooltip = self.tooltip(canvas, &geometry, size, scale, format.as_ref())?;
+        let menu = self
+            .view
+            .as_ref()
+            .and_then(|v| v.menu.as_ref())
+            .and_then(|menu| {
+                menu_geometry(&geometry, menu.button, menu.items.len(), size, scale)
+                    .map(|layout| (menu, layout))
+            });
+        let menu_formats = match menu {
+            Some(_) => Some(self.menu.formats(canvas, dpi, scale)?),
+            None => None,
+        };
+        // An open list covers where a hover text would go.
+        let tooltip = match menu {
+            Some(_) => None,
+            None => self.tooltip(canvas, &geometry, size, scale, format.as_ref())?,
+        };
         let this = &*self;
         let Some(view) = &this.view else {
             return Ok(());
@@ -140,6 +162,14 @@ impl ToolbarPainter {
                     &this.label,
                     D2D1_DRAW_TEXT_OPTIONS_CLIP,
                 );
+            }
+            if let (Some((menu, layout)), Some(formats)) = (menu, &menu_formats) {
+                let brushes = MenuBrushes {
+                    panel: &this.bar,
+                    hover: &this.hover,
+                    label: &this.label,
+                };
+                paint_menu(ctx, &layout, menu, formats, &brushes, scale);
             }
         })
     }
@@ -229,25 +259,35 @@ impl ToolbarPainter {
         {
             return Ok(format.clone());
         }
-        let format = unsafe {
-            let format = canvas
-                .dwrite()
-                .CreateTextFormat(
-                    w!("Segoe UI"),
-                    None,
-                    DWRITE_FONT_WEIGHT_NORMAL,
-                    DWRITE_FONT_STYLE_NORMAL,
-                    DWRITE_FONT_STRETCH_NORMAL,
-                    FONT_SIZE * scale,
-                    w!(""),
-                )
-                .context("CreateTextFormat")?;
-            format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
-            format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
-            format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-            format
-        };
+        let format = create_text_format(canvas, scale, DWRITE_TEXT_ALIGNMENT_CENTER)?;
         self.format = Some((dpi, format.clone()));
+        Ok(format)
+    }
+}
+
+/// The bar's font at `scale`, on one line, vertically centred in its box
+/// and aligned horizontally as `alignment` says.
+pub(crate) fn create_text_format(
+    canvas: &Canvas,
+    scale: f32,
+    alignment: DWRITE_TEXT_ALIGNMENT,
+) -> Result<IDWriteTextFormat> {
+    unsafe {
+        let format = canvas
+            .dwrite()
+            .CreateTextFormat(
+                w!("Segoe UI"),
+                None,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                FONT_SIZE * scale,
+                w!(""),
+            )
+            .context("CreateTextFormat")?;
+        format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+        format.SetTextAlignment(alignment)?;
+        format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
         Ok(format)
     }
 }
@@ -259,7 +299,7 @@ struct Tooltip {
     text_origin: windows_numerics::Vector2,
 }
 
-fn to_f(r: &Rect) -> D2D_RECT_F {
+pub(crate) fn to_f(r: &Rect) -> D2D_RECT_F {
     D2D_RECT_F {
         left: r.left as f32,
         top: r.top as f32,

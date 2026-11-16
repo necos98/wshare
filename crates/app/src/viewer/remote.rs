@@ -43,6 +43,15 @@ impl RemoteControl {
         self.last_position = None;
     }
 
+    /// The host streams a picture of `stream` size from now on (another
+    /// monitor or resolution): positions map onto it. Held keys are
+    /// forgotten, as the host lets go of them when it changes monitor.
+    pub fn set_stream(&mut self, stream: (u32, u32)) {
+        self.stream = stream;
+        self.last_position = None;
+        self.reset_keys();
+    }
+
     pub fn pointer_moved(&mut self, position: PhysicalPosition<f64>, window: PhysicalSize<u32>) {
         let window = (window.width, window.height);
         let Some(normalized) = normalize_pointer((position.x, position.y), window, self.stream)
@@ -138,6 +147,31 @@ mod tests {
         assert_eq!(events.len(), 4);
         assert!(matches!(events[0], InputEvent::MouseMove { .. }));
         assert_eq!(events[3], InputEvent::ReleaseAll);
+    }
+
+    #[test]
+    fn a_new_stream_size_remaps_the_pointer() {
+        let (tx, mut rx) = unbounded_channel();
+        let mut remote = RemoteControl::new(tx, true, (100, 100));
+        let window = PhysicalSize::new(200, 100);
+        // A square stream in a wide window: bars left and right.
+        remote.pointer_moved(PhysicalPosition::new(50.0, 50.0), window);
+        remote.set_stream((200, 100));
+        // Same spot: now it is a quarter of the way across, and sent again.
+        remote.pointer_moved(PhysicalPosition::new(50.0, 50.0), window);
+        let events = received(&mut rx);
+        let [
+            InputEvent::MouseMove { x: before, .. },
+            InputEvent::MouseMove { x: after, .. },
+        ] = events[..]
+        else {
+            panic!("{events:?}")
+        };
+        assert!(
+            before < 0.01,
+            "in the left bar: the left edge, got {before}"
+        );
+        assert!((after - 0.2525).abs() < 0.001, "got {after}");
     }
 
     #[test]

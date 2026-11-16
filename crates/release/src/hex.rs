@@ -44,6 +44,7 @@ mod tests {
         assert_eq!(encode(&bytes), "007f80ff12");
         assert_eq!(decode("007f80ff12").unwrap(), bytes);
         assert_eq!(decode(" 007F80FF12\n").unwrap(), bytes);
+        assert_eq!(decode("\u{feff}007f80ff12\r\n").unwrap(), bytes);
     }
 
     #[test]

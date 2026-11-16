@@ -1,0 +1,5 @@
+[toolchain]
+# Same compiler locally, in CI and for releases: a newer clippy adds lints
+# that would fail `-D warnings` without any change to the code.
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]

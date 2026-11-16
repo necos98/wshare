@@ -91,8 +91,9 @@ versione.
 
 ## Compilare dai sorgenti
 
-Servono Rust stable (edizione 2024) e il Windows SDK (per `rc.exe`, che
-incorpora icona, manifest e informazioni di versione):
+Servono Rust (la versione fissata in `rust-toolchain.toml`, che rustup
+installa da solo: la stessa usata dalla CI e per le release) e il Windows SDK
+(per `rc.exe`, che incorpora icona, manifest e informazioni di versione):
 
 ```
 cargo build --release          # target\release\wshare.exe e wshare-cli.exe

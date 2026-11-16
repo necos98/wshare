@@ -27,8 +27,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Setup Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Rust (rust-toolchain.toml)
+        run: rustup toolchain install
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2

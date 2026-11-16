@@ -148,6 +148,20 @@ fn the_folder_of_received_files_opens_and_a_failure_is_told() {
 }
 
 #[test]
+fn a_folder_that_is_not_on_this_pc_is_never_opened() {
+    let (mut c, log) = controller();
+    for elsewhere in [r"\\evil\share", r"\\?\UNC\evil\share", r"\\?\C:\in"] {
+        c.handle(Intent::OpenFolder(PathBuf::from(elsewhere)));
+        assert_eq!(
+            c.state().files_notice.as_deref(),
+            Some("Impossibile aprire la cartella: non è una cartella di questo computer"),
+            "{elsewhere}"
+        );
+    }
+    assert!(log.borrow().opened.is_empty());
+}
+
+#[test]
 fn the_download_folder_chosen_is_saved() {
     let (mut c, log) = controller();
     c.handle(Intent::ChooseDownloads);

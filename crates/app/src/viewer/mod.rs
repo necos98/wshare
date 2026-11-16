@@ -75,6 +75,7 @@ use crate::cli::ViewOptions;
 use crate::clipboard::ViewerRules;
 use crate::options::DEFAULT_PORT;
 use crate::target::{self, Resolved, parse_target};
+use crate::trust::clean_peer_name;
 use audio::{AudioIn, AudioPlayer};
 use clipboard::ViewerClipboard;
 use control::{ControlLink, ControlTask, Reconnection, VideoFeed};
@@ -402,7 +403,8 @@ async fn connect(
             stream,
             input_allowed,
         }) => Ok(Connected {
-            host_name,
+            // Printed on stdout, the interface's typed channel too.
+            host_name: clean_peer_name(&host_name),
             stream,
             input_allowed,
             fingerprint,

@@ -14,6 +14,8 @@ mod known_hosts;
 pub(crate) mod store;
 mod timestamp;
 
+use crate::printable;
+
 pub use authorized::{AuthorizedDevice, AuthorizedDevices};
 pub use known_hosts::{KnownHost, KnownHosts};
 pub use timestamp::Timestamp;
@@ -25,10 +27,7 @@ const MAX_PEER_NAME: usize = 64;
 /// characters removed, at most [`MAX_PEER_NAME`] characters. It remains a
 /// label: trust never depends on it.
 pub fn clean_peer_name(name: &str) -> String {
-    name.chars()
-        .filter(|c| !c.is_control())
-        .take(MAX_PEER_NAME)
-        .collect()
+    printable::clean(name, MAX_PEER_NAME)
 }
 
 /// `#[serde(with = ...)]` for a [`Fingerprint`] as its 64 hex characters.

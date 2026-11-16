@@ -14,6 +14,7 @@ use super::super::ports::{
     ViewerLauncher, WakeOnLan,
 };
 use super::Controller;
+use crate::desktop;
 use crate::text;
 use crate::transfer::{TransferCommand, TransferEvent};
 
@@ -77,7 +78,13 @@ impl<
         self.command_viewer(viewer, command);
     }
 
+    /// Opens the folder of received files. It comes from a viewer's stdout,
+    /// so only a folder of this PC is opened, never a network path.
     pub(super) fn open_folder(&mut self, folder: &Path) {
+        if !desktop::is_local_folder(folder) {
+            self.state.files_notice = Some(text::folder_not_opened(text::FOLDER_NOT_LOCAL));
+            return;
+        }
         self.state.files_notice = self
             .desktop
             .open_folder(folder)

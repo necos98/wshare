@@ -16,6 +16,11 @@ use tokio::task::AbortHandle;
 use super::events::{Outcome, TransferEvent, TransferInfo, TransferObserver};
 use super::registry::{Registry, Stage, Transfer};
 use super::streams::StreamError;
+use crate::printable;
+
+/// Longest reason text kept from the other PC, in characters: a reason is a
+/// short sentence for people.
+pub const MAX_PEER_REASON_CHARS: usize = 256;
 
 /// What the settings and permissions of the session allow, asked at the
 /// moment it matters (they may change while the session lasts).
@@ -141,6 +146,7 @@ impl Shared {
 
     /// The other PC refused or failed `id`.
     pub fn failed_by_peer(&self, id: TransferId, reason: TransferError) {
+        let reason = clean_peer_reason(reason);
         let offered = matches!(
             self.registry().transfers.get(&id).map(|t| &t.stage),
             Some(Stage::Offered(_))
@@ -170,6 +176,17 @@ impl Shared {
             registry.release(receiving.plan().roots());
         }
         Some(transfer)
+    }
+}
+
+/// A reason the other PC sent, made safe to keep, show and print: its text
+/// without control characters, at most [`MAX_PEER_REASON_CHARS`] long.
+fn clean_peer_reason(reason: TransferError) -> TransferError {
+    match reason {
+        TransferError::Failed(detail) => {
+            TransferError::Failed(printable::clean(&detail, MAX_PEER_REASON_CHARS))
+        }
+        other => other,
     }
 }
 

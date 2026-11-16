@@ -17,6 +17,7 @@ mod handshake;
 mod host;
 mod options;
 mod paths;
+mod printable;
 mod realtime;
 mod target;
 mod text;

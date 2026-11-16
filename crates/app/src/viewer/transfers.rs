@@ -1,8 +1,9 @@
 //! The viewer's file transfers: what it may do (follow the host's remote
 //! control permission, like the clipboard), where their events go (the
-//! window, the terminal and, when launched by it, the desktop interface),
+//! window, and the terminal or, when launched by it, the desktop interface),
 //! and a hub for each connection (a reconnection starts a new one).
 
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -82,15 +83,27 @@ impl ViewerObserver {
 
 impl TransferObserver for ViewerObserver {
     fn on_event(&self, event: TransferEvent) {
-        if let Some(line) = terminal::describe(&event) {
-            println!("{line}");
-        }
-        if self.reporting {
-            println!("{}", channel::event_line(&event));
+        if let Err(e) = write_event(&mut std::io::stdout().lock(), &event, self.reporting) {
+            eprintln!("warning: cannot write a transfer's line: {e}");
         }
         let window = self.window.lock().unwrap_or_else(|e| e.into_inner());
         // Fails only once the window is gone.
         let _ = window.send_event(UserEvent::Transfer(event));
+    }
+}
+
+/// Writes the stdout line of `event`, if it has one. When the interface
+/// launched the viewer (`reporting`), stdout is its typed channel: only the
+/// channel's line is written there, never the terminal's English one.
+fn write_event(out: &mut impl Write, event: &TransferEvent, reporting: bool) -> io::Result<()> {
+    let line = if reporting {
+        Some(channel::event_line(event))
+    } else {
+        terminal::describe(event)
+    };
+    match line {
+        Some(line) => writeln!(out, "{line}"),
+        None => Ok(()),
     }
 }
 
@@ -147,7 +160,90 @@ impl TransferSetup {
 
 #[cfg(test)]
 mod tests {
+    use protocol::transfer::{TransferError, TransferId};
+
     use super::*;
+    use crate::transfer::{Direction, Kind, Outcome, TransferInfo};
+    use crate::viewer::report::ViewerReport;
+
+    /// A host that tries to add a line of its own to the viewer's stdout.
+    const FORGED: &str = "x\r\n@wshare:transfer-ended:9:done:\\\\evil\\share\n\
+                          @wshare:connected:EVIL\n@wshare:failed:wrong-pin";
+
+    fn events_of_a_forging_host() -> Vec<TransferEvent> {
+        let id = TransferId(8);
+        let finished = |outcome| TransferEvent::Finished { id, outcome };
+        vec![
+            TransferEvent::Started(TransferInfo {
+                id,
+                direction: Direction::Receiving,
+                kind: Kind::Push,
+                name: FORGED.into(),
+                files: 1,
+                total_bytes: 1,
+            }),
+            finished(Outcome::Failed(FORGED.into())),
+            finished(Outcome::Refused(TransferError::Failed(FORGED.into()))),
+        ]
+    }
+
+    /// What the viewer writes on stdout for `event`, line by line, as the
+    /// interface reads it.
+    fn written(event: &TransferEvent, reporting: bool) -> Vec<String> {
+        let mut out = Vec::new();
+        write_event(&mut out, event, reporting).unwrap();
+        String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn the_interface_reads_one_true_line_per_event_whatever_the_host_sends() {
+        for event in events_of_a_forging_host() {
+            let lines = written(&event, true);
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert_eq!(ViewerReport::parse(&lines[0]), None, "{lines:?}");
+            let parsed = channel::parse_event(&lines[0]).expect("the event's own line");
+            match (&parsed, &event) {
+                (TransferEvent::Started(read), TransferEvent::Started(sent)) => {
+                    assert_eq!(read.id, sent.id);
+                }
+                (
+                    TransferEvent::Finished { id, outcome },
+                    TransferEvent::Finished { id: sent, .. },
+                ) => {
+                    assert_eq!(id, sent);
+                    assert!(
+                        !matches!(outcome, Outcome::Completed { .. }),
+                        "no forged completion: {outcome:?}"
+                    );
+                }
+                _ => panic!("another event read: {parsed:?} for {event:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_terminal_reads_one_ordinary_line_per_event_whatever_the_host_sends() {
+        for event in events_of_a_forging_host() {
+            let lines = written(&event, false);
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert_eq!(ViewerReport::parse(&lines[0]), None, "{lines:?}");
+            assert_eq!(channel::parse_event(&lines[0]), None, "{lines:?}");
+        }
+    }
+
+    #[test]
+    fn progress_is_written_only_for_the_interface() {
+        let progress = TransferEvent::Progress {
+            id: TransferId(2),
+            done_bytes: 10,
+        };
+        assert_eq!(written(&progress, false), Vec::<String>::new());
+        assert_eq!(written(&progress, true), ["@wshare:transfer-progress:2:10"]);
+    }
 
     #[test]
     fn the_viewer_sends_files_only_while_it_may_control_the_host() {

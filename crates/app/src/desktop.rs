@@ -5,7 +5,7 @@
 //! the dialog requires) so neither the viewer's window nor the interface
 //! stops while it is open; the answer comes back through a callback.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -45,6 +45,18 @@ pub fn choose(choice: Choice, title: &str, done: impl FnOnce(Vec<PathBuf>) + Sen
     if let Err(e) = spawned {
         eprintln!("warning: cannot open the file dialog: {e}");
     }
+}
+
+/// Whether `folder` is a folder of this PC: an absolute path on a drive
+/// letter (`C:\...`). Network (`\\server\share`), verbatim (`\\?\...`) and
+/// device (`\\.\...`) paths are not: Explorer would reach out to whoever
+/// the path names, with this user's credentials.
+pub fn is_local_folder(folder: &Path) -> bool {
+    let on_a_drive = matches!(
+        folder.components().next(),
+        Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_))
+    );
+    on_a_drive && folder.has_root()
 }
 
 /// Opens `folder` in Explorer.
@@ -130,5 +142,31 @@ unsafe fn file_system_path(item: &IShellItem) -> Result<PathBuf> {
         let path = name.to_string();
         CoTaskMemFree(Some(name.0.cast_const().cast()));
         Ok(PathBuf::from(path.context("a chosen path is not text")?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_folder_on_a_drive_of_this_pc_is_local() {
+        for local in [r"C:\in", r"D:\Ricevuti\Foto", r"c:\"] {
+            assert!(is_local_folder(Path::new(local)), "{local}");
+        }
+        for elsewhere in [
+            r"\\evil\share",
+            r"\\evil\share\in",
+            "//evil/share",
+            r"\\?\UNC\evil\share",
+            r"\\?\C:\in",
+            r"\\.\PhysicalDrive0",
+            "C:in",
+            r"\in",
+            "in",
+            "",
+        ] {
+            assert!(!is_local_folder(Path::new(elsewhere)), "{elsewhere}");
+        }
     }
 }

@@ -14,6 +14,9 @@
 //!   failure (101 is a panic). The code alone still names the causes that
 //!   carry no detail, e.g. when the process died before printing the line.
 
+// Line breaks would end a report early (a host picks its own name).
+use crate::printable::single_line;
+
 /// Environment variable that switches the status lines on (value
 /// [`REPORT_ENABLED`]); set by the desktop interface, never by terminals.
 pub const REPORT_ENV: &str = "WSHARE_REPORT";
@@ -222,13 +225,6 @@ impl ViewerReport {
 /// Whether the status lines are wanted, from the value of [`REPORT_ENV`].
 pub fn reporting_enabled(env: Option<&str>) -> bool {
     env == Some(REPORT_ENABLED)
-}
-
-/// Line breaks would end the report early (a host picks its own name).
-pub(super) fn single_line(text: &str) -> String {
-    text.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect()
 }
 
 #[cfg(test)]

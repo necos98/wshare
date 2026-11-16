@@ -172,10 +172,12 @@ mod tests {
     use net::Fingerprint;
     use pipeline::HostStats;
     use protocol::control::RejectReason;
+    use protocol::transfer::TransferId;
 
     use super::Output::{Stderr, Stdout};
     use super::*;
     use crate::host::{HostFailure, HostWarning, SessionFailure};
+    use crate::transfer::{Direction, Kind, Outcome, TransferEvent, TransferInfo};
     use crate::trust::{AuthorizedDevice, Timestamp};
 
     fn address() -> SocketAddr {
@@ -306,5 +308,30 @@ mod tests {
             })
             .is_empty()
         );
+    }
+
+    #[test]
+    fn a_transfer_of_the_other_pc_cannot_add_lines() {
+        let forged = "x\r\n@wshare:transfer-ended:4:done:\\\\evil\\share";
+        let id = TransferId(4);
+        let events = [
+            TransferEvent::Started(TransferInfo {
+                id,
+                direction: Direction::Receiving,
+                kind: Kind::Push,
+                name: forged.into(),
+                files: 1,
+                total_bytes: 1,
+            }),
+            TransferEvent::Finished {
+                id,
+                outcome: Outcome::Failed(forged.into()),
+            },
+        ];
+        for event in events {
+            let lines = texts(HostEvent::Transfer(event));
+            assert_eq!(lines.len(), 1);
+            assert!(!lines[0].contains(char::is_control), "{:?}", lines[0]);
+        }
     }
 }

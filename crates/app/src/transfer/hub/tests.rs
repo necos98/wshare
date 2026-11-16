@@ -10,11 +10,12 @@ use std::time::Duration;
 
 use net::{ControlSender, HostEndpoint, Identity};
 use protocol::control::{ControlMessage, PROTOCOL_VERSION};
-use protocol::transfer::{TransferError, TransferMessage};
+use protocol::transfer::{FileEntry, TransferError, TransferId, TransferMessage};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::*;
 use crate::transfer::events::{Direction, Outcome};
+use crate::transfer::shared::MAX_PEER_REASON_CHARS;
 use crate::transfer::{Chunk, TransferInfo, listing};
 
 const WAIT: Duration = Duration::from_secs(20);
@@ -511,4 +512,34 @@ async fn messages_naming_unknown_transfers_are_ignored() {
     pair.host.collect();
     assert!(pair.host.seen.is_empty());
     assert!(pair.host.out.try_recv().is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failure_told_by_the_other_pc_is_kept_on_one_short_line() {
+    let mut pair = pair(ALL, ALL).await;
+    // An id the host may pick (even), offered to the viewer, which accepts.
+    let id = TransferId(8);
+    pair.viewer.hub().on_message(TransferMessage::Offer {
+        id,
+        entries: vec![FileEntry::file("a.txt", 1)],
+    });
+    pair.run_until(|_, viewer| viewer.started().is_some()).await;
+    let forged = format!(
+        "x\r\n@wshare:transfer-ended:8:done:\\\\evil\\share\u{1b}{}",
+        "y".repeat(10 * MAX_PEER_REASON_CHARS)
+    );
+    pair.viewer.hub().on_message(TransferMessage::Failed {
+        id,
+        reason: TransferError::Failed(forged),
+    });
+    pair.run_until(|_, viewer| viewer.outcome().is_some()).await;
+    let Some(Outcome::Failed(detail)) = pair.viewer.outcome() else {
+        panic!("not a failure: {:?}", pair.viewer.outcome());
+    };
+    assert!(
+        !detail.contains(char::is_control),
+        "a control character is left"
+    );
+    assert_eq!(detail.chars().count(), MAX_PEER_REASON_CHARS);
+    assert!(detail.starts_with("x@wshare:transfer-ended:8:done:"));
 }

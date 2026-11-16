@@ -37,6 +37,8 @@ pub const SETTING_DOWNLOADS_PICK: &str = "Sfoglia…";
 pub const DOWNLOADS_PICK_TITLE: &str = "Scegli dove salvare i file ricevuti";
 pub const NO_VIEWER_TO_SEND_TO: &str = "Nessun visualizzatore connesso a cui inviare i file.";
 
+pub const FOLDER_NOT_LOCAL: &str = "non è una cartella di questo computer";
+
 pub fn folder_not_opened(detail: &str) -> String {
     format!("Impossibile aprire la cartella: {detail}")
 }

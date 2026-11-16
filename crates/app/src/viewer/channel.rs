@@ -22,7 +22,8 @@ use std::path::PathBuf;
 use protocol::transfer::{TransferError, TransferId};
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::report::{LINE_PREFIX, SEPARATOR, single_line};
+use super::report::{LINE_PREFIX, SEPARATOR};
+use crate::printable::single_line;
 use crate::transfer::{Direction, Kind, Outcome, TransferCommand, TransferEvent, TransferInfo};
 
 const STARTED: &str = "transfer-started";

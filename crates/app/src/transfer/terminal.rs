@@ -1,8 +1,11 @@
 //! The terminal's line for a transfer event (`wshare host`, `wshare view`):
 //! English, like the rest of the command line. Progress is not printed.
+//! Names and reasons may come from the other PC: they are kept on the line
+//! (see `crate::printable`).
 
 use super::events::{Direction, Kind, Outcome, TransferEvent, TransferInfo};
 use super::shared::describe as reason_text;
+use crate::printable::single_line;
 
 /// Bytes in a megabyte, as the terminal counts them.
 const MEGABYTE: f64 = 1e6;
@@ -17,7 +20,8 @@ pub fn describe(event: &TransferEvent) -> Option<String> {
                 Outcome::Completed {
                     folder: Some(folder),
                 } => {
-                    format!("Transfer {id}: done, in {}", folder.display())
+                    let folder = single_line(&folder.display().to_string());
+                    format!("Transfer {id}: done, in {folder}")
                 }
                 Outcome::Completed { folder: None } => format!("Transfer {id}: done"),
                 Outcome::Cancelled { by_peer: false } => format!("Transfer {id}: cancelled"),
@@ -25,9 +29,12 @@ pub fn describe(event: &TransferEvent) -> Option<String> {
                     format!("Transfer {id}: cancelled on the other computer")
                 }
                 Outcome::Refused(reason) => {
-                    format!("Transfer {id}: refused ({})", reason_text(reason))
+                    let reason = single_line(&reason_text(reason));
+                    format!("Transfer {id}: refused ({reason})")
                 }
-                Outcome::Failed(detail) => format!("Transfer {id}: failed ({detail})"),
+                Outcome::Failed(detail) => {
+                    format!("Transfer {id}: failed ({})", single_line(detail))
+                }
                 Outcome::Interrupted => format!("Transfer {id}: interrupted, the session ended"),
             })
         }
@@ -44,7 +51,7 @@ fn started(info: &TransferInfo) -> String {
     format!(
         "Transfer {}: {verb} \"{}\" ({} file(s), {:.1} MB)",
         info.id.0,
-        info.name,
+        single_line(&info.name),
         info.files,
         info.total_bytes as f64 / MEGABYTE
     )
@@ -86,5 +93,29 @@ mod tests {
         );
         assert!(ended(Outcome::Refused(TransferError::NotAllowed)).contains("not allowed"));
         assert!(ended(Outcome::Interrupted).contains("interrupted"));
+    }
+
+    #[test]
+    fn what_the_other_pc_chose_stays_on_one_line() {
+        let forged = "x\r\n@wshare:transfer-ended:9:done:\\\\evil\\share";
+        let info = TransferInfo {
+            id: TransferId(9),
+            direction: Direction::Receiving,
+            kind: Kind::Push,
+            name: forged.into(),
+            files: 1,
+            total_bytes: 1,
+        };
+        let id = TransferId(9);
+        let ended = |outcome| describe(&TransferEvent::Finished { id, outcome }).unwrap();
+        let lines = [
+            describe(&TransferEvent::Started(info)).unwrap(),
+            ended(Outcome::Failed(forged.into())),
+            ended(Outcome::Refused(TransferError::Failed(forged.into()))),
+        ];
+        for line in lines {
+            assert!(!line.contains(char::is_control), "{line:?}");
+            assert!(line.starts_with("Transfer 9: "), "{line:?}");
+        }
     }
 }

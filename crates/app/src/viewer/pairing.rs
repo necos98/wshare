@@ -5,11 +5,13 @@
 //! None of this is required to connect: a missing or damaged file only
 //! means the PIN is asked, so problems are printed as warnings.
 
+use std::net::SocketAddr;
+
 use discovery::computer_name;
 use net::{Fingerprint, Identity};
 
 use crate::paths;
-use crate::trust::{KnownHost, KnownHosts, clean_peer_name};
+use crate::trust::{KnownHost, KnownHosts, Timestamp, clean_peer_name};
 
 pub(super) struct Pairing {
     /// `None`: no certificate could be loaded; hosts then always ask for
@@ -71,17 +73,24 @@ impl Pairing {
         self.expected.as_ref().map(|host| host.fingerprint)
     }
 
-    /// Remembers the host that just welcomed us, so the next connection
+    /// Remembers the host that just welcomed us at `address`, so the next connection
     /// pins it and needs no PIN. Only with a certificate: without one the
     /// host cannot recognise us anyway.
-    pub(super) fn remember(&mut self, fingerprint: Fingerprint, host_name: &str) {
+    pub(super) fn remember(
+        &mut self,
+        fingerprint: Fingerprint,
+        host_name: &str,
+        address: SocketAddr,
+    ) {
         if self.identity.is_none() {
             return;
         }
         let Some(known_hosts) = &mut self.known_hosts else {
             return;
         };
-        if let Err(e) = known_hosts.remember(fingerprint, &clean_peer_name(host_name)) {
+        let name = clean_peer_name(host_name);
+        if let Err(e) = known_hosts.record_connection(fingerprint, &name, address, Timestamp::now())
+        {
             warn(&format!(
                 "cannot remember this host, the PIN will be asked next time: {e:#}"
             ));

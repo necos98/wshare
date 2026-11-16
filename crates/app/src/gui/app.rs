@@ -14,8 +14,10 @@ use super::sharing::HostService;
 use super::system_settings::SystemSettings;
 use super::tray::Tray;
 use super::view::{self, Drafts};
+use super::wake_on_lan::UdpWakeOnLan;
 
-type AppController = Controller<HostService, ProcessLauncher, KnownHostsFile, SystemSettings>;
+type AppController =
+    Controller<HostService, ProcessLauncher, KnownHostsFile, SystemSettings, UdpWakeOnLan>;
 
 /// What the app shows outside its window; each part is absent when Windows
 /// would not create it.

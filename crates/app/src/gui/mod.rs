@@ -7,6 +7,9 @@
 //!   (viewer child processes), `discovery_source`, `known_hosts_file` and
 //!   `system_settings` (settings file, `autostart` registry entry,
 //!   monitors).
+//! - `host_row` builds the list of computers (online ones and the known
+//!   ones that are not, favorites first); `wake_on_lan` sends the magic
+//!   packet that turns one on.
 //! - `view` draws the state and returns intents (`pairing_view` the parts
 //!   about remembered PCs, `settings_view` the settings page, `approval_view`
 //!   the request of a viewer to be accepted, whose state is `approval`); `app` is the
@@ -30,6 +33,7 @@ mod balloon;
 mod controller;
 mod discovery_source;
 mod elapsed;
+mod host_row;
 mod icon;
 mod known_hosts_file;
 mod launcher;
@@ -50,6 +54,7 @@ mod system_settings;
 mod tray;
 mod view;
 mod viewer_processes;
+mod wake_on_lan;
 
 use std::sync::Arc;
 use std::sync::mpsc::channel;
@@ -103,6 +108,7 @@ pub fn run(gui: GuiOptions) -> Result<()> {
                 launcher::ProcessLauncher::new(inbox)?,
                 known_hosts_file::KnownHostsFile,
                 system_settings::SystemSettings,
+                wake_on_lan::UdpWakeOnLan,
             );
             controller.start_up();
             Ok(Box::new(WshareApp::new(

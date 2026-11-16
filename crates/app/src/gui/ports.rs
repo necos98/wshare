@@ -1,13 +1,13 @@
 //! Boundaries between the interface logic and the outside world. Real
-//! implementations live in `sharing`, `launcher`, `discovery_source`,
+//! implementations live in `sharing`, `launcher`, `discovery_source`, `wake_on_lan`,
 //! `known_hosts_file` and `system_settings`; tests use fakes.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use anyhow::Result;
-use discovery::DiscoveryEvent;
+use discovery::{DiscoveryEvent, MacAddress};
 use net::Fingerprint;
 
 use crate::access_mode::AccessMode;
@@ -140,6 +140,15 @@ pub trait KnownHostsStore {
     fn load(&self) -> (Vec<KnownHost>, Option<String>);
     /// Forgets a host: it is neither pinned nor connected to without a PIN.
     fn forget(&self, fingerprint: &Fingerprint) -> Result<()>;
+    /// Pins a host to the top of the list, or takes it off.
+    fn set_favorite(&self, fingerprint: &Fingerprint, favorite: bool) -> Result<()>;
+    /// Stores the address and MAC a known host announces now, if they differ.
+    fn note_announced(
+        &self,
+        fingerprint: &Fingerprint,
+        address: Option<SocketAddr>,
+        mac: Option<MacAddress>,
+    ) -> Result<()>;
 }
 
 /// A monitor of this PC the user can share.
@@ -163,4 +172,11 @@ pub trait SettingsBackend {
     fn set_autostart(&self, enabled: bool, minimized: bool) -> Result<()>;
     /// The monitors that can be captured now.
     fn monitors(&self) -> Result<Vec<MonitorChoice>>;
+}
+
+/// Wakes a computer that is switched off (Wake-on-LAN).
+pub trait WakeOnLan {
+    /// Sends the wake-up signal for `mac`. `last_address` is where the
+    /// computer was last seen: its network is also reached directly.
+    fn wake(&self, mac: MacAddress, last_address: Option<IpAddr>) -> Result<()>;
 }

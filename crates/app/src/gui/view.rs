@@ -11,7 +11,8 @@ use crate::trust::Timestamp;
 
 use super::approval_view;
 use super::controller::Intent;
-use super::model::{GuiState, HostRow, Sharing, ViewerSession, ViewerStatus, format_pin};
+use super::host_row::HostRow;
+use super::model::{GuiState, Sharing, ViewerSession, ViewerStatus, format_pin};
 use super::pairing_view::{self, RememberedAction};
 use super::settings_state::Page;
 use super::settings_view;
@@ -187,7 +188,7 @@ fn network_section(ui: &mut Ui, state: &GuiState, drafts: &mut Drafts, intents: 
                 .size(16.0)
                 .strong(),
         );
-        if rows.is_empty() && state.discovery_error.is_none() {
+        if rows.iter().all(|row| !row.online) && state.discovery_error.is_none() {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.spinner());
         }
     });
@@ -239,8 +240,9 @@ fn network_section(ui: &mut Ui, state: &GuiState, drafts: &mut Drafts, intents: 
     });
 }
 
-/// Under the selected computer: `Connetti` (and `Dimentica`) if it
-/// remembers this PC, else the PIN form.
+/// Under the selected computer: `Connetti` (and `Rimuovi`) if it
+/// remembers this PC, else the PIN form; then what a known computer allows
+/// (favorite, Wake-on-LAN).
 fn selected_host_form(
     ui: &mut Ui,
     row: &HostRow,
@@ -268,31 +270,43 @@ fn selected_host_form(
             }
             None => {}
         }
-        return;
+    } else {
+        let focus = std::mem::take(&mut drafts.focus_host_pin);
+        if pin_form(ui, &mut drafts.host_pin, None, error, focus) {
+            drafts.last_form = Form::Host;
+            intents.push(connect(std::mem::take(&mut drafts.host_pin)));
+        }
+        if pairing_view::ask_access(ui) {
+            drafts.last_form = Form::Host;
+            intents.push(Intent::RequestAccess { id: row.id.clone() });
+        }
     }
-    let focus = std::mem::take(&mut drafts.focus_host_pin);
-    if pin_form(ui, &mut drafts.host_pin, None, error, focus) {
+    if row.known
+        && let Some(intent) = pairing_view::known_actions(ui, row, state.wake_notice.as_deref())
+    {
         drafts.last_form = Form::Host;
-        intents.push(connect(std::mem::take(&mut drafts.host_pin)));
-    }
-    if pairing_view::ask_access(ui) {
-        drafts.last_form = Form::Host;
-        intents.push(Intent::RequestAccess { id: row.id.clone() });
+        intents.push(intent);
     }
 }
 
 /// One computer of the list; clickable when it can be connected to.
 fn host_row(ui: &mut Ui, row: &HostRow, selected: bool) -> Response {
-    let enabled = row.connectable();
+    let enabled = row.selectable();
     // Reserve the background so it is painted below the text.
     let background = ui.painter().add(egui::Shape::Noop);
     let inner = Frame::NONE
         .inner_margin(Margin::symmetric(8, 6))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            let name = RichText::new(&row.name).strong();
-            ui.label(if enabled { name } else { name.weak() });
-            ui.label(RichText::new(row.details()).size(DETAIL_SIZE).weak());
+            let title = if row.favorite {
+                format!("{} {}", text::FAVORITE_MARK, row.name)
+            } else {
+                row.name.clone()
+            };
+            let name = RichText::new(title).strong();
+            ui.label(if row.online { name } else { name.weak() });
+            let details = row.details(Timestamp::now());
+            ui.label(RichText::new(details).size(DETAIL_SIZE).weak());
         });
     let rect = inner.response.rect;
     let sense = if enabled {

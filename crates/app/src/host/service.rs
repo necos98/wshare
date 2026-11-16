@@ -21,6 +21,7 @@ use net::{HostEndpoint, Identity};
 use protocol::control::PROTOCOL_VERSION;
 
 use super::accept::accept_viewers;
+use super::adapter_mac;
 use super::approvals::{APPROVAL_TIMEOUT, Approvals};
 use super::devices::Devices;
 use super::events::EventSink;
@@ -275,6 +276,7 @@ impl Host {
             protocol_version: PROTOCOL_VERSION,
             width: monitor.width,
             height: monitor.height,
+            mac: adapter_mac::primary_mac(),
         };
         let (advertiser, announcement_error) = match Advertiser::start(&announcement) {
             Ok(advertiser) => (Some(advertiser), None),

@@ -6,13 +6,15 @@ use crate::host::HostEvent;
 use crate::text;
 
 use super::super::notifications;
-use super::super::ports::{KnownHostsStore, SettingsBackend, SharingService, ViewerLauncher};
+use super::super::ports::{
+    KnownHostsStore, SettingsBackend, SharingService, ViewerLauncher, WakeOnLan,
+};
 use super::super::settings::Settings;
 use super::super::settings_state::Page;
 use super::Controller;
 
-impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBackend>
-    Controller<S, L, K, B>
+impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBackend, W: WakeOnLan>
+    Controller<S, L, K, B, W>
 {
     /// Work to do once the window exists: keeps the Windows start-up entry
     /// pointing at this executable (only if the user turned it on) and

@@ -125,7 +125,7 @@ pub fn run(options: ViewOptions) -> Result<()> {
     } = connected;
     // Before the "Connected" line: the desktop interface re-reads the known
     // hosts when it sees that line.
-    pairing.remember(fingerprint, &host_name);
+    pairing.remember(fingerprint, &host_name, addr);
     if reporting {
         println!(
             "{}",

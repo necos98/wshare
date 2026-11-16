@@ -34,6 +34,7 @@ fn advertise_then_browse_then_lost() {
         protocol_version: 1,
         width: 1920,
         height: 1080,
+        mac: "aa:bb:cc:00:11:22".parse().ok(),
     };
 
     let mut browser = Browser::start().expect("browser");

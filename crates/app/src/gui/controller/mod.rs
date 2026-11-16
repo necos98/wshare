@@ -1,6 +1,7 @@
 //! Applies user intents and background events to the [`GuiState`],
 //! driving the outside world through the ports. No direct I/O.
 
+use discovery::DiscoveryEvent;
 use net::Fingerprint;
 
 use crate::host::{HostEvent, HostFailure};
@@ -8,10 +9,11 @@ use crate::options::DEFAULT_PORT;
 use crate::target::{Target, parse_target};
 use crate::text;
 
-use super::model::{GuiState, HostRow, ViewerId, ViewerSession, ViewerStatus, ViewerUpdate};
+use super::host_row::HostRow;
+use super::model::{GuiState, ViewerId, ViewerSession, ViewerStatus, ViewerUpdate};
 use super::ports::{
     AppEvent, KnownHostsStore, LaunchRequest, PendingStop, SettingsBackend, SharingControl,
-    SharingService, TrayAction, ViewerLauncher,
+    SharingService, TrayAction, ViewerLauncher, WakeOnLan,
 };
 use super::settings::Settings;
 use super::settings_state::Page;
@@ -47,6 +49,15 @@ pub enum Intent {
     ConnectAddress {
         address: String,
         pin: String,
+    },
+    /// Wakes a known computer that is off (Wake-on-LAN).
+    WakeHost {
+        id: String,
+    },
+    /// Pins a known computer to the top of the list, or takes it off.
+    SetFavorite {
+        id: String,
+        favorite: bool,
     },
     /// This PC stops remembering a listed host.
     ForgetHost {
@@ -88,13 +99,19 @@ pub fn close_decision(sharing_enabled: bool) -> WindowCommand {
     }
 }
 
-pub struct Controller<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBackend>
-{
+pub struct Controller<
+    S: SharingService,
+    L: ViewerLauncher,
+    K: KnownHostsStore,
+    B: SettingsBackend,
+    W: WakeOnLan,
+> {
     state: GuiState,
     service: S,
     launcher: L,
     known_hosts: K,
     backend: B,
+    wake: W,
     sharing: Option<Box<dyn SharingControl>>,
     /// A service switched off and still stopping in the background.
     stopping: Option<Box<dyn PendingStop>>,
@@ -105,10 +122,10 @@ pub struct Controller<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, 
     restart_pending: bool,
 }
 
-impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBackend>
-    Controller<S, L, K, B>
+impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBackend, W: WakeOnLan>
+    Controller<S, L, K, B, W>
 {
-    pub fn new(service: S, launcher: L, known_hosts: K, backend: B) -> Self {
+    pub fn new(service: S, launcher: L, known_hosts: K, backend: B, wake: W) -> Self {
         let (settings, warning) = backend.load();
         let mut state = GuiState::default();
         state.sharing.input_allowed = settings.allow_input;
@@ -120,6 +137,7 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBacken
             launcher,
             known_hosts,
             backend,
+            wake,
             sharing: None,
             stopping: None,
             generation: 0,
@@ -165,11 +183,14 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBacken
             Intent::SelectHost(id) => {
                 self.state.selected_host = id;
                 self.state.connect_error = None;
+                self.state.wake_notice = None;
             }
             Intent::ConnectHost { id, pin } => self.connect_host(&id, &pin),
             Intent::RequestAccess { id } => self.request_access(&id),
             Intent::ConnectAddress { address, pin } => self.connect_address(&address, &pin),
             Intent::ForgetHost { id } => self.forget_host(&id),
+            Intent::WakeHost { id } => self.wake_host(&id),
+            Intent::SetFavorite { id, favorite } => self.set_favorite(&id, favorite),
             Intent::DismissViewer(id) => self.state.viewers.retain(|v| v.id != id),
             Intent::CancelViewer(id) => self.cancel_viewer(id),
             Intent::ShowWindow => return Some(WindowCommand::Show),
@@ -217,7 +238,14 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBacken
             }
             AppEvent::Discovery(event) => {
                 self.state.discovery_error = None;
+                let announced = match &event {
+                    DiscoveryEvent::Found(host) => Some(host.clone()),
+                    DiscoveryEvent::Lost { .. } => None,
+                };
                 self.state.apply_discovery(event);
+                if let Some(host) = announced {
+                    self.remember_announcement(&host);
+                }
             }
             AppEvent::DiscoveryFailed(error) => {
                 self.state.discovery_error = Some(text::discovery_unavailable(&error));
@@ -225,9 +253,14 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBacken
             AppEvent::Viewer { id, update } => {
                 let connected = update == ViewerUpdate::Connected;
                 self.state.apply_viewer_update(id, update);
-                // The viewer process has just remembered the host.
+                // The viewer process has just remembered the host; what the
+                // host announces (its MAC) can be stored with it now.
                 if connected {
                     self.reload_known_hosts();
+                    let listed = self.state.viewer_mut(id).and_then(|v| v.host_id.clone());
+                    if let Some(host_id) = listed {
+                        self.remember_announcement_of(&host_id);
+                    }
                 }
             }
             AppEvent::Tray(action) => {
@@ -386,6 +419,7 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBacken
             status,
         });
         self.state.selected_host = None;
+        self.state.wake_notice = None;
         self.state.connect_error = None;
     }
 
@@ -413,6 +447,10 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBacken
         self.state.connect_error = forgotten
             .err()
             .map(|e| text::forget_failed(&format!("{e:#}")));
+        // A computer that was not online is gone from the list altogether.
+        if self.state.host_row(id).is_none() {
+            self.state.selected_host = None;
+        }
     }
 
     fn reload_known_hosts(&mut self) {
@@ -439,6 +477,9 @@ mod approval_tests;
 mod connection_tests;
 #[cfg(test)]
 mod fakes;
+mod known;
+#[cfg(test)]
+mod known_tests;
 #[cfg(test)]
 mod pairing_tests;
 mod preferences;

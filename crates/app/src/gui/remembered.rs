@@ -22,6 +22,17 @@ impl RememberedHosts {
         self.warning = warning;
     }
 
+    /// Everything this PC knows, in the order the store gave it.
+    pub fn all(&self) -> &[KnownHost] {
+        &self.known
+    }
+
+    /// Reports a problem with keeping the list up to date; it stays until
+    /// the next [`Self::set`].
+    pub fn warn(&mut self, message: String) {
+        self.warning = Some(message);
+    }
+
     pub fn warning(&self) -> Option<&str> {
         self.warning.as_deref()
     }
@@ -54,10 +65,7 @@ pub(crate) mod tests {
     use super::*;
 
     pub(crate) fn known(byte: u8, name: &str) -> KnownHost {
-        KnownHost {
-            fingerprint: Fingerprint([byte; 32]),
-            name: name.into(),
-        }
+        KnownHost::new(Fingerprint([byte; 32]), name)
     }
 
     #[test]

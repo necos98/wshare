@@ -3353,6 +3353,7 @@ dependencies = [
  "discovery",
  "eframe",
  "gpu",
+ "if-addrs",
  "input",
  "net",
  "pipeline",

@@ -5,6 +5,7 @@
 //! API; their bodies are implemented in this module's private submodules:
 //!
 //! - `service`: the service thread and runtime, setup, stop.
+//! - `adapter_mac`: the MAC announced on the LAN, for Wake-on-LAN.
 //! - `accept`: every connection on its own task until stopped.
 //! - `sessions`: the connections being admitted and the viewers, within
 //!   their limits (one viewer at a time).
@@ -32,6 +33,7 @@
 //! - `console` + `interrupt`: the CLI front-end (`run`).
 
 mod accept;
+mod adapter_mac;
 mod admission;
 mod approval_limiter;
 mod approvals;

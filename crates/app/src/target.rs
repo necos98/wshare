@@ -121,6 +121,7 @@ mod tests {
                 protocol_version: 1,
                 width: 1920,
                 height: 1080,
+                mac: None,
             },
             vec!["192.168.1.10".parse().unwrap()],
         )

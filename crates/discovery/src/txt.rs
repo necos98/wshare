@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::MacAddress;
+
 /// TXT key: stable host id.
 const KEY_ID: &str = "id";
 /// TXT key: display name (UTF-8).
@@ -13,6 +15,8 @@ const KEY_VERSION: &str = "v";
 const KEY_WIDTH: &str = "w";
 /// TXT key: primary screen height.
 const KEY_HEIGHT: &str = "h";
+/// TXT key: hardware address of the announcing interface (optional, for Wake-on-LAN).
+const KEY_MAC: &str = "m";
 
 /// Maximum length of a host id (ASCII alphanumeric).
 pub(crate) const MAX_ID_LEN: usize = 32;
@@ -35,6 +39,9 @@ pub struct HostAnnouncement {
     pub width: u32,
     /// Primary screen height in pixels (informational).
     pub height: u32,
+    /// Hardware address of the interface the host announces on, so a viewer can wake it
+    /// with Wake-on-LAN. `None` when unknown or announced by an older version.
+    pub mac: Option<MacAddress>,
 }
 
 /// Why a TXT record could not be decoded into a [`HostAnnouncement`].
@@ -96,7 +103,7 @@ impl HostAnnouncement {
     /// Encodes everything but the port (which goes in SRV) as TXT properties.
     /// The display name is truncated to fit in a single TXT string.
     pub fn to_txt(&self) -> HashMap<String, String> {
-        HashMap::from([
+        let mut txt = HashMap::from([
             (KEY_ID.to_owned(), self.id.clone()),
             (
                 KEY_NAME.to_owned(),
@@ -105,11 +112,16 @@ impl HostAnnouncement {
             (KEY_VERSION.to_owned(), self.protocol_version.to_string()),
             (KEY_WIDTH.to_owned(), self.width.to_string()),
             (KEY_HEIGHT.to_owned(), self.height.to_string()),
-        ])
+        ]);
+        if let Some(mac) = self.mac {
+            txt.insert(KEY_MAC.to_owned(), mac.to_string());
+        }
+        txt
     }
 
     /// Decodes TXT properties plus the SRV `port`. Unknown keys are ignored (forward
-    /// compatible); a different `protocol_version` is not an error.
+    /// compatible); a different `protocol_version` is not an error. The MAC is optional: when
+    /// absent (older hosts) or malformed the host is still usable, only not wakeable.
     pub fn from_txt(port: u16, txt: &HashMap<String, String>) -> Result<Self, TxtError> {
         let get = |key: &'static str| {
             txt.get(key)
@@ -130,6 +142,7 @@ impl HostAnnouncement {
             protocol_version: parse(KEY_VERSION, get(KEY_VERSION)?)?,
             width: parse(KEY_WIDTH, get(KEY_WIDTH)?)?,
             height: parse(KEY_HEIGHT, get(KEY_HEIGHT)?)?,
+            mac: txt.get(KEY_MAC).and_then(|mac| mac.parse().ok()),
         })
     }
 }
@@ -150,12 +163,48 @@ pub(crate) fn sample(id: &str, name: &str) -> HostAnnouncement {
         protocol_version: 1,
         width: 2560,
         height: 1440,
+        mac: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_mac_travels_in_the_txt_record() {
+        let mut a = sample("a1b2c3d4", "Desk");
+        a.mac = "aa:bb:cc:00:11:22".parse().ok();
+        let txt = a.to_txt();
+        assert_eq!(
+            txt.get(KEY_MAC).map(String::as_str),
+            Some("aa:bb:cc:00:11:22")
+        );
+        assert_eq!(HostAnnouncement::from_txt(4433, &txt), Ok(a));
+    }
+
+    #[test]
+    fn a_record_without_mac_is_still_valid_and_carries_none() {
+        let a = sample("abc", "x");
+        let txt = a.to_txt();
+        assert!(
+            !txt.contains_key(KEY_MAC),
+            "nothing announced without a MAC"
+        );
+        // A record as written by a version that has no such key.
+        let decoded = HostAnnouncement::from_txt(4433, &txt).unwrap();
+        assert_eq!(decoded.mac, None);
+    }
+
+    #[test]
+    fn a_malformed_mac_is_ignored_not_fatal() {
+        for bad in ["", "nope", "00:00:00:00:00:00", "aa:bb:cc:00:11:22:33"] {
+            let mut txt = sample("abc", "x").to_txt();
+            txt.insert(KEY_MAC.into(), bad.into());
+            let decoded = HostAnnouncement::from_txt(4433, &txt).expect(bad);
+            assert_eq!(decoded.mac, None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn roundtrip() {

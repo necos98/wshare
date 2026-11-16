@@ -2,11 +2,13 @@
 //! the clicks of the window go to the service, which is the only one that
 //! lets a viewer in.
 
-use super::super::ports::{KnownHostsStore, SettingsBackend, SharingService, ViewerLauncher};
+use super::super::ports::{
+    KnownHostsStore, SettingsBackend, SharingService, ViewerLauncher, WakeOnLan,
+};
 use super::Controller;
 
-impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBackend>
-    Controller<S, L, K, B>
+impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBackend, W: WakeOnLan>
+    Controller<S, L, K, B, W>
 {
     /// Passes the click to the service and takes the request down. The
     /// service ignores an answer to a request that ended meanwhile.

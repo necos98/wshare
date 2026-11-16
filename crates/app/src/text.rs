@@ -25,7 +25,7 @@ pub fn viewer_failure(cause: &FailureCause) -> String {
         ),
         FailureCause::HostChanged => {
             "L'identità del computer è cambiata: potrebbe essere un altro computer. Se è stato \
-             reinstallato, usa «Dimentica» e connettiti di nuovo con il PIN."
+             reinstallato, usa «Rimuovi» e connettiti di nuovo con il PIN."
                 .to_string()
         }
         FailureCause::Unreachable => {
@@ -209,6 +209,49 @@ pub fn host_details(
     }
 }
 
+/// Second line of a known computer that does not announce itself now.
+pub fn host_offline_details(address: Option<std::net::SocketAddr>) -> String {
+    match address {
+        Some(address) => format!("{HOST_OFFLINE} · ultimo indirizzo {address}"),
+        None => format!("{HOST_OFFLINE} · nessun indirizzo noto"),
+    }
+}
+
+pub const HOST_OFFLINE: &str = "Non in rete";
+
+/// `when` is a relative time such as "ieri".
+pub fn host_last_connection(when: &str) -> String {
+    format!("ultima connessione {when}")
+}
+
+pub const FAVORITE: &str = "Preferito";
+pub const FAVORITE_MARK: &str = "⭐";
+pub const FAVORITE_HINT: &str = "I computer preferiti stanno in cima all'elenco.";
+pub const WAKE: &str = "Riattiva";
+pub const WAKE_HINT: &str = "Accende il computer con il Wake-on-LAN. Va attivato nel BIOS e \
+     nelle impostazioni della scheda di rete del computer da accendere.";
+pub const WAKE_NO_MAC: &str = "Per accenderlo serve il suo indirizzo MAC, che wshare impara \
+     collegandosi una volta mentre è acceso (con una versione di wshare recente).";
+
+pub fn wake_sent(name: &str) -> String {
+    format!(
+        "Segnale di accensione inviato a {name}. Può servire qualche decina di secondi; \
+         se non si accende, attiva il Wake-on-LAN nel BIOS e nella scheda di rete."
+    )
+}
+
+pub fn wake_failed(name: &str, detail: &str) -> String {
+    format!("Impossibile inviare il segnale di accensione a {name}: {detail}")
+}
+
+pub fn favorite_failed(detail: &str) -> String {
+    format!("Impossibile aggiornare i preferiti: {detail}")
+}
+
+pub fn known_host_update_failed(detail: &str) -> String {
+    format!("Impossibile aggiornare l'indirizzo del computer memorizzato: {detail}")
+}
+
 pub fn viewer_connecting(label: &str) -> String {
     format!("Connessione a {label} in corso…")
 }
@@ -279,7 +322,7 @@ pub const DISCONNECT: &str = "Disconnetti";
 pub const ALLOW_REMOTE_CONTROL: &str = "Consenti controllo remoto (mouse e tastiera)";
 pub const INPUT_BLOCKED: &str =
     "Input bloccato da Windows (finestra amministratore o schermata protetta).";
-pub const COMPUTERS_ON_NETWORK: &str = "Computer in rete";
+pub const COMPUTERS_ON_NETWORK: &str = "Computer in rete e recenti";
 pub const SEARCHING: &str = "Ricerca in corso… Sull'altro computer apri wshare e attiva la \
      condivisione. Se non compare, controlla che il firewall lasci passare mDNS (UDP 5353) su \
      entrambi i computer, oppure usa «Connetti a un indirizzo IP» qui sotto.";
@@ -291,7 +334,6 @@ pub const AUTHORIZED_DEVICES: &str = "Dispositivi autorizzati";
 pub const AUTHORIZED_HINT: &str =
     "Si connettono senza PIN. Rimuovendoli, la prossima volta servirà il PIN.";
 pub const REMOVE: &str = "Rimuovi";
-pub const FORGET: &str = "Dimentica";
 pub const FORGET_HINT: &str = "La prossima volta servirà di nuovo il PIN.";
 
 pub fn remembered_unavailable(detail: &str) -> String {
@@ -540,7 +582,7 @@ mod tests {
             (
                 FailureCause::HostChanged,
                 "L'identità del computer è cambiata: potrebbe essere un altro computer. Se è \
-                 stato reinstallato, usa «Dimentica» e connettiti di nuovo con il PIN.",
+                 stato reinstallato, usa «Rimuovi» e connettiti di nuovo con il PIN.",
             ),
             (
                 FailureCause::Unreachable,
@@ -802,5 +844,22 @@ mod tests {
             viewer_failed("UFFICIO", "PIN errato."),
             "UFFICIO: PIN errato."
         );
+    }
+
+    #[test]
+    fn known_computers_and_wake_on_lan_wording() {
+        let address = "10.0.0.5:7420".parse().ok();
+        assert_eq!(
+            host_offline_details(address),
+            "Non in rete · ultimo indirizzo 10.0.0.5:7420"
+        );
+        assert_eq!(
+            host_offline_details(None),
+            "Non in rete · nessun indirizzo noto"
+        );
+        assert_eq!(host_last_connection("ieri"), "ultima connessione ieri");
+        assert!(WAKE_HINT.contains("BIOS") && WAKE_HINT.contains("scheda di rete"));
+        assert!(wake_sent("UFFICIO").contains("UFFICIO"));
+        assert!(wake_failed("UFFICIO", "rete assente").ends_with("rete assente"));
     }
 }

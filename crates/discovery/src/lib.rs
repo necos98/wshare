@@ -29,6 +29,7 @@ mod address;
 mod daemon;
 mod event;
 mod host_list;
+mod mac;
 mod names;
 mod txt;
 
@@ -36,6 +37,7 @@ pub use address::DiscoveredHost;
 pub use daemon::{Advertiser, Browser};
 pub use event::DiscoveryEvent;
 pub use host_list::HostList;
+pub use mac::{MAC_LEN, MacAddress, MacParseError};
 pub use names::{computer_name, host_name, instance_name, sanitize_dns_label};
 pub use txt::{HostAnnouncement, TxtError};
 

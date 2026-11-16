@@ -3,9 +3,8 @@
 
 use std::net::SocketAddr;
 
-use discovery::{DiscoveredHost, DiscoveryEvent, HostList};
+use discovery::{DiscoveryEvent, HostList};
 use net::Fingerprint;
-use protocol::control::PROTOCOL_VERSION;
 
 use crate::host::HostEvent;
 use crate::options::HostOptions;
@@ -14,6 +13,7 @@ use crate::trust::AuthorizedDevice;
 use crate::viewer::report::FailureCause;
 
 use super::approval::ApprovalPrompt;
+use super::host_row::{self, HostRow};
 use super::notifications::Notification;
 use super::ports::MonitorChoice;
 use super::remembered::RememberedHosts;
@@ -189,45 +189,6 @@ impl Sharing {
     }
 }
 
-/// A host of the "Computer in rete" list, ready to display.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HostRow {
-    pub id: String,
-    pub name: String,
-    pub resolution: String,
-    pub address: Option<SocketAddr>,
-    /// Same protocol version as this program.
-    pub compatible: bool,
-    /// This PC connects to it without a PIN.
-    pub remembered: bool,
-}
-
-impl HostRow {
-    fn new(host: &DiscoveredHost, remembered: bool) -> Self {
-        let a = &host.announcement;
-        Self {
-            id: a.id.clone(),
-            name: a.display_name.clone(),
-            resolution: format!("{}×{}", a.width, a.height),
-            address: host.preferred_address(),
-            compatible: a.protocol_version == PROTOCOL_VERSION,
-            remembered,
-        }
-    }
-
-    pub fn connectable(&self) -> bool {
-        self.compatible && self.address.is_some()
-    }
-
-    /// Second line of the row.
-    pub fn details(&self) -> String {
-        if !self.compatible {
-            return text::HOST_INCOMPATIBLE.to_string();
-        }
-        text::host_details(&self.resolution, self.address, self.remembered)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewerStatus {
     Connecting,
@@ -299,6 +260,8 @@ pub struct GuiState {
     pub selected_host: Option<String>,
     /// Problem with the last connection request (bad address, empty PIN).
     pub connect_error: Option<String>,
+    /// What happened to the last Wake-on-LAN request that went out.
+    pub wake_notice: Option<String>,
     pub viewers: Vec<ViewerSession>,
     /// Hosts this PC connects to without a PIN.
     pub remembered: RememberedHosts,
@@ -337,14 +300,10 @@ impl GuiState {
         self.hosts.apply(event);
     }
 
-    /// The other computers on the LAN, sorted by name.
+    /// The computers to list: those on the LAN and the ones known but not
+    /// online, in display order (see `host_row::rows`).
     pub fn host_rows(&self) -> Vec<HostRow> {
-        self.hosts
-            .hosts()
-            .into_iter()
-            .filter(|h| Some(h.id()) != self.own_host_id.as_deref())
-            .map(|h| HostRow::new(h, self.remembered.is_remembered(h.id())))
-            .collect()
+        host_row::rows(&self.hosts, &self.remembered, self.own_host_id.as_deref())
     }
 
     pub fn host_row(&self, id: &str) -> Option<HostRow> {
@@ -454,12 +413,15 @@ pub fn format_pin(pin: &str) -> String {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use discovery::HostAnnouncement;
-    use protocol::control::RejectReason;
+    use discovery::{DiscoveredHost, HostAnnouncement};
+    use protocol::control::{PROTOCOL_VERSION, RejectReason};
 
     use super::*;
     use crate::gui::remembered::tests::known;
     use crate::host::{HostFailure, HostWarning, SessionFailure};
+    use crate::trust::Timestamp;
+
+    const NOW: Timestamp = Timestamp::from_unix_seconds(0);
 
     pub fn listening(pin: &str, fingerprint: &str) -> HostEvent {
         HostEvent::Listening {
@@ -482,6 +444,7 @@ pub(crate) mod tests {
                 protocol_version: version,
                 width: 2560,
                 height: 1440,
+                mac: None,
             },
             vec![ip.parse().unwrap()],
         ))
@@ -700,10 +663,10 @@ pub(crate) mod tests {
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, ["Ufficio", "Vecchio"]);
         assert!(rows[0].connectable());
-        assert_eq!(rows[0].details(), "2560×1440 · 192.168.1.3:7420");
+        assert_eq!(rows[0].details(NOW), "2560×1440 · 192.168.1.3:7420");
         assert!(!rows[1].compatible);
         assert!(!rows[1].connectable());
-        assert!(rows[1].details().contains("non compatibile"));
+        assert!(rows[1].details(NOW).contains("non compatibile"));
     }
 
     #[test]
@@ -840,7 +803,7 @@ pub(crate) mod tests {
         let row = state.host_row(&id).unwrap();
         assert!(row.remembered);
         assert_eq!(
-            row.details(),
+            row.details(NOW),
             "2560×1440 · 192.168.1.3:7420 · Accesso memorizzato"
         );
     }
@@ -896,12 +859,23 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_wrong_pin_for_a_host_gone_from_the_list_is_a_failed_line() {
+    fn a_wrong_pin_for_a_host_gone_and_forgotten_is_a_failed_line() {
         let (mut state, id) = remembered_office();
         state.apply_discovery(DiscoveryEvent::Lost { id });
+        state.remembered.set(vec![], None);
         state.apply_viewer_update(7, failed_with(FailureCause::WrongPin));
         assert_eq!(state.selected_host, None);
         assert_eq!(state.viewers[0].status_line(), "UFFICIO: PIN errato.");
+    }
+
+    #[test]
+    fn a_wrong_pin_for_a_known_host_that_is_not_online_asks_again_in_its_row() {
+        let (mut state, id) = remembered_office();
+        state.apply_discovery(DiscoveryEvent::Lost { id: id.clone() });
+        state.apply_viewer_update(7, failed_with(FailureCause::WrongPin));
+        assert_eq!(state.selected_host.as_deref(), Some(id.as_str()));
+        assert_eq!(state.connect_error.as_deref(), Some(text::PIN_WRONG));
+        assert!(state.viewers.is_empty(), "the row says it, not a line");
     }
 
     #[test]
@@ -954,7 +928,7 @@ pub(crate) mod tests {
         assert!(message.contains("identità"), "{message}");
         assert!(
             state.host_row(&id).unwrap().remembered,
-            "still offers Dimentica"
+            "still offers Rimuovi"
         );
     }
 

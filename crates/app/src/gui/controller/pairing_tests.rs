@@ -141,7 +141,11 @@ fn forgetting_a_host_asks_for_the_pin_again() {
     c.handle(Intent::ForgetHost { id: id.clone() });
     assert_eq!(
         calls(&log),
-        [format!("forget_host {}", short(&office.fingerprint))]
+        [
+            // The announcement of the host updated its address first.
+            format!("note {}", short(&office.fingerprint)),
+            format!("forget_host {}", short(&office.fingerprint)),
+        ]
     );
     assert!(!c.state().host_row(&id).unwrap().remembered);
     assert_eq!(c.state().connect_error, None);

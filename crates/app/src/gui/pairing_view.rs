@@ -8,6 +8,7 @@ use crate::trust::{AuthorizedDevice, Timestamp};
 
 use super::controller::Intent;
 use super::elapsed;
+use super::host_row::HostRow;
 use super::view::{DETAIL_SIZE, error_color};
 
 /// "Dispositivi autorizzati": who connects without a PIN, with a way to
@@ -58,7 +59,7 @@ pub(super) enum RememberedAction {
     Forget,
 }
 
-/// `Accesso memorizzato [Connetti] [Dimentica]`: no PIN field.
+/// `Accesso memorizzato [Connetti] [Rimuovi]`: no PIN field.
 /// Under the PIN of a host that does not remember this PC: connects without
 /// one so the person at the host can accept it. True when clicked.
 pub(super) fn ask_access(ui: &mut Ui) -> bool {
@@ -78,7 +79,7 @@ pub(super) fn remembered_form(ui: &mut Ui, error: Option<&str>) -> Option<Rememb
         ui.weak(text::HOST_REMEMBERED);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui
-                .button(text::FORGET)
+                .button(text::REMOVE)
                 .on_hover_text(text::FORGET_HINT)
                 .clicked()
             {
@@ -101,4 +102,40 @@ pub(super) fn remembered_form(ui: &mut Ui, error: Option<&str>) -> Option<Rememb
     }
     ui.add_space(4.0);
     action
+}
+
+/// Under a computer this PC knows: `[Preferito] [Riattiva]` and, once
+/// Wake-on-LAN went out, what happened. `Riattiva` is for a computer that
+/// is not online and needs its MAC; without one it says why it is off.
+pub(super) fn known_actions(ui: &mut Ui, row: &HostRow, notice: Option<&str>) -> Option<Intent> {
+    let mut intent = None;
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        let favorite = ui
+            .selectable_label(row.favorite, text::FAVORITE)
+            .on_hover_text(text::FAVORITE_HINT);
+        if favorite.clicked() {
+            intent = Some(Intent::SetFavorite {
+                id: row.id.clone(),
+                favorite: !row.favorite,
+            });
+        }
+        if row.wakeable() {
+            let wake = ui
+                .add_enabled(row.mac.is_some(), egui::Button::new(text::WAKE))
+                .on_hover_text(text::WAKE_HINT)
+                .on_disabled_hover_text(text::WAKE_NO_MAC);
+            if wake.clicked() {
+                intent = Some(Intent::WakeHost { id: row.id.clone() });
+            }
+        }
+    });
+    if let Some(notice) = notice {
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new(notice).size(DETAIL_SIZE).weak());
+        });
+    }
+    ui.add_space(4.0);
+    intent
 }

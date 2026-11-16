@@ -3,7 +3,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use std::net::{IpAddr, SocketAddr};
+
 use anyhow::{Result, bail};
+use discovery::MacAddress;
 use net::Fingerprint;
 
 use super::*;
@@ -24,6 +27,11 @@ pub(super) struct Log {
     /// What the known-hosts store holds.
     pub(super) known: Vec<KnownHost>,
     pub(super) fail_forget: bool,
+    pub(super) fail_favorite: bool,
+    pub(super) fail_note: bool,
+    pub(super) fail_wake: bool,
+    /// The wake-up signals sent: the MAC and the last address given.
+    pub(super) woken: Vec<(MacAddress, Option<IpAddr>)>,
     /// What the settings file holds, and the warning loading it gives.
     pub(super) settings: Settings,
     pub(super) settings_warning: Option<String>,
@@ -42,6 +50,7 @@ struct FakePendingStop(Shared);
 pub(super) struct FakeLauncher(Shared);
 pub(super) struct FakeKnownHosts(Shared);
 pub(super) struct FakeSettings(Shared);
+pub(super) struct FakeWake(Shared);
 
 impl SharingService for FakeService {
     fn start(&mut self, options: HostOptions, generation: u64) -> Result<Box<dyn SharingControl>> {
@@ -127,6 +136,45 @@ impl KnownHostsStore for FakeKnownHosts {
         log.known.retain(|h| &h.fingerprint != fingerprint);
         Ok(())
     }
+
+    fn set_favorite(&self, fingerprint: &Fingerprint, favorite: bool) -> Result<()> {
+        let mut log = self.0.borrow_mut();
+        log.calls
+            .push(format!("favorite {} {favorite}", short(fingerprint)));
+        if log.fail_favorite {
+            bail!("access denied");
+        }
+        for host in log
+            .known
+            .iter_mut()
+            .filter(|h| &h.fingerprint == fingerprint)
+        {
+            host.favorite = favorite;
+        }
+        Ok(())
+    }
+
+    fn note_announced(
+        &self,
+        fingerprint: &Fingerprint,
+        address: Option<SocketAddr>,
+        mac: Option<MacAddress>,
+    ) -> Result<()> {
+        let mut log = self.0.borrow_mut();
+        log.calls.push(format!("note {}", short(fingerprint)));
+        if log.fail_note {
+            bail!("access denied");
+        }
+        for host in log
+            .known
+            .iter_mut()
+            .filter(|h| &h.fingerprint == fingerprint)
+        {
+            host.address = address.or(host.address);
+            host.mac = mac.or(host.mac);
+        }
+        Ok(())
+    }
 }
 
 /// First byte of a fingerprint, enough to tell the fakes' ones apart.
@@ -135,7 +183,7 @@ pub(super) fn short(fingerprint: &Fingerprint) -> String {
 }
 
 pub(super) type TestController =
-    Controller<FakeService, FakeLauncher, FakeKnownHosts, FakeSettings>;
+    Controller<FakeService, FakeLauncher, FakeKnownHosts, FakeSettings, FakeWake>;
 
 /// A controller whose known-hosts store holds `known`.
 pub(super) fn controller_knowing(known: Vec<KnownHost>) -> (TestController, Shared) {
@@ -146,6 +194,7 @@ pub(super) fn controller_knowing(known: Vec<KnownHost>) -> (TestController, Shar
         FakeLauncher(log.clone()),
         FakeKnownHosts(log.clone()),
         FakeSettings(log.clone()),
+        FakeWake(log.clone()),
     );
     (controller, log)
 }
@@ -203,5 +252,17 @@ pub(super) fn controller_from(log: &Shared) -> TestController {
         FakeLauncher(log.clone()),
         FakeKnownHosts(log.clone()),
         FakeSettings(log.clone()),
+        FakeWake(log.clone()),
     )
+}
+
+impl WakeOnLan for FakeWake {
+    fn wake(&self, mac: MacAddress, last_address: Option<IpAddr>) -> Result<()> {
+        let mut log = self.0.borrow_mut();
+        if log.fail_wake {
+            bail!("network is down");
+        }
+        log.woken.push((mac, last_address));
+        Ok(())
+    }
 }

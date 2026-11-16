@@ -10,13 +10,15 @@
 //!   and the free name (`nome (1).ext`) for one already taken.
 //! - [`plan`] and [`receiving`]: where a pushed list lands, and its state.
 //! - [`listing`]: the list of what this PC sends, walked from the disk.
-//! - [`part_file`]: a file being received, as `.part` until complete.
+//! - [`part_file`]: a file being received, as `.part` until complete, and
+//!   [`free_rename`], which then gives it a free name, replacing nothing.
 //! - [`events`] and [`board`]: what the front-ends hear and show.
 //! - [`registry`], [`shared`], [`streams`], [`push`], [`paste`] and
 //!   [`hub`]: the transfers of one session and their tasks.
 
 pub mod board;
 pub mod events;
+mod free_rename;
 mod hub;
 pub mod listing;
 pub mod names;

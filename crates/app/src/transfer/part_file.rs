@@ -11,7 +11,7 @@ use std::io::{self, Write};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use super::names::unique_name;
+use super::free_rename::rename_to_free_name;
 
 /// Appended to the name of a file until it is complete.
 pub const PART_SUFFIX: &str = ".part";
@@ -42,17 +42,21 @@ pub struct PartFile {
 
 impl PartFile {
     /// Creates `target.part`; fails if it exists (never replaces a file).
+    ///
+    /// The `PartFile` is built on the disk thread, together with the file:
+    /// if the caller is cancelled before the creation ends, the result is
+    /// dropped there and its `Drop` deletes the file.
     pub async fn create(target: PathBuf) -> io::Result<Self> {
+        blocking(move || Self::create_now(target)).await
+    }
+
+    fn create_now(target: PathBuf) -> io::Result<Self> {
         let part = part_path(&target);
-        let opened = part.clone();
-        let file = blocking(move || {
-            OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-                .open(opened)
-        })
-        .await?;
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&part)?;
         Ok(Self {
             part,
             target,
@@ -86,9 +90,7 @@ impl PartFile {
         let placed = blocking(move || {
             file.sync_all()?;
             drop(file);
-            let target = free_target(&target)?;
-            std::fs::rename(&part, &target)?;
-            Ok(target)
+            rename_to_free_name(&part, &target)
         })
         .await?;
         self.committed = true;
@@ -121,18 +123,6 @@ impl Drop for PartFile {
     }
 }
 
-/// `target`, or the first free `name (n).ext` next to it.
-fn free_target(target: &Path) -> io::Result<PathBuf> {
-    if !target.exists() {
-        return Ok(target.to_path_buf());
-    }
-    let name = target.file_name().unwrap_or_default().to_string_lossy();
-    let folder = target.parent().unwrap_or(Path::new(""));
-    unique_name(&name, false, |candidate| folder.join(candidate).exists())
-        .map(|name| folder.join(name))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "no free name"))
-}
-
 fn closed() -> io::Error {
     io::Error::other("the file was closed after an earlier failure")
 }
@@ -147,6 +137,8 @@ pub(super) async fn blocking<T: Send + 'static>(
 
 #[cfg(test)]
 mod tests {
+    use std::task::{Context, Waker};
+
     use super::*;
 
     fn entries(dir: &Path) -> Vec<String> {
@@ -184,28 +176,61 @@ mod tests {
         assert!(entries(dir.path()).is_empty());
     }
 
-    #[tokio::test]
-    async fn a_file_cancelled_mid_write_leaves_nothing_behind() {
+    /// Runs `work` on a runtime of its own with `disk_threads` blocking
+    /// threads, then shuts it down, which waits for the disk work still
+    /// running: what is on disk afterwards is final.
+    fn run_to_the_end(disk_threads: usize, work: impl Future<Output = ()>) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(disk_threads)
+            .build()
+            .unwrap();
+        runtime.block_on(work);
+        drop(runtime);
+    }
+
+    #[test]
+    fn a_file_cancelled_mid_write_leaves_nothing_behind() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("big.bin");
-        let task = tokio::spawn(async move {
-            let mut file = PartFile::create(target).await.unwrap();
-            loop {
+        run_to_the_end(1, async move {
+            let (written, first_write) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let mut file = PartFile::create(target).await.unwrap();
                 file.write(&vec![1; WRITE_BUFFER]).await.unwrap();
-            }
+                written.send(()).unwrap();
+                loop {
+                    file.write(&vec![1; WRITE_BUFFER]).await.unwrap();
+                }
+            });
+            first_write.await.unwrap();
+            // The task now waits on its next write to disk, which the
+            // shutdown lets finish: its handle closes only then.
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
         });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        task.abort();
-        let _ = task.await;
-        // A write that was running when the task stopped closes its handle
-        // when it ends; the file is gone by then.
-        for _ in 0..100 {
-            if entries(dir.path()).is_empty() {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        panic!("left behind: {:?}", entries(dir.path()));
+        assert!(entries(dir.path()).is_empty(), "{:?}", entries(dir.path()));
+    }
+
+    #[test]
+    fn a_file_cancelled_while_being_created_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("big.bin");
+        run_to_the_end(1, async move {
+            // The only disk thread waits for `release`: the creation is
+            // queued behind it and runs only once its caller is gone.
+            let (release, gate) = std::sync::mpsc::channel::<()>();
+            let busy = tokio::task::spawn_blocking(move || gate.recv());
+            let mut create = Box::pin(PartFile::create(target));
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(create.as_mut().poll(&mut cx).is_pending());
+            drop(create);
+            release.send(()).unwrap();
+            busy.await.unwrap().unwrap();
+            // Queued after the creation on the same single thread: once
+            // this has run, so has the creation.
+            tokio::task::spawn_blocking(|| ()).await.unwrap();
+        });
+        assert!(entries(dir.path()).is_empty(), "{:?}", entries(dir.path()));
     }
 
     #[tokio::test]

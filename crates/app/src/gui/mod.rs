@@ -66,6 +66,9 @@ mod tray;
 mod unattended_access;
 mod unattended_state;
 mod unattended_view;
+mod update_state;
+mod update_view;
+mod updates;
 mod view;
 mod viewer_processes;
 mod wake_on_lan;
@@ -124,7 +127,8 @@ pub fn run(gui: GuiOptions) -> Result<()> {
                 backend: system_settings::SystemSettings,
                 wake: wake_on_lan::UdpWakeOnLan,
                 desktop: shell::WindowsShell::new(inbox.clone()),
-                unattended: unattended_access::WindowsUnattended::new(inbox),
+                unattended: unattended_access::WindowsUnattended::new(inbox.clone()),
+                updates: updates::GithubUpdates::new(inbox),
             });
             controller.start_up();
             Ok(Box::new(WshareApp::new(

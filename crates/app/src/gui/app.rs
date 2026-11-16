@@ -15,6 +15,7 @@ use super::shell::WindowsShell;
 use super::system_settings::SystemSettings;
 use super::tray::Tray;
 use super::unattended_access::WindowsUnattended;
+use super::updates::GithubUpdates;
 use super::view::{self, Drafts};
 use super::wake_on_lan::UdpWakeOnLan;
 
@@ -26,6 +27,7 @@ type AppController = Controller<
     UdpWakeOnLan,
     WindowsShell,
     WindowsUnattended,
+    GithubUpdates,
 >;
 
 /// What the app shows outside its window; each part is absent when Windows

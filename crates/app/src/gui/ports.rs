@@ -18,6 +18,7 @@ use crate::options::HostOptions;
 use crate::transfer::TransferCommand;
 use crate::trust::KnownHost;
 use crate::unattended::ServiceSettings;
+use crate::update::{Available, UpdateFailure};
 
 use super::model::{ViewerId, ViewerUpdate};
 use super::settings::{Settings, ViewerDisplay};
@@ -51,6 +52,8 @@ pub enum AppEvent {
     /// Turning unattended access on or off (see [`UnattendedAccess`])
     /// is over.
     Unattended(UnattendedOutcome),
+    /// A check or an installation of [`Updates`] is over.
+    Update(UpdateEvent),
 }
 
 /// Why a file or folder dialog was opened.
@@ -248,4 +251,29 @@ pub trait UnattendedAccess {
     fn install(&self, settings: ServiceSettings, password: Option<String>);
     /// Removes the service and its files, like [`Self::install`].
     fn uninstall(&self);
+}
+
+/// How a check or an installation of [`Updates`] ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateEvent {
+    /// The newer release, or `None`: this is the latest.
+    Checked(Result<Option<Available>, UpdateFailure>),
+    /// The new program is in place (it runs from the next start).
+    Installed(Result<(), UpdateFailure>),
+}
+
+/// The releases of wshare on GitHub (see `update`).
+pub trait Updates {
+    /// Looks for a newer release without waiting; the answer arrives as
+    /// [`UpdateEvent::Checked`].
+    fn check(&self);
+    /// Downloads and puts `available` in place of this program without
+    /// waiting; [`UpdateEvent::Installed`] tells how it went.
+    fn install(&self, available: Available);
+    /// Starts the program again (the new one, once installed), for this
+    /// process to quit.
+    fn restart(&self) -> Result<()>;
+    /// Whether the unattended-access service runs another wshare than this
+    /// one (an update is not copied there before its «Aggiorna…»).
+    fn service_outdated(&self) -> bool;
 }

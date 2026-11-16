@@ -9,6 +9,7 @@ use protocol::transfer::TransferId;
 
 use super::super::model::ViewerId;
 use super::super::notifications;
+use super::super::ports::Updates;
 use super::super::ports::{
     ChoicePurpose, Desktop, KnownHostsStore, SettingsBackend, SharingService, UnattendedAccess,
     ViewerLauncher, WakeOnLan,
@@ -26,7 +27,8 @@ impl<
     W: WakeOnLan,
     D: Desktop,
     U: UnattendedAccess,
-> Controller<S, L, K, B, W, D, U>
+    P: Updates,
+> Controller<S, L, K, B, W, D, U, P>
 {
     /// Opens the dialog for `purpose`; the choice comes back as
     /// `AppEvent::Chosen`.

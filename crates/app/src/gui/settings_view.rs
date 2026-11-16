@@ -10,6 +10,7 @@ use super::controller::Intent;
 use super::model::GuiState;
 use super::settings::{CodecChoice, MAX_FPS, MAX_MBPS, MIN_FPS, MIN_MBPS, MIN_PORT, Settings};
 use super::unattended_view;
+use super::update_view;
 use super::view::{DETAIL_SIZE, card, error_color};
 
 const GAP: f32 = 10.0;
@@ -58,6 +59,7 @@ pub fn show(
                 unattended_password,
                 intents,
             );
+            update_view::section(ui, &state.update, &mut edited, intents);
         });
     if edited != state.settings {
         intents.push(Intent::ChangeSettings(edited));

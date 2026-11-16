@@ -18,6 +18,7 @@ use super::pairing_view::{self, RememberedAction};
 use super::settings_state::Page;
 use super::settings_view;
 use super::transfers_view;
+use super::update_view;
 
 /// Longest PIN the field takes (a PIN has 6 digits; spaces may surround it).
 const MAX_PIN_CHARS: usize = 16;
@@ -62,6 +63,7 @@ pub fn show(ui: &mut Ui, state: &GuiState, drafts: &mut Drafts) -> Vec<Intent> {
                 approval_view::show(ui, prompt, &mut intents);
             }
             sharing_section(ui, &state.sharing, &mut intents);
+            update_view::badge(ui, &state.update, &mut intents);
             if let Some(notice) = &state.files_notice {
                 ui.add_space(4.0);
                 ui.colored_label(error_color(ui), notice);

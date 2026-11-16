@@ -60,6 +60,12 @@ pub enum Command {
     Gui(GuiOptions),
     /// Unattended access (see `unattended`).
     Service(ServiceCommand),
+    /// `wshare update [--check]`: install (or only look for) a newer
+    /// release (see `update`).
+    Update {
+        check_only: bool,
+    },
+    Version,
 }
 
 pub const USAGE: &str = "\
@@ -106,6 +112,9 @@ wshare - LAN screen sharing (no arguments: open the window)
                sharing options.
   wshare service uninstall          turn unattended access off and remove everything it installed
   wshare service status             whether unattended access is installed and running
+  wshare update [--check]           download and install the latest release from GitHub
+               (signed); --check only says whether there is one
+  wshare version                    the version of this wshare
   wshare list                       hosts found on the LAN
   wshare monitors                   monitors of this PC
   wshare bench [--monitor N] [--fps F] [--mbps B] [--codec h264|hevc] [--seconds S] [--out FILE]";
@@ -121,9 +130,19 @@ pub fn parse(args: &[String]) -> Result<Command> {
         "host" => parse_host(rest).map(Command::Host),
         "view" => parse_view(rest).map(Command::View),
         "service" => unattended::parse(rest).map(Command::Service),
+        "update" => parse_update(rest),
+        "version" | "--version" | "-V" => no_args(rest, Command::Version),
         MINIMIZED_FLAG if rest.is_empty() => Ok(Command::Gui(GuiOptions { minimized: true })),
         "help" | "--help" | "-h" => Ok(Command::Help),
         other => bail!("unknown command '{other}'"),
+    }
+}
+
+fn parse_update(rest: &[String]) -> Result<Command> {
+    match rest {
+        [] => Ok(Command::Update { check_only: false }),
+        [flag] if flag == "--check" => Ok(Command::Update { check_only: true }),
+        [arg, ..] => bail!("unexpected argument '{arg}'"),
     }
 }
 
@@ -288,6 +307,21 @@ mod tests {
 
     fn args(line: &str) -> Vec<String> {
         line.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn update_installs_or_only_checks() {
+        assert_eq!(
+            parse(&args("update")).unwrap(),
+            Command::Update { check_only: false }
+        );
+        assert_eq!(
+            parse(&args("update --check")).unwrap(),
+            Command::Update { check_only: true }
+        );
+        assert!(parse(&args("update --now")).is_err());
+        assert_eq!(parse(&args("--version")).unwrap(), Command::Version);
+        assert!(parse(&args("version 2")).is_err());
     }
 
     #[test]

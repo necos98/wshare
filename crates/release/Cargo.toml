@@ -1,0 +1,17 @@
+[package]
+name = "release"
+version.workspace = true
+edition.workspace = true
+description = "Signed update manifest of wshare: shared by the app (verify) and the release tool (sign)"
+
+# Pure Rust: no I/O besides the release tool's own files, fully unit-testable.
+[dependencies]
+# Ed25519 and SHA-256; already built for `net` (rustls, quinn).
+ring = "0.17.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[[bin]]
+name = "wshare-release"
+path = "src/bin/wshare-release.rs"

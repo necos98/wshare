@@ -65,6 +65,7 @@ mod tests {
             share_on_start: true,
             notifications: false,
             connection_indicator: false,
+            check_updates: false,
         };
         save_to(&path, &settings).unwrap();
         assert_eq!(load_from(&path), (settings, None));

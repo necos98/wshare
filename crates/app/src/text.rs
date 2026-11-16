@@ -16,9 +16,11 @@ use crate::viewer::report::FailureCause;
 mod audio;
 mod transfer;
 mod unattended;
+mod update;
 pub use audio::*;
 pub use transfer::*;
 pub use unattended::*;
+pub use update::*;
 
 // --- Why a viewer ended -------------------------------------------------
 

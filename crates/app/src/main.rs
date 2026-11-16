@@ -24,6 +24,7 @@ mod text;
 mod transfer;
 mod trust;
 mod unattended;
+mod update;
 mod viewer;
 mod wire;
 
@@ -68,6 +69,11 @@ fn run(command: Command) -> Result<()> {
         Command::View(options) => viewer::run(options),
         Command::Gui(options) => gui::run(options),
         Command::Service(command) => unattended::run(command),
+        Command::Update { check_only } => update::run(check_only),
+        Command::Version => {
+            println!("wshare {}", update::current_version());
+            Ok(())
+        }
         Command::Help => {
             println!("{}", cli::USAGE);
             Ok(())

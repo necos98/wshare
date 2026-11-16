@@ -6,6 +6,7 @@ use crate::host::HostEvent;
 use crate::text;
 
 use super::super::notifications;
+use super::super::ports::Updates;
 use super::super::ports::{
     Desktop, KnownHostsStore, SettingsBackend, SharingService, UnattendedAccess, ViewerLauncher,
     WakeOnLan,
@@ -22,7 +23,8 @@ impl<
     W: WakeOnLan,
     D: Desktop,
     U: UnattendedAccess,
-> Controller<S, L, K, B, W, D, U>
+    P: Updates,
+> Controller<S, L, K, B, W, D, U, P>
 {
     /// Work to do once the window exists: keeps the Windows start-up entry
     /// pointing at this executable (only if the user turned it on) and
@@ -36,6 +38,9 @@ impl<
         }
         if self.state.settings.share_on_start {
             self.set_sharing(true);
+        }
+        if self.state.settings.check_updates {
+            self.check_updates();
         }
     }
 

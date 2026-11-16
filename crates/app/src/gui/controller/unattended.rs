@@ -5,6 +5,7 @@
 //! window would use, so the window stops its own sharing before turning it
 //! on, and refuses to share while it is on (see `set_sharing`).
 
+use super::super::ports::Updates;
 use super::super::ports::{
     Desktop, KnownHostsStore, SettingsBackend, SharingService, UnattendedAccess, UnattendedOutcome,
     ViewerLauncher, WakeOnLan,
@@ -19,7 +20,8 @@ impl<
     W: WakeOnLan,
     D: Desktop,
     U: UnattendedAccess,
-> Controller<S, L, K, B, W, D, U>
+    P: Updates,
+> Controller<S, L, K, B, W, D, U, P>
 {
     /// Installs or updates the service, with the host settings that apply
     /// to it and `password` (empty: none).

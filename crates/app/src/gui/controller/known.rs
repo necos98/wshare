@@ -5,6 +5,7 @@ use discovery::DiscoveredHost;
 
 use crate::text;
 
+use super::super::ports::Updates;
 use super::super::ports::{
     Desktop, KnownHostsStore, SettingsBackend, SharingService, UnattendedAccess, ViewerLauncher,
     WakeOnLan,
@@ -19,7 +20,8 @@ impl<
     W: WakeOnLan,
     D: Desktop,
     U: UnattendedAccess,
-> Controller<S, L, K, B, W, D, U>
+    P: Updates,
+> Controller<S, L, K, B, W, D, U, P>
 {
     /// A known host announced itself: stores the address and MAC it gave
     /// if they are not the ones kept, so it can be found and woken later.

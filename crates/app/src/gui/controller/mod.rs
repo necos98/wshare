@@ -16,12 +16,14 @@ use super::host_row::HostRow;
 use super::model::{GuiState, ViewerId, ViewerSession, ViewerStatus, ViewerUpdate};
 use super::ports::{
     AppEvent, ChoicePurpose, Desktop, KnownHostsStore, LaunchRequest, PendingStop, SettingsBackend,
-    SharingControl, SharingService, TrayAction, UnattendedAccess, ViewerLauncher, WakeOnLan,
+    SharingControl, SharingService, TrayAction, UnattendedAccess, Updates, ViewerLauncher,
+    WakeOnLan,
 };
 use super::settings::Settings;
 use super::settings_state::Page;
 use super::transfers::FileTransfers;
 use super::unattended_state::UnattendedState;
+use super::update_state::UpdateState;
 
 /// What the user asked for (from the window or the tray).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +100,10 @@ pub enum Intent {
         password: String,
     },
     DisableUnattended,
+    /// "Controlla aggiornamenti": looks for a newer release now.
+    CheckUpdates,
+    /// "Aggiorna e riavvia": installs the release found and restarts.
+    InstallUpdate,
     /// "Sfoglia…" of the folder of received files.
     ChooseDownloads,
     /// The window's close button.
@@ -127,7 +133,7 @@ pub fn close_decision(sharing_enabled: bool) -> WindowCommand {
 }
 
 /// What the controller drives the outside world through (see `ports`).
-pub struct Ports<S, L, K, B, W, D, U> {
+pub struct Ports<S, L, K, B, W, D, U, P> {
     pub service: S,
     pub launcher: L,
     pub known_hosts: K,
@@ -135,6 +141,7 @@ pub struct Ports<S, L, K, B, W, D, U> {
     pub wake: W,
     pub desktop: D,
     pub unattended: U,
+    pub updates: P,
 }
 
 pub struct Controller<
@@ -145,6 +152,7 @@ pub struct Controller<
     W: WakeOnLan,
     D: Desktop,
     U: UnattendedAccess,
+    P: Updates,
 > {
     state: GuiState,
     service: S,
@@ -154,6 +162,7 @@ pub struct Controller<
     wake: W,
     desktop: D,
     unattended: U,
+    updates: P,
     sharing: Option<Box<dyn SharingControl>>,
     /// A service switched off and still stopping in the background.
     stopping: Option<Box<dyn PendingStop>>,
@@ -172,9 +181,10 @@ impl<
     W: WakeOnLan,
     D: Desktop,
     U: UnattendedAccess,
-> Controller<S, L, K, B, W, D, U>
+    P: Updates,
+> Controller<S, L, K, B, W, D, U, P>
 {
-    pub fn new(ports: Ports<S, L, K, B, W, D, U>) -> Self {
+    pub fn new(ports: Ports<S, L, K, B, W, D, U, P>) -> Self {
         let Ports {
             service,
             launcher,
@@ -183,11 +193,13 @@ impl<
             wake,
             desktop,
             unattended,
+            updates,
         } = ports;
         let (settings, warning) = backend.load();
         let mut state = GuiState {
             unattended: UnattendedState::read(unattended.installed(), &settings.service_settings()),
             settings_notice: warning.map(|detail| text::settings_unreadable(&detail)),
+            update: UpdateState::new(updates.service_outdated()),
             ..GuiState::default()
         };
         state.sharing.input_allowed = settings.allow_input;
@@ -201,6 +213,7 @@ impl<
             wake,
             desktop,
             unattended,
+            updates,
             sharing: None,
             stopping: None,
             generation: 0,
@@ -266,6 +279,8 @@ impl<
             Intent::ChooseDownloads => self.choose(ChoicePurpose::Downloads),
             Intent::EnableUnattended { password } => self.enable_unattended(password),
             Intent::DisableUnattended => self.disable_unattended(),
+            Intent::CheckUpdates => self.check_updates(),
+            Intent::InstallUpdate => self.install_update(),
             Intent::ShowWindow => return Some(WindowCommand::Show),
             Intent::CloseWindow => {
                 let decision = close_decision(self.state.sharing.enabled);
@@ -346,6 +361,7 @@ impl<
             }
             AppEvent::Chosen { purpose, paths } => self.chosen(purpose, paths),
             AppEvent::Unattended(outcome) => self.unattended_finished(&outcome),
+            AppEvent::Update(event) => return self.update_finished(event),
             AppEvent::Tray(action) => {
                 let intent = match action {
                     TrayAction::Open => Intent::ShowWindow,
@@ -585,3 +601,6 @@ mod tests;
 mod unattended;
 #[cfg(test)]
 mod unattended_tests;
+mod updates;
+#[cfg(test)]
+mod updates_tests;

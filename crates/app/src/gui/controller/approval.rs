@@ -2,6 +2,7 @@
 //! the clicks of the window go to the service, which is the only one that
 //! lets a viewer in.
 
+use super::super::ports::Updates;
 use super::super::ports::{
     Desktop, KnownHostsStore, SettingsBackend, SharingService, UnattendedAccess, ViewerLauncher,
     WakeOnLan,
@@ -16,7 +17,8 @@ impl<
     W: WakeOnLan,
     D: Desktop,
     U: UnattendedAccess,
-> Controller<S, L, K, B, W, D, U>
+    P: Updates,
+> Controller<S, L, K, B, W, D, U, P>
 {
     /// Passes the click to the service and takes the request down. The
     /// service ignores an answer to a request that ended meanwhile.

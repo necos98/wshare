@@ -63,6 +63,11 @@ pub struct UnattendedPolicy {
     pub password: Option<PasswordHash>,
 }
 
+/// The copy of wshare.exe the service runs (it may not exist).
+pub fn installed_exe() -> Result<std::path::PathBuf> {
+    Ok(locations::installed_exe(&locations::program_dir()?))
+}
+
 /// `wshare service <command>`.
 pub fn run(command: ServiceCommand) -> Result<()> {
     match command {

@@ -25,6 +25,7 @@ net.workspace = true
 pipeline.workspace = true
 protocol.workspace = true
 render.workspace = true
+release.workspace = true
 bytes = "1"
 if-addrs = "0.15.0"
 # PBKDF2 for the password of unattended access; already built for `net`.

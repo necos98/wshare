@@ -14,6 +14,7 @@ members = [
     "crates/input_desktop",
     "crates/app",
     "crates/cli-shim",
+    "crates/release",
 ]
 
 [workspace.package]
@@ -37,6 +38,7 @@ net = { path = "crates/net" }
 discovery = { path = "crates/discovery" }
 input = { path = "crates/input" }
 input_desktop = { path = "crates/input_desktop" }
+release = { path = "crates/release" }
 
 [profile.release]
 lto = "thin"

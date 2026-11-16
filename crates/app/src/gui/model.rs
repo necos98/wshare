@@ -22,6 +22,7 @@ use super::settings::Settings;
 use super::settings_state::Page;
 use super::transfers::FileTransfers;
 use super::unattended_state::UnattendedState;
+use super::update_state::UpdateState;
 
 /// Identifies a viewer process launched by the interface.
 pub type ViewerId = u64;
@@ -306,6 +307,8 @@ pub struct GuiState {
     pub files_notice: Option<String>,
     /// Unattended access (the service), as the settings page shows it.
     pub unattended: UnattendedState,
+    /// Updates of wshare, as the settings page shows them.
+    pub update: UpdateState,
 }
 
 impl GuiState {

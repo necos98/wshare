@@ -77,6 +77,9 @@ pub struct Settings {
     // Feedback on this PC.
     pub notifications: bool,
     pub connection_indicator: bool,
+    // Updates.
+    /// Whether a newer release is looked for on GitHub at every start.
+    pub check_updates: bool,
 }
 
 impl Default for Settings {
@@ -102,6 +105,7 @@ impl Default for Settings {
             share_on_start: false,
             notifications: true,
             connection_indicator: true,
+            check_updates: true,
         }
     }
 }

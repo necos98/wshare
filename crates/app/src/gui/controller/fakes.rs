@@ -13,12 +13,14 @@ use protocol::transfer::TransferId;
 
 use super::*;
 use crate::access_mode::AccessMode;
+use crate::gui::ports::Updates;
 use crate::gui::ports::{ChoicePurpose, MonitorChoice};
 use crate::host::{ApprovalAnswer, ApprovalId, HostEvent, HostFailure};
 use crate::options::HostOptions;
 use crate::transfer::TransferCommand;
 use crate::trust::KnownHost;
 use crate::unattended::ServiceSettings;
+use crate::update::Available;
 
 /// Shared log of what the fakes were asked to do.
 #[derive(Default)]
@@ -60,6 +62,12 @@ pub(super) struct Log {
     pub(super) unattended_unreadable: bool,
     /// The host settings handed to the last install of the service.
     pub(super) unattended_settings: Option<ServiceSettings>,
+    /// What the updates port was asked (apart from `calls`, so start-up
+    /// checks do not disturb the other tests), what `restart` does, and
+    /// whether the service runs another wshare.
+    pub(super) update_calls: Vec<String>,
+    pub(super) fail_restart: bool,
+    pub(super) service_outdated: bool,
 }
 
 pub(super) type Shared = Rc<RefCell<Log>>;
@@ -73,6 +81,7 @@ pub(super) struct FakeSettings(Shared);
 pub(super) struct FakeWake(Shared);
 pub(super) struct FakeDesktop(Shared);
 pub(super) struct FakeUnattended(Shared);
+pub(super) struct FakeUpdates(Shared);
 
 impl SharingService for FakeService {
     fn start(&mut self, options: HostOptions, generation: u64) -> Result<Box<dyn SharingControl>> {
@@ -260,6 +269,7 @@ pub(super) type TestController = Controller<
     FakeWake,
     FakeDesktop,
     FakeUnattended,
+    FakeUpdates,
 >;
 
 /// Every port, on the fakes of `log`.
@@ -273,6 +283,7 @@ fn ports(
     FakeWake,
     FakeDesktop,
     FakeUnattended,
+    FakeUpdates,
 > {
     Ports {
         service: FakeService(log.clone()),
@@ -282,6 +293,7 @@ fn ports(
         wake: FakeWake(log.clone()),
         desktop: FakeDesktop(log.clone()),
         unattended: FakeUnattended(log.clone()),
+        updates: FakeUpdates(log.clone()),
     }
 }
 
@@ -376,5 +388,30 @@ impl UnattendedAccess for FakeUnattended {
             .borrow_mut()
             .calls
             .push("unattended uninstall".to_string());
+    }
+}
+
+impl Updates for FakeUpdates {
+    fn check(&self) {
+        self.0.borrow_mut().update_calls.push("check".to_string());
+    }
+
+    fn install(&self, available: Available) {
+        let mut log = self.0.borrow_mut();
+        log.update_calls
+            .push(format!("install {}", available.version()));
+    }
+
+    fn restart(&self) -> Result<()> {
+        let mut log = self.0.borrow_mut();
+        log.update_calls.push("restart".to_string());
+        if log.fail_restart {
+            bail!("wshare.exe is missing");
+        }
+        Ok(())
+    }
+
+    fn service_outdated(&self) -> bool {
+        self.0.borrow().service_outdated
     }
 }

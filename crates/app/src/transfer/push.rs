@@ -1,6 +1,6 @@
 //! Pushed transfers (drag and drop, "Invia file…"): proposing a list and
-//! sending it once accepted, and on the other side planning, accepting and
-//! receiving it.
+//! sending it once accepted, and on the other side receiving its files
+//! (see [`super::planning`] for how it is planned and accepted).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,9 +11,9 @@ use protocol::transfer::{FileEntry, StreamHeader, TransferError, TransferId, Tra
 use super::events::{Direction, Kind, Outcome, TransferInfo};
 use super::listing::{self, Listing};
 use super::part_file::{PartFile, blocking};
-use super::plan::{Placed, ReceivePlan};
+use super::plan::{Placed, total_size};
 use super::receiving::Receiving;
-use super::registry::{Stage, Transfer};
+use super::registry::{Stage, TOO_MANY_TRANSFERS, Transfer};
 use super::shared::Shared;
 use super::streams::{StreamError, receive_file, send_file};
 
@@ -25,14 +25,20 @@ fn first_name(entries: &[FileEntry]) -> String {
         .unwrap_or_default()
 }
 
-fn push_info(id: TransferId, direction: Direction, entries: &[FileEntry]) -> TransferInfo {
+/// How a push of `entries` is shown. The sizes may come from the other PC,
+/// unchecked yet: a total beyond `u64::MAX` shows as `u64::MAX`.
+pub(super) fn push_info(
+    id: TransferId,
+    direction: Direction,
+    entries: &[FileEntry],
+) -> TransferInfo {
     TransferInfo {
         id,
         direction,
         kind: Kind::Push,
         name: first_name(entries),
         files: entries.iter().filter(|e| !e.is_dir).count(),
-        total_bytes: entries.iter().map(|e| e.size).sum(),
+        total_bytes: total_size(entries).unwrap_or(u64::MAX),
     }
 }
 
@@ -74,7 +80,7 @@ impl Shared {
             let mut registry = shared.registry();
             if registry.is_full() {
                 drop(registry);
-                let outcome = Outcome::Failed("too many transfers at once".into());
+                let outcome = Outcome::Failed(TOO_MANY_TRANSFERS.into());
                 return shared.stillborn(unsent, outcome);
             }
             let entries = listing.entries.clone();
@@ -131,84 +137,6 @@ impl Shared {
         Ok(())
     }
 
-    /// The other PC proposes to push `entries` as `id`.
-    pub fn on_offer(self: &Arc<Self>, id: TransferId, entries: Vec<FileEntry>) {
-        if !self.registry().admits_peer(id) {
-            let reason = TransferError::Failed("too many transfers at once".into());
-            return self.send(TransferMessage::Failed { id, reason });
-        }
-        if !self.permissions.accept_push() {
-            let reason = TransferError::NotAllowed;
-            return self.send(TransferMessage::Failed { id, reason });
-        }
-        let shared = self.clone();
-        self.spawn(async move {
-            let planner = shared.clone();
-            let listed = entries.clone();
-            let planned = tokio::task::spawn_blocking(move || planner.plan(&listed)).await;
-            let (plan, created) = match planned {
-                Ok(Ok(planned)) => planned,
-                Ok(Err(reason)) => return shared.send(TransferMessage::Failed { id, reason }),
-                Err(e) => {
-                    let reason = TransferError::Failed(format!("planning failed: {e}"));
-                    return shared.send(TransferMessage::Failed { id, reason });
-                }
-            };
-            shared.accept_push(id, entries, plan, created);
-        });
-    }
-
-    /// Plans `entries` into the destination, reserving the names chosen,
-    /// and creates its folders. Blocking.
-    fn plan(&self, entries: &[FileEntry]) -> Result<(ReceivePlan, Vec<PathBuf>), TransferError> {
-        let plan = {
-            let mut registry = self.registry();
-            let plan = ReceivePlan::new(&self.destination, entries, |path| {
-                path.exists() || registry.is_reserved(path)
-            })
-            .map_err(|_| TransferError::Invalid)?;
-            registry.reserve(plan.roots());
-            plan
-        };
-        match plan.create_folders() {
-            Ok(created) => Ok((plan, created)),
-            Err(e) => {
-                self.registry().release(plan.roots());
-                Err(TransferError::Failed(format!(
-                    "cannot create the folders: {e}"
-                )))
-            }
-        }
-    }
-
-    fn accept_push(
-        &self,
-        id: TransferId,
-        entries: Vec<FileEntry>,
-        plan: ReceivePlan,
-        created: Vec<PathBuf>,
-    ) {
-        let info = push_info(id, Direction::Receiving, &entries);
-        let receiving = Arc::new(Receiving::new(plan, entries, created));
-        let mut registry = self.registry();
-        if !registry.admits_peer(id) {
-            registry.release(receiving.plan().roots());
-            drop(registry);
-            let reason = TransferError::Failed("too many transfers at once".into());
-            return self.send(TransferMessage::Failed { id, reason });
-        }
-        self.begin(
-            &mut registry,
-            Transfer::new(info, Stage::Receiving(receiving.clone())),
-        );
-        drop(registry);
-        self.send(TransferMessage::Accept { id });
-        if receiving.has_no_files() {
-            receiving.mark_complete();
-            self.complete_push(id, &receiving);
-        }
-    }
-
     /// A stream of the accepted push `id` arrived for the file at `placed`.
     pub fn receive_pushed(
         self: &Arc<Self>,
@@ -241,7 +169,7 @@ impl Shared {
         });
     }
 
-    fn complete_push(&self, id: TransferId, receiving: &Receiving) {
+    pub(super) fn complete_push(&self, id: TransferId, receiving: &Receiving) {
         let folder = Some(receiving.plan().destination().to_path_buf());
         if self.finish(id, Outcome::Completed { folder }) {
             self.send(TransferMessage::Completed { id });

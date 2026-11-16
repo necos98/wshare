@@ -17,6 +17,8 @@ use super::safe_path::{PathError, SafePath};
 pub enum PlanError {
     Empty,
     TooMany,
+    /// Sizes adding up to more than any disk holds (beyond `u64::MAX`).
+    TooLarge,
     BadPath {
         path: String,
         reason: PathError,
@@ -35,6 +37,7 @@ impl fmt::Display for PlanError {
         match self {
             Self::Empty => f.write_str("empty list"),
             Self::TooMany => f.write_str("too many files"),
+            Self::TooLarge => f.write_str("sizes beyond any disk"),
             Self::BadPath { path, reason } => write!(f, "{path:?}: {reason}"),
             Self::Duplicate(path) => write!(f, "{path:?} listed twice"),
             Self::Malformed(path) => write!(f, "{path:?} does not fit the list"),
@@ -159,9 +162,9 @@ pub fn remove_created(created: &[PathBuf]) {
     }
 }
 
-/// Every path of a received list, checked: not empty, not too many, each
-/// path valid, each folder listed before what it holds and only once,
-/// folders without a size.
+/// Every path of a received list, checked: not empty, not too many, sizes
+/// that add up, each path valid, each folder listed before what it holds
+/// and only once, folders without a size.
 pub fn check_list(entries: &[FileEntry]) -> Result<Vec<SafePath>, PlanError> {
     if entries.is_empty() {
         return Err(PlanError::Empty);
@@ -169,7 +172,18 @@ pub fn check_list(entries: &[FileEntry]) -> Result<Vec<SafePath>, PlanError> {
     if !list_fits(entries) {
         return Err(PlanError::TooMany);
     }
+    if total_size(entries).is_none() {
+        return Err(PlanError::TooLarge);
+    }
     check_structure(entries)
+}
+
+/// The bytes of all `entries`; `None` when they add up beyond `u64::MAX`
+/// (sizes the other PC made up).
+pub fn total_size(entries: &[FileEntry]) -> Option<u64> {
+    entries
+        .iter()
+        .try_fold(0u64, |total, entry| total.checked_add(entry.size))
 }
 
 fn check_structure(entries: &[FileEntry]) -> Result<Vec<SafePath>, PlanError> {
@@ -307,6 +321,19 @@ mod tests {
             ReceivePlan::new(&dest(), &[], nothing_taken),
             Err(PlanError::Empty)
         );
+    }
+
+    #[test]
+    fn sizes_beyond_u64_are_refused_without_a_panic() {
+        let entries = [FileEntry::file("a", u64::MAX), FileEntry::file("b", 1)];
+        assert_eq!(total_size(&entries), None);
+        assert_eq!(
+            ReceivePlan::new(&dest(), &entries, nothing_taken),
+            Err(PlanError::TooLarge)
+        );
+        let fits = [FileEntry::file("a", u64::MAX - 1), FileEntry::file("b", 1)];
+        assert_eq!(total_size(&fits), Some(u64::MAX));
+        assert!(ReceivePlan::new(&dest(), &fits, nothing_taken).is_ok());
     }
 
     #[test]

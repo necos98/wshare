@@ -13,8 +13,9 @@
 //! - [`part_file`]: a file being received, as `.part` until complete, and
 //!   [`free_rename`], which then gives it a free name, replacing nothing.
 //! - [`events`] and [`board`]: what the front-ends hear and show.
-//! - [`registry`], [`shared`], [`streams`], [`push`], [`paste`] and
-//!   [`hub`]: the transfers of one session and their tasks.
+//! - [`registry`], [`shared`], [`streams`], [`push`], [`planning`],
+//!   [`paste`], [`revocation`] and [`hub`]: the transfers of one session
+//!   and their tasks.
 
 pub mod board;
 pub mod events;
@@ -25,9 +26,11 @@ pub mod names;
 mod part_file;
 mod paste;
 pub mod plan;
+mod planning;
 mod push;
 mod receiving;
 mod registry;
+mod revocation;
 pub mod safe_path;
 mod shared;
 mod streams;

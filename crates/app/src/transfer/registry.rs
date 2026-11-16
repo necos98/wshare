@@ -19,6 +19,9 @@ use super::receiving::Receiving;
 /// Most transfers a session runs at once; more are refused.
 pub const MAX_ACTIVE_TRANSFERS: usize = 32;
 
+/// Why a transfer is refused when [`MAX_ACTIVE_TRANSFERS`] are running.
+pub const TOO_MANY_TRANSFERS: &str = "too many transfers at once";
+
 /// Which side of the session this PC is: it decides the ids it may pick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -52,6 +55,11 @@ pub enum Chunk {
 
 /// What a transfer waits for or does now.
 pub enum Stage {
+    /// The other PC proposed a push, which is being planned (names chosen,
+    /// folders created) before it is accepted. It holds its place among
+    /// the transfers of the session, but nothing was reported yet.
+    /// `ticket` tells this planning from a later one under the same id.
+    Planning { ticket: u64 },
     /// We proposed a push; the answer is awaited.
     Offered(Arc<Listing>),
     /// We are sending (a push the peer accepted, or a file it pasted).
@@ -103,6 +111,7 @@ pub struct Registry {
     clipboard_generation: u64,
     pub transfers: HashMap<TransferId, Transfer>,
     reserved: HashSet<PathBuf>,
+    next_ticket: u64,
 }
 
 impl Registry {
@@ -115,6 +124,7 @@ impl Registry {
             clipboard_generation: 0,
             transfers: HashMap::new(),
             reserved: HashSet::new(),
+            next_ticket: 0,
         }
     }
 
@@ -133,6 +143,29 @@ impl Registry {
 
     pub fn is_full(&self) -> bool {
         self.transfers.len() >= MAX_ACTIVE_TRANSFERS
+    }
+
+    /// Holds a place for the peer's push `info` while it is planned, if
+    /// [`Self::admits_peer`] its id; returns the planning's ticket.
+    pub fn hold_planning(&mut self, info: TransferInfo) -> Option<u64> {
+        if !self.admits_peer(info.id) {
+            return None;
+        }
+        let ticket = self.next_ticket;
+        self.next_ticket = self.next_ticket.wrapping_add(1);
+        let id = info.id;
+        self.transfers
+            .insert(id, Transfer::new(info, Stage::Planning { ticket }));
+        Some(ticket)
+    }
+
+    /// Whether `id` is still the planning held with `ticket` (not ended
+    /// meanwhile, nor replaced).
+    pub fn is_planning(&self, id: TransferId, ticket: u64) -> bool {
+        matches!(
+            self.transfers.get(&id).map(|t| &t.stage),
+            Some(Stage::Planning { ticket: held }) if *held == ticket
+        )
     }
 
     /// The clipboard changed: what it offered is gone. Returns the new
@@ -239,6 +272,26 @@ mod tests {
                 .insert(id, Transfer::new(info(id), Stage::Sending));
         }
         assert!(!host.admits_peer(TransferId(9999)));
+    }
+
+    #[test]
+    fn pushes_being_planned_count_against_the_limit() {
+        let mut host = Registry::new(Role::Host);
+        let tickets: Vec<u64> = (0..MAX_ACTIVE_TRANSFERS as u32)
+            .map(|n| host.hold_planning(info(TransferId(1 + 2 * n))).unwrap())
+            .collect();
+        assert!(host.is_full());
+        assert_eq!(host.hold_planning(info(TransferId(999))), None);
+        assert!(host.is_planning(TransferId(1), tickets[0]));
+        assert!(
+            !host.is_planning(TransferId(1), tickets[1]),
+            "another ticket"
+        );
+        host.transfers.remove(&TransferId(1));
+        assert!(!host.is_planning(TransferId(1), tickets[0]), "ended");
+        let again = host.hold_planning(info(TransferId(1))).unwrap();
+        assert!(!host.is_planning(TransferId(1), tickets[0]), "replaced");
+        assert!(host.is_planning(TransferId(1), again));
     }
 
     #[test]

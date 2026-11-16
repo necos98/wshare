@@ -103,6 +103,12 @@ impl<A: ClipboardAccess> ClipboardSync<A> {
         self.access.offer_files(files)?;
         Ok(Received::Applied)
     }
+
+    /// Takes the other PC's files put on the clipboard last off it, if it
+    /// still holds them: they may no longer be pasted here.
+    pub fn withdraw_files(&mut self) -> Result<(), AccessError> {
+        self.access.withdraw_files()
+    }
 }
 
 /// The files side of what the clipboard now holds: copied files are
@@ -144,6 +150,8 @@ pub(crate) mod fake {
         pub written: Vec<String>,
         /// The paths of each list of files put on the clipboard.
         pub offered: Vec<Vec<String>>,
+        /// The files offered last are still on the clipboard.
+        pub holds_offered: bool,
     }
 
     #[derive(Clone, Default)]
@@ -181,6 +189,16 @@ pub(crate) mod fake {
             let paths = files.entries.into_iter().map(|e| e.path).collect();
             contents.offered.push(paths);
             contents.content = Some(ClipboardContent::NoText);
+            contents.holds_offered = true;
+            Ok(())
+        }
+
+        fn withdraw_files(&self) -> Result<(), AccessError> {
+            let mut contents = self.0.borrow_mut();
+            if contents.fail_writes {
+                return Err(AccessError::Failed("denied".into()));
+            }
+            contents.holds_offered = false;
             Ok(())
         }
     }

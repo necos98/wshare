@@ -101,11 +101,22 @@ impl TransferBoard {
         Some(Summary {
             transfers: self.active.len(),
             name: (self.active.len() == 1).then(|| first.info.name.clone()),
-            files: self.active.iter().map(|a| a.info.files).sum(),
+            files: self
+                .active
+                .iter()
+                .fold(0, |sum, a| sum.saturating_add(a.info.files)),
             direction: same_way.then_some(first.info.direction),
-            done_bytes: self.active.iter().map(|a| a.done_bytes).sum(),
-            total_bytes: self.active.iter().map(|a| a.info.total_bytes).sum(),
+            done_bytes: self.saturated_sum(|a| a.done_bytes),
+            total_bytes: self.saturated_sum(|a| a.info.total_bytes),
         })
+    }
+
+    /// The sum of `bytes` over the transfers, `u64::MAX` past it: sizes
+    /// come from the other PC.
+    fn saturated_sum(&self, bytes: impl Fn(&ActiveTransfer) -> u64) -> u64 {
+        self.active
+            .iter()
+            .fold(0, |sum, a| sum.saturating_add(bytes(a)))
     }
 
     fn find_mut(&mut self, id: TransferId) -> Option<&mut ActiveTransfer> {
@@ -175,6 +186,29 @@ mod tests {
         assert_eq!(summary.files, 4);
         assert_eq!(summary.direction, None, "both ways");
         assert_eq!(summary.percent(), 25);
+    }
+
+    #[test]
+    fn sizes_adding_up_beyond_u64_saturate() {
+        let mut board = TransferBoard::default();
+        board.apply(TransferEvent::Started(info(
+            1,
+            Direction::Receiving,
+            u64::MAX,
+        )));
+        board.apply(TransferEvent::Started(info(2, Direction::Receiving, 10)));
+        board.apply(TransferEvent::Progress {
+            id: TransferId(1),
+            done_bytes: u64::MAX,
+        });
+        board.apply(TransferEvent::Progress {
+            id: TransferId(2),
+            done_bytes: 10,
+        });
+        let summary = board.summary().unwrap();
+        assert_eq!(summary.total_bytes, u64::MAX);
+        assert_eq!(summary.done_bytes, u64::MAX);
+        assert_eq!(summary.percent(), 100);
     }
 
     #[test]

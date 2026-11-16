@@ -128,6 +128,10 @@ impl ClipboardAccess for SystemClipboard {
     fn offer_files(&self, files: RemoteFiles) -> Result<(), AccessError> {
         self.offers.offer(files)
     }
+
+    fn withdraw_files(&self) -> Result<(), AccessError> {
+        self.offers.withdraw()
+    }
 }
 
 fn failed(what: &str, error: &windows::core::Error) -> AccessError {

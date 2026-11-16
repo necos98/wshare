@@ -38,6 +38,9 @@ pub trait ClipboardAccess {
     /// Puts the other PC's copied files on the clipboard, pasteable in
     /// Explorer (their bytes travel only when pasted).
     fn offer_files(&self, files: RemoteFiles) -> Result<(), AccessError>;
+    /// Takes the other PC's files put there last off the clipboard, if it
+    /// still holds them: anything copied since stays.
+    fn withdraw_files(&self) -> Result<(), AccessError>;
 }
 
 /// How long to insist on a busy clipboard.

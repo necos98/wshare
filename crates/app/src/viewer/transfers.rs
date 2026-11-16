@@ -64,6 +64,12 @@ impl TransferPermissions for ViewerPermissions {
     fn serve_clipboard(&self) -> bool {
         self.rules().send_files_to_host()
     }
+
+    /// The host's copied files land on this clipboard whatever the
+    /// permissions: the person at the host chose to share them.
+    fn paste_from_peer(&self) -> bool {
+        true
+    }
 }
 
 /// Tells the window, the terminal and (when it asked) the interface.

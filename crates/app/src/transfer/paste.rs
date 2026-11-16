@@ -12,7 +12,7 @@ use protocol::transfer::{
 use tokio::sync::mpsc;
 
 use super::events::{Direction, Kind, Outcome, TransferInfo};
-use super::registry::{Chunk, Stage, Transfer};
+use super::registry::{Chunk, Stage, TOO_MANY_TRANSFERS, Transfer};
 use super::shared::Shared;
 use super::streams::{StreamError, cancelled, forward_file, send_file};
 
@@ -92,9 +92,14 @@ impl Shared {
             entry,
             chunks,
         } = request;
+        // Dropping `chunks` fails Explorer's read at once: when the other
+        // PC's files may no longer be pasted here (what the clipboard
+        // still holds of them stays unreadable), or too much runs.
+        if !self.permissions.paste_from_peer() {
+            return;
+        }
         let mut registry = self.registry();
         if registry.is_full() {
-            // Dropping `chunks` fails Explorer's read at once.
             return;
         }
         let id = registry.allocate();
@@ -176,7 +181,7 @@ impl Shared {
         let mut registry = self.registry();
         if !registry.admits_peer(id) {
             drop(registry);
-            let reason = TransferError::Failed("too many transfers at once".into());
+            let reason = TransferError::Failed(TOO_MANY_TRANSFERS.into());
             return self.send(TransferMessage::Failed { id, reason });
         }
         if !self.permissions.serve_clipboard() {

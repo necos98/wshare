@@ -136,6 +136,12 @@ impl TransferHub {
         self.shared.registry().withdraw_clipboard();
     }
 
+    /// The permissions may have been taken back: the pushes arriving and
+    /// the pastes from the other PC no longer allowed stop now.
+    pub fn enforce_permissions(&self) {
+        self.shared.enforce_permissions();
+    }
+
     /// For the clipboard files the other PC offers: how their bytes are
     /// fetched when Explorer pastes them.
     pub fn paste_link(&self) -> PasteLink {
@@ -170,10 +176,13 @@ async fn open_stream(shared: Arc<Shared>, incoming: IncomingFile) {
 enum Target {
     Push(Arc<super::receiving::Receiving>),
     Paste,
+    /// A transfer no longer allowed here.
+    Revoked,
     Unexpected,
 }
 
-/// Hands a stream to the transfer its header names, if it expects one.
+/// Hands a stream to the transfer its header names, if it expects one and
+/// is still allowed.
 fn route(shared: &Arc<Shared>, header: &StreamHeader, stream: FileReceiver) {
     // Looked up in a statement of its own: the registry's lock ends with
     // it, before the handlers below take it again.
@@ -183,6 +192,7 @@ fn route(shared: &Arc<Shared>, header: &StreamHeader, stream: FileReceiver) {
         .get(&header.id)
         .map(|t| &t.stage)
     {
+        Some(stage) if !shared.admits_stream(stage) => Target::Revoked,
         Some(Stage::Receiving(receiving)) => Target::Push(receiving.clone()),
         Some(Stage::Pulling { .. }) => Target::Paste,
         _ => Target::Unexpected,
@@ -190,6 +200,10 @@ fn route(shared: &Arc<Shared>, header: &StreamHeader, stream: FileReceiver) {
     let receiving = match target {
         Target::Push(receiving) => receiving,
         Target::Paste => return shared.forward_pasted(header, stream),
+        Target::Revoked => {
+            stream.cancel();
+            return shared.revoke(header.id);
+        }
         Target::Unexpected => return stream.cancel(),
     };
     match receiving.claim(header.index, &header.entry) {
@@ -216,3 +230,8 @@ async fn report_progress(shared: Arc<Shared>) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod guard_tests;
+#[cfg(test)]
+mod test_support;

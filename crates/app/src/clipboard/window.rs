@@ -40,6 +40,9 @@ const CLASS_NAME: PCWSTR = w!("wshare_clipboard_listener");
 /// Posted when files wait in [`FILE_OFFERS`] to be put on the clipboard.
 const WM_OFFER_FILES: u32 = WM_APP + 1;
 
+/// Posted to take the files offered last off the clipboard.
+const WM_WITHDRAW_FILES: u32 = WM_APP + 2;
+
 /// How long putting files on the clipboard may take.
 const OFFER_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -88,6 +91,21 @@ impl FileOffers {
             .recv_timeout(OFFER_TIMEOUT)
             .map_err(|_| AccessError::Failed("the clipboard thread did not answer".into()))?
             .map_err(AccessError::Failed)
+    }
+
+    /// Takes the files offered last off the clipboard, if it still holds
+    /// them (anything copied since stays). Does not wait for it.
+    pub fn withdraw(&self) -> Result<(), AccessError> {
+        // SAFETY: as in `offer`.
+        unsafe {
+            PostMessageW(
+                Some(self.owner.handle()),
+                WM_WITHDRAW_FILES,
+                WPARAM(0),
+                LPARAM(0),
+            )
+        }
+        .map_err(|e| AccessError::Failed(format!("reaching the clipboard thread: {e}")))
     }
 }
 
@@ -266,7 +284,8 @@ fn offer_waiting_files() {
 }
 
 /// Takes our files off the clipboard if they are still what it holds: they
-/// cannot be pasted once the session is over. Anything copied since stays.
+/// cannot be pasted once the session is over, or no longer allowed.
+/// Anything copied since stays.
 fn withdraw_offered_files() {
     if OFFERED.with(|slot| slot.borrow_mut().take()).is_none() {
         return;
@@ -301,6 +320,10 @@ unsafe extern "system" fn window_proc(
         }
         WM_OFFER_FILES => {
             offer_waiting_files();
+            LRESULT(0)
+        }
+        WM_WITHDRAW_FILES => {
+            withdraw_offered_files();
             LRESULT(0)
         }
         WM_DESTROY => {

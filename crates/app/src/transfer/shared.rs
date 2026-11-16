@@ -31,6 +31,8 @@ pub trait TransferPermissions: Send + Sync + 'static {
     fn accept_push(&self) -> bool;
     /// The other PC may fetch the files this PC's clipboard offers.
     fn serve_clipboard(&self) -> bool;
+    /// The files the other PC's clipboard offers may be pasted here.
+    fn paste_from_peer(&self) -> bool;
 }
 
 pub struct Shared {
@@ -109,14 +111,17 @@ impl Shared {
     }
 
     /// Ends `id` with `outcome`: whatever of it still runs is cancelled.
-    /// `false` if it had ended already.
+    /// `false` if it had ended already. A push still being planned was
+    /// never reported started: it ends without a word.
     pub fn finish(&self, id: TransferId, outcome: Outcome) -> bool {
         let Some(transfer) = self.take(id) else {
             return false;
         };
         // Raised before the transfer is dropped, for tasks that look.
         transfer.cancel.send_replace(true);
-        self.emit(TransferEvent::Finished { id, outcome });
+        if !matches!(transfer.stage, Stage::Planning { .. }) {
+            self.emit(TransferEvent::Finished { id, outcome });
+        }
         true
     }
 

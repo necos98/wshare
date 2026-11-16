@@ -26,7 +26,7 @@ use tokio::sync::watch;
 use super::admission::{Admission, Applicant, admit, send_rejection, viewer_trust};
 use super::approvals::Approvals;
 use super::audio::{AudioLoad, AudioPlan, SessionAudio};
-use super::clipboard::{ClipboardSettings, SessionClipboard};
+use super::clipboard::{ClipboardChange, ClipboardSettings, SessionClipboard};
 use super::devices::Devices;
 use super::events::EventSink;
 use super::input_gate::InputGate;
@@ -392,15 +392,10 @@ impl ControlLoop<'_> {
                 },
                 Some(update) = self.updates.recv() => self.forward(update).await?,
                 message = self.transfers.next() => self.tx.send(&message).await?,
-                () = self.clipboard.changed() => {
-                    let allowed = *self.allowed.borrow();
-                    let files = &self.transfers.hub;
-                    if let Some(message) = self.clipboard.local_change(allowed, files).await {
-                        self.tx.send(&message).await?;
-                    }
-                }
+                change = self.clipboard.changed() => self.on_clipboard(change).await?,
                 Ok(()) = self.allowed.changed() => {
                     let allowed = *self.allowed.borrow_and_update();
+                    self.clipboard.withdraw_disallowed_files(allowed);
                     let actions = self.switch.update(allowed);
                     if actions.release {
                         self.report(|gate, now| gate.release_all(now));
@@ -427,6 +422,23 @@ impl ControlLoop<'_> {
                 }
             }
         }
+    }
+
+    /// Something was copied on the host (it may go to the viewer), or the
+    /// clipboard's settings changed (the viewer's files may no longer be
+    /// pasteable here).
+    async fn on_clipboard(&mut self, change: ClipboardChange) -> Result<()> {
+        let allowed = *self.allowed.borrow();
+        match change {
+            ClipboardChange::Copied => {
+                let files = &self.transfers.hub;
+                if let Some(message) = self.clipboard.local_change(allowed, files).await {
+                    self.tx.send(&message).await?;
+                }
+            }
+            ClipboardChange::Settings => self.clipboard.withdraw_disallowed_files(allowed),
+        }
+        Ok(())
     }
 
     /// A step of a file transfer: the viewer's copied files go to the

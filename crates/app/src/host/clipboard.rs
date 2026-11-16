@@ -30,12 +30,24 @@ pub(super) struct ClipboardSettings {
     pub(super) receive_files: watch::Receiver<bool>,
 }
 
+/// What [`SessionClipboard::changed`] noticed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClipboardChange {
+    /// Something was copied on the host.
+    Copied,
+    /// "Condividi appunti" or "Consenti ricezione file" changed.
+    Settings,
+}
+
 pub(super) struct SessionClipboard<A = SystemClipboard> {
     /// `None` if the clipboard could not be listened to.
     link: Option<ClipboardSync<A>>,
     settings: ClipboardSettings,
     events: EventSink,
     failures: Throttle,
+    /// The viewer's files were put on the host's clipboard and not taken
+    /// off it since.
+    holds_viewer_files: bool,
 }
 
 impl SessionClipboard {
@@ -62,15 +74,41 @@ impl<A: ClipboardAccess> SessionClipboard<A> {
             settings,
             events,
             failures: Throttle::new(FAILURE_WARNING_INTERVAL),
+            holds_viewer_files: false,
+        }
+    }
+
+    /// The settings or remote control changed: the viewer's files are
+    /// taken off the host's clipboard once they may no longer be pasted
+    /// here (only if the clipboard still holds them).
+    pub(super) fn withdraw_disallowed_files(&mut self, input_allowed: bool) {
+        if !self.holds_viewer_files || self.rules(input_allowed).accept_files_from_viewer() {
+            return;
+        }
+        let Some(link) = self.link.as_mut() else {
+            return;
+        };
+        match link.withdraw_files() {
+            Ok(()) => self.holds_viewer_files = false,
+            Err(e) => self.report_failure(&e),
         }
     }
 
     /// Resolves when the host's clipboard changes (never, without a
-    /// listener).
-    pub(super) async fn changed(&mut self) {
-        match &mut self.link {
-            Some(link) => link.changed().await,
-            None => std::future::pending().await,
+    /// listener) or one of the settings does. Cancel-safe.
+    pub(super) async fn changed(&mut self) -> ClipboardChange {
+        let link = &mut self.link;
+        let copied = async move {
+            match link {
+                Some(link) => link.changed().await,
+                None => std::future::pending().await,
+            }
+        };
+        let settings = &mut self.settings;
+        tokio::select! {
+            () = copied => ClipboardChange::Copied,
+            Ok(()) = settings.sharing.changed() => ClipboardChange::Settings,
+            Ok(()) = settings.receive_files.changed() => ClipboardChange::Settings,
         }
     }
 
@@ -139,7 +177,12 @@ impl<A: ClipboardAccess> SessionClipboard<A> {
             return Received::Ignored;
         };
         match link.receive_files(offer, entries, files) {
-            Ok(received) => received,
+            Ok(received) => {
+                if received == Received::Applied {
+                    self.holds_viewer_files = true;
+                }
+                received
+            }
             Err(e) => {
                 self.report_failure(&e);
                 Received::Ignored

@@ -1,5 +1,6 @@
 //! The file transfers of the host's session: the hub of the connection,
-//! with the permissions read live from the service's state, its events
+//! with the permissions read live from the service's state (a change stops
+//! the transfers they no longer allow), its events
 //! reported as [`HostEvent::Transfer`], and the commands of the front-end
 //! (see [`super::HostHandle::send_files`]) taken while the session lasts.
 
@@ -21,6 +22,7 @@ use crate::transfer::{
 };
 
 /// The settings, as they are at the moment a transfer asks.
+#[derive(Clone)]
 struct HostPermissions {
     input: watch::Receiver<bool>,
     clipboard: watch::Receiver<bool>,
@@ -28,6 +30,17 @@ struct HostPermissions {
 }
 
 impl HostPermissions {
+    /// Resolves when one of the settings changes (never, once none can).
+    /// Cancel-safe.
+    async fn changed(&mut self) {
+        tokio::select! {
+            Ok(()) = self.input.changed() => {}
+            Ok(()) = self.clipboard.changed() => {}
+            Ok(()) = self.receive.changed() => {}
+            else => std::future::pending::<()>().await,
+        }
+    }
+
     fn rules(&self) -> HostRules {
         HostRules {
             sharing: *self.clipboard.borrow(),
@@ -50,6 +63,10 @@ impl TransferPermissions for HostPermissions {
     fn serve_clipboard(&self) -> bool {
         self.rules().send_files_to_viewer()
     }
+
+    fn paste_from_peer(&self) -> bool {
+        self.rules().accept_files_from_viewer()
+    }
 }
 
 struct Forward(EventSink);
@@ -65,6 +82,8 @@ pub(super) struct SessionTransfers {
     pub(super) hub: TransferHub,
     outgoing: UnboundedReceiver<ControlMessage>,
     commands: UnboundedReceiver<TransferCommand>,
+    /// Watched for permissions taken back while transfers run.
+    settings: HostPermissions,
     state: Arc<SharedState>,
 }
 
@@ -80,6 +99,7 @@ impl SessionTransfers {
             destination: ctx.downloads.clone(),
         };
         let observer = Forward(ctx.events.clone());
+        let settings = permissions.clone();
         let (hub, outgoing) =
             TransferHub::start(files, config, Arc::new(permissions), Arc::new(observer));
         let (commands_tx, commands) = unbounded_channel();
@@ -88,18 +108,19 @@ impl SessionTransfers {
             hub,
             outgoing,
             commands,
+            settings,
             state: Arc::clone(&ctx.state),
         }
     }
 
     /// The next message for the viewer, applying the front-end's commands
-    /// meanwhile. Cancel-safe.
+    /// and the settings' changes meanwhile. Cancel-safe.
     pub(super) async fn next(&mut self) -> ControlMessage {
         loop {
             tokio::select! {
                 Some(message) = self.outgoing.recv() => return message,
                 Some(command) = self.commands.recv() => self.hub.command(command),
-                else => std::future::pending::<()>().await,
+                () = self.settings.changed() => self.hub.enforce_permissions(),
             }
         }
     }

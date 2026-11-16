@@ -249,3 +249,46 @@ async fn an_unsafe_list_from_the_viewer_never_reaches_the_clipboard() {
     );
     assert!(f.copied.0.borrow().offered.is_empty());
 }
+
+fn holds_viewer_files(f: &Fixture) -> bool {
+    f.copied.0.borrow().holds_offered
+}
+
+#[tokio::test]
+async fn a_setting_turned_off_takes_the_viewers_files_off_the_clipboard() {
+    let turn_offs: [fn(&Fixture); 2] = [
+        |f| f.receive_files.send(false).unwrap(),
+        |f| f.sharing.send(false).unwrap(),
+    ];
+    for turn_off in turn_offs {
+        let mut f = fixture(true);
+        assert_eq!(remote_files(&mut f, true), Received::Applied);
+        turn_off(&f);
+        assert_eq!(f.clipboard.changed().await, ClipboardChange::Settings);
+        f.clipboard.withdraw_disallowed_files(true);
+        assert!(!holds_viewer_files(&f));
+    }
+}
+
+#[tokio::test]
+async fn remote_control_taken_back_takes_the_viewers_files_off_the_clipboard() {
+    let mut f = fixture(true);
+    assert_eq!(remote_files(&mut f, true), Received::Applied);
+    f.clipboard.withdraw_disallowed_files(true);
+    assert!(holds_viewer_files(&f), "still allowed: they stay");
+    f.clipboard.withdraw_disallowed_files(false);
+    assert!(!holds_viewer_files(&f));
+}
+
+#[tokio::test]
+async fn failing_to_take_the_files_back_is_a_warning() {
+    let mut f = fixture(true);
+    assert_eq!(remote_files(&mut f, true), Received::Applied);
+    f.copied.0.borrow_mut().fail_writes = true;
+    f.clipboard.withdraw_disallowed_files(false);
+    assert!(holds_viewer_files(&f));
+    assert!(matches!(
+        f.events.try_recv(),
+        Ok(HostEvent::Warning(HostWarning::ClipboardFailed(_)))
+    ));
+}

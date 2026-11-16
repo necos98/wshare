@@ -14,7 +14,9 @@ pub fn encode(bytes: &[u8]) -> String {
 /// The bytes of `text` (hex, either case, surrounding whitespace ignored);
 /// `None` if it is not hex.
 pub fn decode(text: &str) -> Option<Vec<u8>> {
-    let text = text.trim().as_bytes();
+    // A BOM is not whitespace for `trim`, but a key pasted through a
+    // Windows shell may start with one.
+    let text = text.trim().trim_start_matches('\u{feff}').trim().as_bytes();
     if !text.len().is_multiple_of(2) {
         return None;
     }

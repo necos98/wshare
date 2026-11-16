@@ -191,7 +191,13 @@ pub fn viewer_failed(label: &str, message: &str) -> String {
 
 pub const TRAY_OPEN: &str = "Apri wshare";
 pub const TRAY_SHARING: &str = "Condivisione attiva";
+pub const TRAY_NEW_PIN: &str = "Nuovo PIN";
+pub const TRAY_ALLOW_INPUT: &str = "Consenti controllo remoto";
 pub const TRAY_QUIT: &str = "Esci";
+
+pub fn tray_disconnect(name: &str) -> String {
+    format!("Disconnetti {name}")
+}
 
 pub fn tray_connected(name: &str) -> String {
     format!("wshare - connesso: {name}")
@@ -321,6 +327,89 @@ pub const STATS_HOTKEYS: &str = "Ctrl+Alt+I nascondi - Ctrl+Alt+Invio schermo in
 
 pub fn stats_losses(lost: u64, skipped: u64, keyframes: u64) -> String {
     format!("Persi {lost}  Scartati {skipped}  Keyframe richiesti {keyframes}")
+}
+
+// --- Settings -----------------------------------------------------------
+
+/// Comment lines at the top of `settings.toml`.
+pub const SETTINGS_FILE_HEADER: &str = "Impostazioni di wshare. Si cambiano dalla finestra \
+     (ingranaggio); un file illeggibile viene ignorato e si riparte dai valori predefiniti.";
+
+pub const SETTINGS_TITLE: &str = "Impostazioni";
+pub const SETTINGS_BACK: &str = "Indietro";
+pub const SETTINGS_OPEN_TIP: &str = "Impostazioni";
+
+pub const SETTINGS_SHARING: &str = "Condivisione";
+pub const SETTINGS_MONITOR: &str = "Monitor";
+pub const SETTINGS_FPS: &str = "Fotogrammi al secondo";
+pub const SETTINGS_MAX_MBPS: &str = "Qualità massima (Mbps)";
+pub const SETTINGS_MAX_MBPS_HINT: &str =
+    "Con la rete congestionata la qualità scende da sola, senza superare questo valore.";
+pub const SETTINGS_CODEC: &str = "Codec";
+pub const SETTINGS_PORT: &str = "Porta";
+pub const SETTINGS_ALLOW_INPUT: &str = "Consenti controllo remoto per impostazione predefinita";
+
+pub const SETTINGS_VIEWING: &str = "Visualizzazione";
+pub const SETTINGS_VIEWING_HINT: &str = "Valgono per le finestre aperte da ora in poi.";
+pub const SETTINGS_FULLSCREEN: &str = "Apri a schermo intero";
+pub const SETTINGS_STATS: &str = "Mostra le statistiche";
+pub const SETTINGS_VIEW_ONLY: &str = "Solo visualizzazione (niente mouse e tastiera)";
+
+pub const SETTINGS_STARTUP: &str = "Avvio";
+pub const SETTINGS_START_WITH_WINDOWS: &str = "Avvia con Windows";
+pub const SETTINGS_START_MINIMIZED: &str = "Avvia ridotto a icona";
+pub const SETTINGS_SHARE_ON_START: &str = "Attiva la condivisione all'avvio";
+
+pub const SETTINGS_FEEDBACK: &str = "Avvisi";
+pub const SETTINGS_NOTIFICATIONS: &str = "Notifiche di connessione e disconnessione";
+pub const SETTINGS_INDICATOR: &str = "Indicatore sempre visibile quando qualcuno è connesso";
+
+pub const SETTINGS_RESTART_NEEDED: &str = "Riavvia la condivisione per applicare.";
+pub const SETTINGS_RESTART: &str = "Riavvia la condivisione";
+pub const SETTINGS_RESTARTING: &str = "Riavvio della condivisione…";
+
+pub fn monitor_label(index: usize, name: &str, width: u32, height: u32) -> String {
+    format!("{} - {name} ({width}×{height})", index + 1)
+}
+
+pub fn monitor_missing(index: usize) -> String {
+    format!("Monitor {} (non collegato)", index + 1)
+}
+
+pub fn settings_unreadable(detail: &str) -> String {
+    format!("Impostazioni non leggibili, uso quelle predefinite: {detail}")
+}
+
+pub fn settings_not_saved(detail: &str) -> String {
+    format!("Impostazioni non salvate: {detail}")
+}
+
+pub fn autostart_failed(detail: &str) -> String {
+    format!("Impossibile cambiare l'avvio con Windows: {detail}")
+}
+
+pub fn monitors_unavailable(detail: &str) -> String {
+    format!("Elenco dei monitor non disponibile: {detail}")
+}
+
+// --- Notifications and connection indicator -----------------------------
+
+pub const NOTIFY_TITLE: &str = "wshare";
+
+pub fn notify_connected(name: &str) -> String {
+    format!("{name} si è connesso")
+}
+
+/// `name` is `None` when the viewer that left is not known any more.
+pub fn notify_disconnected(name: Option<&str>) -> String {
+    match name {
+        Some(name) => format!("{name} si è disconnesso"),
+        None => "Il visualizzatore si è disconnesso".to_string(),
+    }
+}
+
+pub fn indicator_connected(name: &str) -> String {
+    format!("{name} è connesso")
 }
 
 #[cfg(test)]

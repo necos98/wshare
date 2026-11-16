@@ -11,7 +11,7 @@
 
 mod authorized;
 mod known_hosts;
-mod store;
+pub(crate) mod store;
 mod timestamp;
 
 pub use authorized::{AuthorizedDevice, AuthorizedDevices};

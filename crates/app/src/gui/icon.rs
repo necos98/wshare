@@ -1,13 +1,26 @@
-//! The window icon, taken from the same `.ico` embedded in the executable.
+//! The window and tray icons, taken from the same `.ico` embedded in the
+//! executable.
 
 use eframe::egui::IconData;
 
 const ICO: &[u8] = include_bytes!("../../assets/wshare.ico");
 /// Size picked for the window (Windows scales it for title bar and taskbar).
 const WINDOW_ICON_SIZE: u32 = 64;
+/// Size picked for the notification area (Windows scales it to 16-32 px).
+const TRAY_ICON_SIZE: u32 = 32;
 
 pub fn window_icon() -> Option<IconData> {
-    let png = png_entry(ICO, WINDOW_ICON_SIZE)?;
+    icon_of_size(WINDOW_ICON_SIZE)
+}
+
+/// The icon of the notification area, as pixels so a variant can be drawn
+/// from it.
+pub fn tray_icon() -> Option<IconData> {
+    icon_of_size(TRAY_ICON_SIZE)
+}
+
+fn icon_of_size(size: u32) -> Option<IconData> {
+    let png = png_entry(ICO, size)?;
     eframe::icon_data::from_png_bytes(png).ok()
 }
 

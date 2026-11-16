@@ -7,6 +7,7 @@ use protocol::control::PROTOCOL_VERSION;
 use super::fakes::{calls, controller, host};
 use super::*;
 use crate::gui::model::tests::{found, listening};
+use crate::gui::settings::ViewerDisplay;
 use crate::host::{HostEvent, HostFailure, HostWarning};
 use crate::viewer::report::FailureCause;
 
@@ -236,6 +237,7 @@ fn connect_to_a_listed_host() {
         target: "192.168.1.3:7420".parse().unwrap(),
         host_id: None, // "bbbb" is not a well-formed host id
         pin: Some("123456".into()),
+        display: ViewerDisplay::default(),
     };
     assert_eq!(log.borrow().launched, [(1, request)]);
     let viewer = &c.state().viewers[0];

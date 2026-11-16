@@ -4,15 +4,17 @@
 use net::Fingerprint;
 
 use crate::host::HostFailure;
-use crate::options::{DEFAULT_PORT, HostOptions, StreamOptions};
+use crate::options::DEFAULT_PORT;
 use crate::target::{Target, parse_target};
 use crate::text;
 
 use super::model::{GuiState, ViewerId, ViewerSession, ViewerStatus, ViewerUpdate};
 use super::ports::{
-    AppEvent, KnownHostsStore, LaunchRequest, PendingStop, SharingControl, SharingService,
-    TrayAction, ViewerLauncher,
+    AppEvent, KnownHostsStore, LaunchRequest, PendingStop, SettingsBackend, SharingControl,
+    SharingService, TrayAction, ViewerLauncher,
 };
+use super::settings::Settings;
+use super::settings_state::Page;
 
 /// What the user asked for (from the window or the tray).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +44,12 @@ pub enum Intent {
     DismissViewer(ViewerId),
     /// Gives up a connection that is still being made.
     CancelViewer(ViewerId),
+    OpenSettings,
+    CloseSettings,
+    /// The settings as edited in the panel; saved and applied at once.
+    ChangeSettings(Settings),
+    /// Restarts the sharing so the saved streaming settings apply.
+    RestartSharing,
     ShowWindow,
     /// The window's close button.
     CloseWindow,
@@ -66,30 +74,43 @@ pub fn close_decision(sharing_enabled: bool) -> WindowCommand {
     }
 }
 
-pub struct Controller<S: SharingService, L: ViewerLauncher, K: KnownHostsStore> {
+pub struct Controller<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBackend>
+{
     state: GuiState,
     service: S,
     launcher: L,
     known_hosts: K,
+    backend: B,
     sharing: Option<Box<dyn SharingControl>>,
     /// A service switched off and still stopping in the background.
     stopping: Option<Box<dyn PendingStop>>,
     /// Tags the running service's events, to drop late ones of a previous run.
     generation: u64,
     next_viewer: ViewerId,
+    /// The sharing is stopping to start again with the new settings.
+    restart_pending: bool,
 }
 
-impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore> Controller<S, L, K> {
-    pub fn new(service: S, launcher: L, known_hosts: K) -> Self {
+impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBackend>
+    Controller<S, L, K, B>
+{
+    pub fn new(service: S, launcher: L, known_hosts: K, backend: B) -> Self {
+        let (settings, warning) = backend.load();
+        let mut state = GuiState::default();
+        state.sharing.input_allowed = settings.allow_input;
+        state.settings = settings;
+        state.settings_notice = warning.map(|detail| text::settings_unreadable(&detail));
         let mut controller = Self {
-            state: GuiState::default(),
+            state,
             service,
             launcher,
             known_hosts,
+            backend,
             sharing: None,
             stopping: None,
             generation: 0,
             next_viewer: 1,
+            restart_pending: false,
         };
         controller.reload_known_hosts();
         controller
@@ -114,12 +135,11 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore> Controller<S, L, 
                     sharing.disconnect_viewer();
                 }
             }
-            Intent::SetInputAllowed(allowed) => {
-                self.state.sharing.input_allowed = allowed;
-                if let Some(sharing) = &self.sharing {
-                    sharing.set_input_allowed(allowed);
-                }
-            }
+            Intent::SetInputAllowed(allowed) => self.set_input_allowed(allowed),
+            Intent::OpenSettings => self.open_settings(),
+            Intent::CloseSettings => self.state.page = Page::Main,
+            Intent::ChangeSettings(settings) => self.change_settings(settings),
+            Intent::RestartSharing => self.restart_sharing(),
             Intent::RemoveDevice(fingerprint) => {
                 // The list is updated when the service reports the change.
                 if let Some(sharing) = &self.sharing {
@@ -156,8 +176,11 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore> Controller<S, L, 
             AppEvent::Host { generation, event } => {
                 if generation == self.generation && self.sharing.is_some() {
                     let stopped = matches!(event, crate::host::HostEvent::Stopped { .. });
+                    self.queue_notification(&event);
                     self.state.apply_host_event(event);
                     if stopped && let Some(sharing) = self.sharing.take() {
+                        self.restart_pending = false;
+                        self.state.restarting = false;
                         sharing.stop();
                     }
                 }
@@ -168,6 +191,7 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore> Controller<S, L, 
                 {
                     stop.wait(); // already over: only joins its thread
                     self.state.sharing.stop_finished();
+                    self.finish_restart();
                 }
             }
             AppEvent::Discovery(event) => {
@@ -189,6 +213,11 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore> Controller<S, L, 
                 let intent = match action {
                     TrayAction::Open => Intent::ShowWindow,
                     TrayAction::ToggleSharing => Intent::ToggleSharing,
+                    TrayAction::DisconnectViewer => Intent::DisconnectViewer,
+                    TrayAction::NewPin => Intent::NewPin,
+                    TrayAction::ToggleInputAllowed => {
+                        Intent::SetInputAllowed(!self.state.settings.allow_input)
+                    }
                     TrayAction::Quit => Intent::Quit,
                 };
                 return self.handle(intent);
@@ -202,6 +231,8 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore> Controller<S, L, 
     /// keys are released, the viewer is told Bye and the LAN announcement
     /// is withdrawn.
     pub fn shutdown(&mut self) {
+        self.restart_pending = false;
+        self.state.restarting = false;
         let running = self.sharing.take();
         let stopping = self.stopping.take();
         if running.is_none() && stopping.is_none() {
@@ -222,12 +253,8 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore> Controller<S, L, 
             (true, false) if self.stopping.is_some() => {}
             (true, false) => {
                 self.generation += 1;
-                let options = HostOptions {
-                    stream: StreamOptions::default(),
-                    port: DEFAULT_PORT,
-                    pin: None,
-                    view_only: !self.state.sharing.input_allowed,
-                };
+                let options = self.state.settings.host_options();
+                self.state.applied = Some(options.clone());
                 match self.service.start(options, self.generation) {
                     Ok(sharing) => {
                         sharing.set_input_allowed(self.state.sharing.input_allowed);
@@ -267,6 +294,7 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore> Controller<S, L, 
                     // viewer would refuse such an id.
                     host_id: Fingerprint::is_host_id(&row.id).then_some(row.id),
                     pin,
+                    display: self.state.settings.viewer_display(),
                 };
                 self.launch(row.name, request);
             }
@@ -291,6 +319,7 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore> Controller<S, L, 
                     target,
                     host_id: None,
                     pin: non_empty(pin),
+                    display: self.state.settings.viewer_display(),
                 };
                 self.launch(label, request);
             }
@@ -373,5 +402,8 @@ mod connection_tests;
 mod fakes;
 #[cfg(test)]
 mod pairing_tests;
+mod preferences;
+#[cfg(test)]
+mod preferences_tests;
 #[cfg(test)]
 mod tests;

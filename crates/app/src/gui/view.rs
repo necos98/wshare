@@ -12,6 +12,8 @@ use crate::trust::Timestamp;
 use super::controller::Intent;
 use super::model::{GuiState, HostRow, Sharing, ViewerSession, ViewerStatus, format_pin};
 use super::pairing_view::{self, RememberedAction};
+use super::settings_state::Page;
+use super::settings_view;
 
 /// Text fields being edited; not part of the application state.
 #[derive(Debug, Default)]
@@ -40,10 +42,18 @@ pub(super) const DETAIL_SIZE: f32 = 12.0;
 
 pub fn show(ui: &mut Ui, state: &GuiState, drafts: &mut Drafts) -> Vec<Intent> {
     let mut intents = Vec::new();
+    if state.page == Page::Settings {
+        settings_view::show(ui, state, &mut intents);
+        return intents;
+    }
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
             sharing_section(ui, &state.sharing, &mut intents);
+            if let Some(notice) = &state.settings_notice {
+                ui.add_space(4.0);
+                ui.colored_label(error_color(ui), notice);
+            }
             ui.add_space(GAP);
             ui.separator();
             ui.add_space(GAP / 2.0);
@@ -57,6 +67,14 @@ fn sharing_section(ui: &mut Ui, sharing: &Sharing, intents: &mut Vec<Intent>) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(text::SHARE_THIS_SCREEN).size(16.0).strong());
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui
+                .button("⚙")
+                .on_hover_text(text::SETTINGS_OPEN_TIP)
+                .clicked()
+            {
+                intents.push(Intent::OpenSettings);
+            }
+            ui.add_space(4.0);
             let mut on = sharing.enabled;
             // Off but still winding down: cannot be switched on yet.
             ui.add_enabled_ui(!sharing.stopping, |ui| {
@@ -401,7 +419,7 @@ pub(super) fn error_color(ui: &Ui) -> Color32 {
     }
 }
 
-fn card<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
+pub(super) fn card<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
     Frame::group(ui.style())
         .inner_margin(Margin::same(12))
         .corner_radius(CornerRadius::same(8))

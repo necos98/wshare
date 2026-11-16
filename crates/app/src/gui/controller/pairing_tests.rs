@@ -7,6 +7,7 @@ use super::fakes::{Shared, TestController, calls, controller, controller_knowing
 use super::*;
 use crate::gui::model::tests::{found, listening};
 use crate::gui::remembered::tests::known;
+use crate::gui::settings::ViewerDisplay;
 use crate::trust::KnownHost;
 use crate::viewer::report::FailureCause;
 
@@ -62,6 +63,7 @@ fn a_remembered_host_connects_without_a_pin() {
             target: format!("{OFFICE_IP}:7420").parse().unwrap(),
             host_id: Some(id),
             pin: None,
+            display: ViewerDisplay::default(),
         }
     );
     assert_eq!(c.state().connect_error, None);

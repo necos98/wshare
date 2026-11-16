@@ -50,6 +50,7 @@ impl ViewerLauncher for ProcessLauncher {
         if let Some(host_id) = &request.host_id {
             command.arg("--host-id").arg(host_id);
         }
+        command.args(request.display.flags());
         match &request.pin {
             Some(pin) => command.env(PIN_ENV, pin),
             None => command.env_remove(PIN_ENV),

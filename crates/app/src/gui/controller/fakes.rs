@@ -7,7 +7,9 @@ use anyhow::{Result, bail};
 use net::Fingerprint;
 
 use super::*;
+use crate::gui::ports::MonitorChoice;
 use crate::host::{HostEvent, HostFailure};
+use crate::options::HostOptions;
 use crate::trust::KnownHost;
 
 /// Shared log of what the fakes were asked to do.
@@ -21,6 +23,14 @@ pub(super) struct Log {
     /// What the known-hosts store holds.
     pub(super) known: Vec<KnownHost>,
     pub(super) fail_forget: bool,
+    /// What the settings file holds, and the warning loading it gives.
+    pub(super) settings: Settings,
+    pub(super) settings_warning: Option<String>,
+    pub(super) saved: Vec<Settings>,
+    pub(super) fail_save: bool,
+    pub(super) fail_autostart: bool,
+    pub(super) monitors: Vec<MonitorChoice>,
+    pub(super) fail_monitors: bool,
 }
 
 pub(super) type Shared = Rc<RefCell<Log>>;
@@ -30,6 +40,7 @@ struct FakeControl(Shared);
 struct FakePendingStop(Shared);
 pub(super) struct FakeLauncher(Shared);
 pub(super) struct FakeKnownHosts(Shared);
+pub(super) struct FakeSettings(Shared);
 
 impl SharingService for FakeService {
     fn start(&mut self, options: HostOptions, generation: u64) -> Result<Box<dyn SharingControl>> {
@@ -109,7 +120,8 @@ pub(super) fn short(fingerprint: &Fingerprint) -> String {
     format!("{:02x}", fingerprint.0[0])
 }
 
-pub(super) type TestController = Controller<FakeService, FakeLauncher, FakeKnownHosts>;
+pub(super) type TestController =
+    Controller<FakeService, FakeLauncher, FakeKnownHosts, FakeSettings>;
 
 /// A controller whose known-hosts store holds `known`.
 pub(super) fn controller_knowing(known: Vec<KnownHost>) -> (TestController, Shared) {
@@ -119,6 +131,7 @@ pub(super) fn controller_knowing(known: Vec<KnownHost>) -> (TestController, Shar
         FakeService(log.clone()),
         FakeLauncher(log.clone()),
         FakeKnownHosts(log.clone()),
+        FakeSettings(log.clone()),
     );
     (controller, log)
 }
@@ -133,4 +146,48 @@ pub(super) fn calls(log: &Shared) -> Vec<String> {
 
 pub(super) fn host(generation: u64, event: HostEvent) -> AppEvent {
     AppEvent::Host { generation, event }
+}
+
+impl SettingsBackend for FakeSettings {
+    fn load(&self) -> (Settings, Option<String>) {
+        let log = self.0.borrow();
+        (log.settings.clone(), log.settings_warning.clone())
+    }
+
+    fn save(&self, settings: &Settings) -> Result<()> {
+        let mut log = self.0.borrow_mut();
+        if log.fail_save {
+            bail!("disk full");
+        }
+        log.saved.push(settings.clone());
+        log.settings = settings.clone();
+        Ok(())
+    }
+
+    fn set_autostart(&self, enabled: bool, minimized: bool) -> Result<()> {
+        let mut log = self.0.borrow_mut();
+        log.calls.push(format!("autostart {enabled} {minimized}"));
+        if log.fail_autostart {
+            bail!("registry is read-only");
+        }
+        Ok(())
+    }
+
+    fn monitors(&self) -> Result<Vec<MonitorChoice>> {
+        let log = self.0.borrow();
+        if log.fail_monitors {
+            bail!("no display");
+        }
+        Ok(log.monitors.clone())
+    }
+}
+
+/// A controller on the fakes of `log`, as the test prepared it.
+pub(super) fn controller_from(log: &Shared) -> TestController {
+    Controller::new(
+        FakeService(log.clone()),
+        FakeLauncher(log.clone()),
+        FakeKnownHosts(log.clone()),
+        FakeSettings(log.clone()),
+    )
 }

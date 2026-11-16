@@ -1,6 +1,6 @@
 //! Boundaries between the interface logic and the outside world. Real
-//! implementations live in `sharing`, `launcher`, `discovery_source` and
-//! `known_hosts_file`; tests use fakes.
+//! implementations live in `sharing`, `launcher`, `discovery_source`,
+//! `known_hosts_file` and `system_settings`; tests use fakes.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -15,6 +15,7 @@ use crate::options::HostOptions;
 use crate::trust::KnownHost;
 
 use super::model::{ViewerId, ViewerUpdate};
+use super::settings::{Settings, ViewerDisplay};
 
 /// Everything that reaches the interface from background threads.
 #[derive(Debug, Clone, PartialEq)]
@@ -38,11 +39,15 @@ pub enum AppEvent {
     Tray(TrayAction),
 }
 
-/// What the user did on the tray icon.
+/// What the user did on the tray icon or the connection indicator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayAction {
     Open,
     ToggleSharing,
+    /// "Disconnetti <nome>", also the button of the connection indicator.
+    DisconnectViewer,
+    NewPin,
+    ToggleInputAllowed,
     Quit,
 }
 
@@ -108,6 +113,8 @@ pub struct LaunchRequest {
     pub host_id: Option<String>,
     /// `None`: the host must recognise this PC (or it refuses).
     pub pin: Option<String>,
+    /// How the viewer window opens (from the settings).
+    pub display: ViewerDisplay,
 }
 
 /// Opens viewer windows.
@@ -126,4 +133,27 @@ pub trait KnownHostsStore {
     fn load(&self) -> (Vec<KnownHost>, Option<String>);
     /// Forgets a host: it is neither pinned nor connected to without a PIN.
     fn forget(&self, fingerprint: &Fingerprint) -> Result<()>;
+}
+
+/// A monitor of this PC the user can share.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorChoice {
+    /// The index `wshare monitors` prints and `--monitor` takes.
+    pub index: usize,
+    pub label: String,
+}
+
+/// Where the settings live and what changing them touches outside the
+/// window: the settings file, the Windows start-up entry and the monitor
+/// list.
+pub trait SettingsBackend {
+    /// The saved settings; on a missing, damaged or unreadable file the
+    /// defaults and, unless it is just missing, the reason.
+    fn load(&self) -> (Settings, Option<String>);
+    fn save(&self, settings: &Settings) -> Result<()>;
+    /// Registers (`enabled`) or removes the start-up of wshare with
+    /// Windows; `minimized` makes it open hidden in the tray.
+    fn set_autostart(&self, enabled: bool, minimized: bool) -> Result<()>;
+    /// The monitors that can be captured now.
+    fn monitors(&self) -> Result<Vec<MonitorChoice>>;
 }

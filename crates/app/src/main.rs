@@ -31,7 +31,7 @@ use cli::Command;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = cli::parse(&args);
-    let is_gui = matches!(command, Ok(Command::Gui));
+    let is_gui = matches!(command, Ok(Command::Gui(_)));
     let is_view = matches!(command, Ok(Command::View(_)));
     if !is_gui {
         gui::platform::attach_parent_console();
@@ -59,7 +59,7 @@ fn run(command: Command) -> Result<()> {
         Command::Bench(options) => bench::run(options),
         Command::Host(options) => host::run(options),
         Command::View(options) => viewer::run(options),
-        Command::Gui => gui::run(),
+        Command::Gui(options) => gui::run(options),
         Command::Help => {
             println!("{}", cli::USAGE);
             Ok(())

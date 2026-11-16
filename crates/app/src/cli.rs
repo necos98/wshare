@@ -30,6 +30,17 @@ pub struct ViewOptions {
     pub stats: bool,
 }
 
+/// What the desktop interface is started with.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GuiOptions {
+    /// Open hidden in the notification area (how Windows starts it at
+    /// sign-in, see `gui::autostart`).
+    pub minimized: bool,
+}
+
+/// Starts the interface hidden in the tray.
+pub const MINIMIZED_FLAG: &str = "--minimized";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Monitors,
@@ -39,12 +50,15 @@ pub enum Command {
     View(ViewOptions),
     Help,
     /// No arguments (e.g. double-click): the desktop interface.
-    Gui,
+    Gui(GuiOptions),
 }
 
 pub const USAGE: &str = "\
 wshare - LAN screen sharing (no arguments: open the window)
 
+  wshare [--minimized]
+               open the window; --minimized starts hidden in the notification area
+               (Windows start-up passes it when the option is on in the settings)
   wshare host  [--monitor N] [--fps F] [--mbps B] [--codec h264|hevc] [--port P] [--pin PIN]
                [--view-only]
                --mbps is the maximum bitrate (default 20): the host lowers it while the
@@ -63,7 +77,7 @@ wshare - LAN screen sharing (no arguments: open the window)
 
 pub fn parse(args: &[String]) -> Result<Command> {
     let Some((command, rest)) = args.split_first() else {
-        return Ok(Command::Gui);
+        return Ok(Command::Gui(GuiOptions::default()));
     };
     match command.as_str() {
         "monitors" => no_args(rest, Command::Monitors),
@@ -71,6 +85,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
         "bench" => parse_bench(rest).map(Command::Bench),
         "host" => parse_host(rest).map(Command::Host),
         "view" => parse_view(rest).map(Command::View),
+        MINIMIZED_FLAG if rest.is_empty() => Ok(Command::Gui(GuiOptions { minimized: true })),
         "help" | "--help" | "-h" => Ok(Command::Help),
         other => bail!("unknown command '{other}'"),
     }
@@ -221,7 +236,16 @@ mod tests {
 
     #[test]
     fn no_arguments_opens_the_interface() {
-        assert_eq!(parse(&[]).unwrap(), Command::Gui);
+        assert_eq!(parse(&[]).unwrap(), Command::Gui(GuiOptions::default()));
+    }
+
+    #[test]
+    fn the_minimized_flag_opens_the_interface_hidden() {
+        assert_eq!(
+            parse(&args("--minimized")).unwrap(),
+            Command::Gui(GuiOptions { minimized: true })
+        );
+        assert!(parse(&args("--minimized extra")).is_err());
     }
 
     #[test]

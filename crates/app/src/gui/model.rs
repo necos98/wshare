@@ -8,11 +8,16 @@ use net::Fingerprint;
 use protocol::control::PROTOCOL_VERSION;
 
 use crate::host::HostEvent;
+use crate::options::HostOptions;
 use crate::text;
 use crate::trust::AuthorizedDevice;
 use crate::viewer::report::FailureCause;
 
+use super::notifications::Notification;
+use super::ports::MonitorChoice;
 use super::remembered::RememberedHosts;
+use super::settings::Settings;
+use super::settings_state::Page;
 
 /// Identifies a viewer process launched by the interface.
 pub type ViewerId = u64;
@@ -260,6 +265,20 @@ pub struct GuiState {
     /// Counts the times the selected host asked for the PIN again; the
     /// window empties and focuses the PIN field whenever it changes.
     pub pin_prompts: u64,
+    /// The saved preferences (see `settings`).
+    pub settings: Settings,
+    pub page: Page,
+    /// The monitors that can be shared; refreshed when the settings open.
+    pub monitors: Vec<MonitorChoice>,
+    /// A problem with the settings (unreadable file, not saved, ...).
+    pub settings_notice: Option<String>,
+    /// What the running sharing was started with, to tell when the saved
+    /// streaming settings differ from it.
+    pub applied: Option<HostOptions>,
+    /// The sharing is being restarted to apply new streaming settings.
+    pub restarting: bool,
+    /// Balloons waiting to be shown (see `notifications`).
+    pub notifications: Vec<Notification>,
 }
 
 impl GuiState {

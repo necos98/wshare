@@ -8,31 +8,50 @@ use eframe::egui::{self, ViewportCommand};
 use super::controller::{Controller, Intent, WindowCommand};
 use super::known_hosts_file::KnownHostsFile;
 use super::launcher::ProcessLauncher;
+use super::overlay::Overlay;
 use super::ports::AppEvent;
 use super::sharing::HostService;
+use super::system_settings::SystemSettings;
 use super::tray::Tray;
 use super::view::{self, Drafts};
 
-type AppController = Controller<HostService, ProcessLauncher, KnownHostsFile>;
+type AppController = Controller<HostService, ProcessLauncher, KnownHostsFile, SystemSettings>;
+
+/// What the app shows outside its window; each part is absent when Windows
+/// would not create it.
+pub struct Shell {
+    pub tray: Option<Tray>,
+    pub overlay: Option<Overlay>,
+}
 
 pub struct WshareApp {
     controller: AppController,
     events: Receiver<AppEvent>,
     drafts: Drafts,
-    /// `None` if the notification area is unavailable.
-    tray: Option<Tray>,
+    shell: Shell,
     hidden: bool,
+    /// Opened hidden, but there is no tray icon to reopen it from: the
+    /// window must be shown (minimized) instead.
+    reveal_minimized: bool,
     quitting: bool,
 }
 
 impl WshareApp {
-    pub fn new(controller: AppController, events: Receiver<AppEvent>, tray: Option<Tray>) -> Self {
+    /// `minimized`: the window was created hidden (see `gui::run`).
+    pub fn new(
+        controller: AppController,
+        events: Receiver<AppEvent>,
+        shell: Shell,
+        minimized: bool,
+    ) -> Self {
+        let has_tray = shell.tray.is_some();
         Self {
             controller,
             events,
             drafts: Drafts::default(),
-            tray,
-            hidden: false,
+            shell,
+            hidden: minimized && has_tray,
+            reveal_minimized: minimized && !has_tray,
             quitting: false,
         }
     }
@@ -45,7 +64,7 @@ impl WshareApp {
                 ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
                 ctx.send_viewport_cmd(ViewportCommand::Focus);
             }
-            WindowCommand::HideToTray if self.tray.is_some() => {
+            WindowCommand::HideToTray if self.shell.tray.is_some() => {
                 self.hidden = true;
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
                 ctx.send_viewport_cmd(ViewportCommand::Visible(false));
@@ -62,9 +81,24 @@ impl WshareApp {
         }
     }
 
-    fn sync_tray(&mut self) {
-        if let Some(tray) = &mut self.tray {
-            tray.sync(self.controller.state());
+    /// Mirrors the state outside the window: tray icon, balloons and the
+    /// connection indicator.
+    fn sync_shell(&mut self, ctx: &egui::Context) {
+        if std::mem::take(&mut self.reveal_minimized) {
+            ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+        }
+        let state = self.controller.state();
+        if let Some(tray) = &mut self.shell.tray {
+            tray.sync(state);
+        }
+        if let Some(overlay) = &mut self.shell.overlay {
+            overlay.show(state.indicator_text().as_deref());
+        }
+        for notification in self.controller.take_notifications() {
+            if let Some(tray) = &self.shell.tray {
+                tray.notify(&notification);
+            }
         }
     }
 
@@ -84,7 +118,7 @@ impl eframe::App for WshareApp {
                 self.execute(ctx, command);
             }
         }
-        self.sync_tray();
+        self.sync_shell(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -104,7 +138,7 @@ impl eframe::App for WshareApp {
         for intent in intents {
             self.handle(&ctx, intent);
         }
-        self.sync_tray();
+        self.sync_shell(&ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

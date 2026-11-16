@@ -57,6 +57,12 @@ impl SharingControl for FakeControl {
     fn set_input_allowed(&self, allowed: bool) {
         self.0.borrow_mut().calls.push(format!("input {allowed}"));
     }
+    fn set_clipboard_shared(&self, shared: bool) {
+        self.0
+            .borrow_mut()
+            .calls
+            .push(format!("clipboard {shared}"));
+    }
     fn new_pin(&self) -> String {
         self.0.borrow_mut().calls.push("new_pin".into());
         "654321".into()

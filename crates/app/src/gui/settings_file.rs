@@ -51,6 +51,7 @@ mod tests {
             codec: CodecChoice::Hevc,
             port: 7500,
             allow_input: false,
+            share_clipboard: false,
             viewer_fullscreen: true,
             viewer_stats: true,
             viewer_view_only: true,

@@ -85,6 +85,8 @@ pub trait SharingService {
 /// Controls a running sharing service (see [`crate::host::HostHandle`]).
 pub trait SharingControl {
     fn set_input_allowed(&self, allowed: bool);
+    /// Turns the shared clipboard on or off, also for a viewer connected now.
+    fn set_clipboard_shared(&self, shared: bool);
     fn new_pin(&self) -> String;
     fn disconnect_viewer(&self);
     /// Removes an authorized viewer: its next connection needs the PIN.

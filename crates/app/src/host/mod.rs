@@ -17,7 +17,9 @@
 //! - `rate_adaptation`: the encoder's bitrate fitted to the network.
 //! - `input_gate`: remote input behind the "allow input" switch.
 //! - `input_switch`: what a session does when that switch flips.
-//! - `state`: PIN, input flag and end signals shared with the handle.
+//! - `clipboard`: the shared clipboard of a session.
+//! - `state`: PIN, input and clipboard flags and end signals shared with the
+//!   handle.
 //! - `cause`: the typed reasons of failures and warnings.
 //! - `events`: delivery to the observer, rate limiting.
 //! - `console` + `interrupt`: the CLI front-end (`run`).
@@ -25,6 +27,7 @@
 mod accept;
 mod admission;
 mod cause;
+mod clipboard;
 mod console;
 mod devices;
 mod events;
@@ -127,6 +130,13 @@ impl HostHandle {
     /// one learns the setting in Welcome.
     pub fn set_input_allowed(&self, allowed: bool) {
         self.service.state().set_input_allowed(allowed);
+    }
+
+    /// Turns the shared clipboard on or off, effective immediately, also for
+    /// a viewer already connected. Off, nothing is sent to the viewer and
+    /// nothing it sends is written to this PC's clipboard.
+    pub fn set_clipboard_shared(&self, shared: bool) {
+        self.service.state().set_clipboard_shared(shared);
     }
 
     /// Generates a new random PIN for the next connections and reports it

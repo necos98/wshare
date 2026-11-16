@@ -62,6 +62,10 @@ impl SharingControl for RunningHost {
         self.handle.set_input_allowed(allowed);
     }
 
+    fn set_clipboard_shared(&self, shared: bool) {
+        self.handle.set_clipboard_shared(shared);
+    }
+
     fn new_pin(&self) -> String {
         self.handle.new_pin()
     }

@@ -19,6 +19,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::sync::watch;
 
 use super::admission::{Admission, Applicant, admit, send_rejection, viewer_trust};
+use super::clipboard::SessionClipboard;
 use super::devices::Devices;
 use super::events::EventSink;
 use super::input_gate::InputGate;
@@ -169,6 +170,7 @@ async fn serve_admitted(
     streaming.go();
 
     let mut gate = InputGate::new(input);
+    let clipboard = SessionClipboard::open(ctx.state.watch_clipboard(), ctx.events.clone());
     let loop_state = ControlLoop {
         tx: &mut tx,
         rx: &mut rx,
@@ -177,6 +179,7 @@ async fn serve_admitted(
         gate: &mut gate,
         allowed,
         switch: InputSwitch::new(told),
+        clipboard,
         cancel: &mut cancel,
         handle: &viewer.handle,
         events: &ctx.events,
@@ -256,6 +259,8 @@ struct ControlLoop<'a> {
     gate: &'a mut InputGate<RemoteInput>,
     allowed: watch::Receiver<bool>,
     switch: InputSwitch,
+    /// The text copied on either PC, while the session lasts.
+    clipboard: SessionClipboard,
     cancel: &'a mut Cancelled,
     handle: &'a SessionHandle,
     events: &'a EventSink,
@@ -277,10 +282,20 @@ impl ControlLoop<'_> {
                         let allowed = *self.allowed.borrow();
                         self.report(|gate, now| gate.apply(allowed, &event, now));
                     }
+                    Some(ControlMessage::Clipboard(text)) => {
+                        let allowed = *self.allowed.borrow();
+                        self.clipboard.remote_text(&text, allowed).await;
+                    }
                     Some(ControlMessage::Bye) | None => return Ok(SessionEnd::ViewerLeft),
                     Some(_) => {} // ignore unexpected messages
                 },
                 Some(update) = self.updates.recv() => self.tx.send(&update).await?,
+                () = self.clipboard.changed() => {
+                    let allowed = *self.allowed.borrow();
+                    if let Some(message) = self.clipboard.local_change(allowed).await {
+                        self.tx.send(&message).await?;
+                    }
+                }
                 Ok(()) = self.allowed.changed() => {
                     let allowed = *self.allowed.borrow_and_update();
                     let actions = self.switch.update(allowed);

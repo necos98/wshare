@@ -16,6 +16,8 @@
 //!   viewer -> host  ReceptionReport(report) (every RECEPTION_REPORT_INTERVAL)
 //!   host -> viewer  TargetBitrate { bps }   (the encoder's rate changed)
 //!   viewer -> host  Nack(nack)              (video datagrams to send again)
+//!   either          Clipboard(text)         (the text just copied, at most
+//!                                            MAX_CLIPBOARD_BYTES)
 //!   either          Bye
 //!
 //! Compatibility: peers of different protocol versions must still understand
@@ -46,11 +48,18 @@ use crate::recovery::Nack;
 ///    the encoder's bitrate to the network.
 /// 6: Nack (viewer): lost video datagrams are sent again instead of
 ///    waiting for a keyframe.
-pub const PROTOCOL_VERSION: u16 = 6;
+/// 7: Clipboard (either side): copied text crosses to the other PC.
+pub const PROTOCOL_VERSION: u16 = 7;
 
 /// Upper bound for one control message; protects against garbage lengths.
 /// Sized for the largest cursor image (256x256 RGBA = 256 KiB) plus margin.
 pub const MAX_CONTROL_MESSAGE: usize = 512 * 1024;
+
+/// Longest text a [`ControlMessage::Clipboard`] carries, in UTF-8 bytes.
+/// Both sides refuse longer text: the sender does not send it and the
+/// receiver ignores it, so a peer cannot make the other one hold or paste
+/// something huge.
+pub const MAX_CLIPBOARD_BYTES: usize = 256 * 1024;
 
 /// Size of the little-endian length prefix in front of every payload.
 const LENGTH_PREFIX: usize = 4;
@@ -196,6 +205,9 @@ pub enum ControlMessage {
     /// Video datagrams the viewer missed: the host sends them again while
     /// it still has them (see [`crate::recovery`]).
     Nack(Nack),
+    /// The text just copied on the sender's PC, for the other PC's
+    /// clipboard. At most [`MAX_CLIPBOARD_BYTES`] bytes.
+    Clipboard(String),
 }
 
 /// Serializes `msg` as one length-prefixed frame.
@@ -355,6 +367,8 @@ mod tests {
                 frame_id: 7,
                 missing: Missing::Whole,
             }),
+            ControlMessage::Clipboard("copiato \u{e8} \u{1F5A5}\r\nseconda riga".into()),
+            ControlMessage::Clipboard(String::new()),
             ControlMessage::Rejected {
                 reason: RejectReason::PinRequired,
             },
@@ -633,6 +647,25 @@ mod tests {
                 missing: Missing::Whole
             })),
             11
+        );
+        assert_eq!(index(ControlMessage::Clipboard(String::new())), 12);
+    }
+
+    #[test]
+    fn clipboard_layout_is_stable() {
+        // Variant 12, then the text: length as a varint (3), UTF-8 bytes.
+        let frame = encode_frame(&ControlMessage::Clipboard("a\u{e8}".into()));
+        assert_eq!(frame, frame_of(&[12, 3, b'a', 0xC3, 0xA8]));
+    }
+
+    #[test]
+    fn the_longest_clipboard_text_fits_in_one_frame() {
+        let text = "x".repeat(MAX_CLIPBOARD_BYTES);
+        let frame = encode_frame(&ControlMessage::Clipboard(text.clone()));
+        assert!(frame.len() - LENGTH_PREFIX <= MAX_CONTROL_MESSAGE);
+        assert_eq!(
+            decode_one(&frame).unwrap(),
+            Some(ControlMessage::Clipboard(text))
         );
     }
 

@@ -103,6 +103,7 @@ fn sharing_group(ui: &mut Ui, state: &GuiState, edited: &mut Settings) {
         codec_row(ui, edited);
         port_row(ui, edited);
         ui.checkbox(&mut edited.allow_input, text::SETTINGS_ALLOW_INPUT);
+        ui.checkbox(&mut edited.share_clipboard, text::SETTINGS_SHARE_CLIPBOARD);
     });
 }
 

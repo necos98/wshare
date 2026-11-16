@@ -56,6 +56,9 @@ pub struct Settings {
     pub port: u16,
     /// Whether viewers may use this PC's mouse and keyboard.
     pub allow_input: bool,
+    /// Whether copied text is shared with the connected viewer (both ways;
+    /// the viewer's text also needs `allow_input`).
+    pub share_clipboard: bool,
     // Viewer windows opened from this PC.
     pub viewer_fullscreen: bool,
     pub viewer_stats: bool,
@@ -79,6 +82,7 @@ impl Default for Settings {
             codec: CodecChoice::H264,
             port: DEFAULT_PORT,
             allow_input: true,
+            share_clipboard: true,
             viewer_fullscreen: false,
             viewer_stats: false,
             viewer_view_only: false,
@@ -150,6 +154,7 @@ impl Settings {
             port: self.port,
             pin: None,
             view_only: !self.allow_input,
+            share_clipboard: self.share_clipboard,
         }
     }
 
@@ -169,6 +174,7 @@ mod tests {
         assert_eq!(settings.stream_options(), StreamOptions::default());
         assert_eq!(settings.port, DEFAULT_PORT);
         assert!(settings.allow_input);
+        assert!(settings.share_clipboard);
         assert!(settings.notifications && settings.connection_indicator);
         assert!(!settings.start_with_windows && !settings.start_minimized);
     }
@@ -199,6 +205,7 @@ mod tests {
             codec: CodecChoice::Hevc,
             port: 9000,
             allow_input: false,
+            share_clipboard: false,
             ..Settings::default()
         };
         let options = settings.host_options();
@@ -208,6 +215,7 @@ mod tests {
         assert_eq!(options.stream.codec, Codec::Hevc);
         assert_eq!(options.port, 9000);
         assert!(options.view_only);
+        assert!(!options.share_clipboard);
         assert_eq!(options.pin, None);
     }
 

@@ -62,6 +62,7 @@ pub(super) enum SessionRefusal {
 pub(super) struct SharedState {
     pin: Mutex<String>,
     input_allowed: watch::Sender<bool>,
+    clipboard_shared: watch::Sender<bool>,
     stop: Cancel,
     stop_listener: Cancelled,
     /// Under one lock with the stop check, so "stop" and "a new session
@@ -70,11 +71,17 @@ pub(super) struct SharedState {
 }
 
 impl SharedState {
-    pub(super) fn new(pin: String, input_allowed: bool, limits: SessionLimits) -> Self {
+    pub(super) fn new(
+        pin: String,
+        input_allowed: bool,
+        clipboard_shared: bool,
+        limits: SessionLimits,
+    ) -> Self {
         let (stop, stop_listener) = Cancel::new();
         Self {
             pin: Mutex::new(pin),
             input_allowed: watch::channel(input_allowed).0,
+            clipboard_shared: watch::channel(clipboard_shared).0,
             stop,
             stop_listener,
             sessions: Mutex::new(Sessions::new(limits)),
@@ -105,6 +112,21 @@ impl SharedState {
     /// A receiver that wakes when the input permission changes.
     pub(super) fn watch_input(&self) -> watch::Receiver<bool> {
         self.input_allowed.subscribe()
+    }
+
+    /// Turns the shared clipboard on or off; sessions watching it are woken
+    /// only on an actual change.
+    pub(super) fn set_clipboard_shared(&self, shared: bool) {
+        self.clipboard_shared.send_if_modified(|current| {
+            let changed = *current != shared;
+            *current = shared;
+            changed
+        });
+    }
+
+    /// A receiver that wakes when the clipboard is turned on or off.
+    pub(super) fn watch_clipboard(&self) -> watch::Receiver<bool> {
+        self.clipboard_shared.subscribe()
     }
 
     /// Registers a new connection to admit. The session lasts as long as
@@ -186,6 +208,7 @@ mod tests {
         Arc::new(SharedState::new(
             "111111".into(),
             true,
+            true,
             SessionLimits::default(),
         ))
     }
@@ -211,6 +234,18 @@ mod tests {
         assert!(watcher.has_changed().unwrap());
         assert!(!*watcher.borrow_and_update());
         assert!(!*state.watch_input().borrow());
+    }
+
+    #[test]
+    fn the_clipboard_flag_wakes_watchers_only_on_real_changes() {
+        let state = state();
+        let mut watcher = state.watch_clipboard();
+        state.set_clipboard_shared(true);
+        assert!(!watcher.has_changed().unwrap());
+        state.set_clipboard_shared(false);
+        assert!(watcher.has_changed().unwrap());
+        assert!(!*watcher.borrow_and_update());
+        assert!(!*state.watch_clipboard().borrow());
     }
 
     #[test]

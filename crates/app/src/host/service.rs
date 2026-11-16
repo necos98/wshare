@@ -51,6 +51,7 @@ impl Service {
         let state = Arc::new(SharedState::new(
             pin,
             !options.view_only,
+            options.share_clipboard,
             SessionLimits::default(),
         ));
         let (store, load_warning) = AuthorizedDevices::load(paths::authorized_viewers_file()?);

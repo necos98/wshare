@@ -53,7 +53,12 @@ impl Host {
         let (store, _) = AuthorizedDevices::load(dir.path().join("authorized.toml"));
         let (observer, events) = recorder();
         let sink = EventSink::new(observer);
-        let state = Arc::new(SharedState::new(PIN.into(), true, SessionLimits::default()));
+        let state = Arc::new(SharedState::new(
+            PIN.into(),
+            true,
+            true,
+            SessionLimits::default(),
+        ));
         let ctx = Arc::new(SessionContext {
             host_name: "HOST".into(),
             stream: StreamOptions::default(),

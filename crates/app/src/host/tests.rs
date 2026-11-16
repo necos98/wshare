@@ -19,6 +19,7 @@ fn options(monitor: usize) -> HostOptions {
         port: 0, // ephemeral: never collides with a real host on 7420
         pin: Some("123456".into()),
         view_only: false,
+        share_clipboard: true,
     }
 }
 

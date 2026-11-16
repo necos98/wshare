@@ -97,6 +97,13 @@ pub enum HostWarning {
     /// The encoder refused to change its bitrate while streaming: this
     /// session stays at the rate it had, whatever the network does.
     BitrateFixed(String),
+    /// The clipboard cannot be listened to: it is not shared this session.
+    ClipboardUnavailable(String),
+    /// Copied text was too long to share (the limit is
+    /// [`protocol::control::MAX_CLIPBOARD_BYTES`]); said once per session.
+    ClipboardTooLarge,
+    /// Reading or writing the clipboard failed.
+    ClipboardFailed(String),
 }
 
 impl fmt::Display for HostWarning {
@@ -129,6 +136,15 @@ impl fmt::Display for HostWarning {
                 f,
                 "the bitrate cannot follow the network, it stays fixed: {detail}"
             ),
+            Self::ClipboardUnavailable(detail) => {
+                write!(f, "the clipboard cannot be shared: {detail}")
+            }
+            Self::ClipboardTooLarge => write!(
+                f,
+                "copied text is too long to share (over {} KiB)",
+                protocol::control::MAX_CLIPBOARD_BYTES / 1024
+            ),
+            Self::ClipboardFailed(detail) => write!(f, "clipboard sharing failed: {detail}"),
         }
     }
 }
@@ -237,6 +253,14 @@ mod tests {
         assert_eq!(
             HostWarning::BitrateFixed("driver refused".into()).to_string(),
             "the bitrate cannot follow the network, it stays fixed: driver refused"
+        );
+        assert_eq!(
+            HostWarning::ClipboardTooLarge.to_string(),
+            "copied text is too long to share (over 256 KiB)"
+        );
+        assert_eq!(
+            HostWarning::ClipboardFailed("busy".into()).to_string(),
+            "clipboard sharing failed: busy"
         );
     }
 }

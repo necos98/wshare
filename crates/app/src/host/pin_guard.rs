@@ -77,6 +77,7 @@ mod tests {
         let state = Arc::new(SharedState::new(
             "123456".into(),
             true,
+            true,
             SessionLimits::default(),
         ));
         let (observer, events) = recorder();

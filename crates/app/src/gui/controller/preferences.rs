@@ -40,9 +40,9 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBacken
         self.state.page = Page::Settings;
     }
 
-    /// Applies and saves the settings as edited. Remote control and the
-    /// feedback options act at once; the streaming ones at the next start
-    /// of the sharing (see `GuiState::restart_needed`).
+    /// Applies and saves the settings as edited. Remote control, the
+    /// clipboard and the feedback options act at once; the streaming ones
+    /// at the next start of the sharing (see `GuiState::restart_needed`).
     pub(super) fn change_settings(&mut self, requested: Settings) {
         let new = requested.sanitized();
         let old = self.state.settings.clone();
@@ -59,6 +59,11 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBacken
             && let Some(sharing) = &self.sharing
         {
             sharing.set_input_allowed(self.state.settings.allow_input);
+        }
+        if old.share_clipboard != self.state.settings.share_clipboard
+            && let Some(sharing) = &self.sharing
+        {
+            sharing.set_clipboard_shared(self.state.settings.share_clipboard);
         }
         if let Some(problem) = self.save_settings() {
             problems.push(problem);

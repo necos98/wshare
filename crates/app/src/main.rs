@@ -8,6 +8,7 @@
 
 mod bench;
 mod cli;
+mod clipboard;
 mod data_migration;
 mod gui;
 mod handshake;

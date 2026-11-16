@@ -137,6 +137,16 @@ pub fn host_warning(warning: &HostWarning) -> String {
             "L'encoder non può adattare il bitrate alla rete: resta fisso per questa \
              sessione ({detail})."
         ),
+        HostWarning::ClipboardUnavailable(detail) => {
+            format!("Impossibile condividere gli appunti in questa sessione ({detail}).")
+        }
+        HostWarning::ClipboardTooLarge => format!(
+            "Il testo copiato è troppo lungo per essere condiviso (oltre {} KiB).",
+            protocol::control::MAX_CLIPBOARD_BYTES / 1024
+        ),
+        HostWarning::ClipboardFailed(detail) => {
+            format!("Condivisione degli appunti non riuscita: {detail}")
+        }
     }
 }
 
@@ -348,6 +358,8 @@ pub const SETTINGS_MAX_MBPS_HINT: &str =
 pub const SETTINGS_CODEC: &str = "Codec";
 pub const SETTINGS_PORT: &str = "Porta";
 pub const SETTINGS_ALLOW_INPUT: &str = "Consenti controllo remoto per impostazione predefinita";
+pub const SETTINGS_SHARE_CLIPBOARD: &str =
+    "Condividi appunti (il testo copiato passa da un computer all'altro)";
 
 pub const SETTINGS_VIEWING: &str = "Visualizzazione";
 pub const SETTINGS_VIEWING_HINT: &str = "Valgono per le finestre aperte da ora in poi.";
@@ -605,6 +617,18 @@ mod tests {
                 HostWarning::BitrateFixed("driver refused".into()),
                 "L'encoder non può adattare il bitrate alla rete: resta fisso per questa \
                  sessione (driver refused).",
+            ),
+            (
+                HostWarning::ClipboardUnavailable("no window".into()),
+                "Impossibile condividere gli appunti in questa sessione (no window).",
+            ),
+            (
+                HostWarning::ClipboardTooLarge,
+                "Il testo copiato è troppo lungo per essere condiviso (oltre 256 KiB).",
+            ),
+            (
+                HostWarning::ClipboardFailed("busy".into()),
+                "Condivisione degli appunti non riuscita: busy",
             ),
         ];
         for (warning, text) in cases {

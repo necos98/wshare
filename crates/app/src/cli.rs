@@ -60,11 +60,13 @@ wshare - LAN screen sharing (no arguments: open the window)
                open the window; --minimized starts hidden in the notification area
                (Windows start-up passes it when the option is on in the settings)
   wshare host  [--monitor N] [--fps F] [--mbps B] [--codec h264|hevc] [--port P] [--pin PIN]
-               [--view-only]
+               [--view-only] [--no-clipboard]
                --mbps is the maximum bitrate (default 20): the host lowers it while the
                network is congested and raises it back gradually
                a viewer that gave the PIN once connects without it from then on
                (remove it from the list in the wshare window)
+               copied text is shared with the viewer, both ways (the viewer's only if remote
+               control is allowed); --no-clipboard turns it off
   wshare view  [HOST | IP[:PORT]] [--pin PIN] [--host-id ID] [--view-only] [--fullscreen] [--stats]
                the PIN is needed only the first time: the host then remembers this PC,
                and this PC pins the host (HOST names, or the LAN id given with --host-id);
@@ -159,6 +161,7 @@ fn parse_host(args: &[String]) -> Result<HostOptions> {
         port: DEFAULT_PORT,
         pin: None,
         view_only: false,
+        share_clipboard: true,
     };
     for_each_arg(args, |flag, value| {
         if stream_flag(&mut options.stream, flag, value)? {
@@ -168,6 +171,7 @@ fn parse_host(args: &[String]) -> Result<HostOptions> {
             "--port" => options.port = value()?.parse().context("--port")?,
             "--pin" => options.pin = Some(value()?),
             "--view-only" => options.view_only = true,
+            "--no-clipboard" => options.share_clipboard = false,
             _ => return Ok(false),
         }
         Ok(true)
@@ -264,12 +268,12 @@ mod tests {
         assert_eq!(h.port, DEFAULT_PORT);
         assert_eq!(h.pin, None);
         assert!(!h.view_only);
+        assert!(h.share_clipboard);
     }
 
     #[test]
     fn host_with_every_option() {
-        let line =
-            "host --monitor 1 --fps 30 --mbps 50 --codec HEVC --port 9000 --pin 123456 --view-only";
+        let line = "host --monitor 1 --fps 30 --mbps 50 --codec HEVC --port 9000 --pin 123456 --view-only --no-clipboard";
         let Command::Host(h) = parse(&args(line)).unwrap() else {
             panic!()
         };
@@ -285,6 +289,7 @@ mod tests {
         assert_eq!(h.port, 9000);
         assert_eq!(h.pin.as_deref(), Some("123456"));
         assert!(h.view_only);
+        assert!(!h.share_clipboard);
     }
 
     #[test]

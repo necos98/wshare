@@ -14,6 +14,7 @@
 //!   (see `feed`); it also reports to the host how the video arrives, for
 //!   the host's bitrate adaptation (see `rate`).
 
+mod clipboard;
 mod cursor;
 pub mod failure;
 mod feed;
@@ -48,8 +49,10 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use winit::event_loop::{DeviceEvents, EventLoop, EventLoopProxy};
 
 use crate::cli::ViewOptions;
+use crate::clipboard::ViewerRules;
 use crate::options::DEFAULT_PORT;
 use crate::target::{self, Resolved, parse_target};
+use clipboard::ViewerClipboard;
 use failure::ViewerFailure;
 use pairing::Pairing;
 use rate::TargetRate;
@@ -143,12 +146,18 @@ pub fn run(options: ViewOptions) -> Result<()> {
     let (outgoing_tx, outgoing_rx) = unbounded_channel::<ControlMessage>();
     runtime.spawn(feed::forward(video, datagram_tx));
     let target = TargetRate::default();
+    // Opened only now, with the session: nothing is shared before or after it.
+    let clipboard = ViewerClipboard::open(ViewerRules {
+        host_allows: input_allowed,
+        view_only: options.view_only,
+    });
     let control = runtime.spawn(run_control(
         tx,
         rx,
         outgoing_rx,
         event_loop.create_proxy(),
         target.clone(),
+        clipboard,
     ));
 
     let rtt_handle = handle.clone();
@@ -302,13 +311,15 @@ async fn connect(addr: SocketAddr, pairing: &Pairing, pin: Option<String>) -> Re
 }
 
 /// Sends our requests and watches for the host leaving. The host's target
-/// bitrate goes to `target`, for the statistics.
+/// bitrate goes to `target`, for the statistics. Copied text travels both
+/// ways through `clipboard`.
 async fn run_control(
     mut tx: ControlSender,
     mut rx: ControlReceiver,
     mut outgoing: UnboundedReceiver<ControlMessage>,
     window: EventLoopProxy<UserEvent>,
     target: TargetRate,
+    mut clipboard: ViewerClipboard,
 ) {
     let reason = 'control: loop {
         tokio::select! {
@@ -323,6 +334,13 @@ async fn run_control(
                     }
                 }
             }
+            () = clipboard.changed() => {
+                if let Some(message) = clipboard.local_change().await
+                    && let Err(e) = tx.send(&message).await
+                {
+                    break ViewerFailure::ConnectionLost(format!("{e:#}"));
+                }
+            }
             incoming = rx.recv() => match incoming {
                 Ok(Some(ControlMessage::Bye)) => break ViewerFailure::HostDisconnected,
                 Ok(None) => break ViewerFailure::HostLeft,
@@ -333,9 +351,13 @@ async fn run_control(
                     let _ = window.send_event(UserEvent::CursorVisible(visible));
                 }
                 Ok(Some(ControlMessage::InputAllowed(allowed))) => {
+                    clipboard.set_host_allows(allowed);
                     let _ = window.send_event(UserEvent::InputAllowed(allowed));
                 }
                 Ok(Some(ControlMessage::TargetBitrate { bps })) => target.set(bps),
+                Ok(Some(ControlMessage::Clipboard(text))) => {
+                    clipboard.remote_text(&text).await;
+                }
                 Ok(Some(_)) => {}
                 Err(e) => break ViewerFailure::ConnectionLost(format!("{e:#}")),
             }

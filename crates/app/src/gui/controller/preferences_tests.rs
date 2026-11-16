@@ -283,6 +283,34 @@ fn quitting_cancels_a_restart() {
 }
 
 #[test]
+fn the_clipboard_setting_is_live_and_reaches_the_service_only_when_it_changes() {
+    let (mut c, log) = controller();
+    c.handle(Intent::SetSharing(true));
+    calls(&log);
+
+    changed(&mut c, |s| s.share_clipboard = false);
+    assert_eq!(calls(&log), ["clipboard false"]);
+    assert!(!c.state().restart_needed());
+    assert!(!log.borrow().saved.last().unwrap().share_clipboard);
+
+    changed(&mut c, |s| s.fps = 30);
+    assert!(calls(&log).is_empty(), "other settings do not touch it");
+
+    changed(&mut c, |s| s.share_clipboard = true);
+    assert_eq!(calls(&log), ["clipboard true"]);
+}
+
+#[test]
+fn the_sharing_starts_with_the_saved_clipboard_setting() {
+    let (mut c, log) = controller_with_settings(Settings {
+        share_clipboard: false,
+        ..Settings::default()
+    });
+    c.handle(Intent::SetSharing(true));
+    assert!(!log.borrow().started[0].0.share_clipboard);
+}
+
+#[test]
 fn remote_control_survives_a_restart_of_the_app() {
     let (mut c, log) = controller();
     c.handle(Intent::SetInputAllowed(false));

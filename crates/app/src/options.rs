@@ -53,6 +53,9 @@ pub struct HostOptions {
     pub pin: Option<String>,
     /// Refuse remote mouse/keyboard: viewers can only watch.
     pub view_only: bool,
+    /// Share copied text with the viewer (and accept the viewer's, if
+    /// remote control is allowed).
+    pub share_clipboard: bool,
 }
 
 #[cfg(test)]

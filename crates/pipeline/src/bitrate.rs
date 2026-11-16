@@ -12,6 +12,14 @@
 //! - calm for [`INCREASE_DELAY`]: add [`INCREASE_PER_SECOND`] of the
 //!   maximum per second, probing slowly for the bandwidth back.
 //!
+//! While files are transferred on the same connection the losses and the
+//! round trip are left out ([`NetworkSample::file_transfers`]): a file is
+//! sent as fast as the path allows, so it fills the bottleneck's queue and
+//! shows both even when the video has all it needs. The video's own signals
+//! (its send backlog, the viewer's reports) still say when it is too fast,
+//! and quinn sends its datagrams before any file data, so the file takes
+//! what the video leaves.
+//!
 //! The target always stays between [`MIN_BITRATE_BPS`] (or the maximum, if
 //! lower) and the maximum: the bitrate the user configured.
 
@@ -79,16 +87,28 @@ pub struct NetworkSample {
     pub viewer: ReceptionReport,
     pub rtt: Duration,
     pub min_rtt: Duration,
+    /// Files were being transferred on the connection during the interval:
+    /// the losses and the round trip are theirs as much as the video's.
+    pub file_transfers: bool,
 }
 
 impl NetworkSample {
-    /// Whether anything in the sample says the stream is too fast.
+    /// Whether anything in the sample says the stream is too fast. With
+    /// files on the way only the video's own signals count.
     pub fn congested(&self) -> bool {
-        self.lossy()
-            || self.frames_skipped >= SKIPPED_FRAMES
+        self.video_congested() || (!self.file_transfers && self.path_congested())
+    }
+
+    /// The video queues before it is sent, or arrives lost or late.
+    fn video_congested(&self) -> bool {
+        self.frames_skipped >= SKIPPED_FRAMES
             || self.viewer.frames_lost >= VIEWER_LOST_FRAMES
             || self.viewer.frames_late >= VIEWER_LATE_FRAMES
-            || self.rtt.saturating_sub(self.min_rtt) > RTT_RISE
+    }
+
+    /// The connection as a whole loses packets or queues up.
+    fn path_congested(&self) -> bool {
+        self.lossy() || self.rtt.saturating_sub(self.min_rtt) > RTT_RISE
     }
 
     fn lossy(&self) -> bool {
@@ -472,6 +492,43 @@ mod tests {
         ];
         for sample in calm_enough {
             assert!(!sample.congested(), "{sample:?}");
+        }
+    }
+
+    #[test]
+    fn during_file_transfers_only_the_video_signals_count() {
+        let transferring = NetworkSample {
+            file_transfers: true,
+            ..calm()
+        };
+        let files_fill_the_path = NetworkSample {
+            packets_lost: 100,
+            rtt: calm().min_rtt + RTT_RISE * 4,
+            ..transferring
+        };
+        assert!(!files_fill_the_path.congested());
+        let video_too_fast = [
+            NetworkSample {
+                frames_skipped: SKIPPED_FRAMES,
+                ..files_fill_the_path
+            },
+            NetworkSample {
+                viewer: ReceptionReport {
+                    frames_lost: VIEWER_LOST_FRAMES,
+                    frames_late: 0,
+                },
+                ..files_fill_the_path
+            },
+            NetworkSample {
+                viewer: ReceptionReport {
+                    frames_lost: 0,
+                    frames_late: VIEWER_LATE_FRAMES,
+                },
+                ..files_fill_the_path
+            },
+        ];
+        for sample in video_too_fast {
+            assert!(sample.congested(), "{sample:?}");
         }
     }
 }

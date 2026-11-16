@@ -27,7 +27,9 @@ impl ReceptionReporter {
     }
 
     /// The report due at `now`, if one is. Late frames are the pictures
-    /// passed over because a newer one arrived with them.
+    /// passed over because a newer one arrived with them, except those a
+    /// recovered frame released at once ([`ViewerStats::frames_late`]): a
+    /// resend that succeeded is no sign of congestion.
     pub fn poll(&mut self, now: Instant, stats: &ViewerStats) -> Option<ReceptionReport> {
         if now < self.next {
             return None;
@@ -35,10 +37,10 @@ impl ReceptionReporter {
         self.next = now + RECEPTION_REPORT_INTERVAL;
         let report = ReceptionReport {
             frames_lost: since(stats.frames_lost, self.lost),
-            frames_late: since(stats.frames_superseded, self.late),
+            frames_late: since(stats.frames_late, self.late),
         };
         self.lost = stats.frames_lost;
-        self.late = stats.frames_superseded;
+        self.late = stats.frames_late;
         Some(report)
     }
 }
@@ -71,10 +73,10 @@ impl TargetRate {
 mod tests {
     use super::*;
 
-    fn stats(frames_lost: u64, frames_superseded: u64) -> ViewerStats {
+    fn stats(frames_lost: u64, frames_late: u64) -> ViewerStats {
         ViewerStats {
             frames_lost,
-            frames_superseded,
+            frames_late,
             ..Default::default()
         }
     }
@@ -110,6 +112,22 @@ mod tests {
         let due = start + RECEPTION_REPORT_INTERVAL;
         assert_eq!(
             reporter.poll(due, &stats(0, 0)),
+            Some(ReceptionReport::default())
+        );
+    }
+
+    #[test]
+    fn frames_a_recovery_released_are_not_reported_late() {
+        let start = Instant::now();
+        let mut reporter = ReceptionReporter::new(start);
+        let after_recoveries = ViewerStats {
+            frames_superseded: 6,
+            frames_recovered: 2,
+            ..Default::default()
+        };
+        let due = start + RECEPTION_REPORT_INTERVAL;
+        assert_eq!(
+            reporter.poll(due, &after_recoveries),
             Some(ReceptionReport::default())
         );
     }

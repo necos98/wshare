@@ -54,6 +54,10 @@ pub struct ViewerStats {
     /// Decoded pictures never shown because a newer one arrived in the same
     /// batch (the viewer was catching up).
     pub frames_superseded: u64,
+    /// The superseded pictures that tell of video queueing on the way.
+    /// Those released together behind a recovered frame are left out: they
+    /// waited for a resend, not in a queue.
+    pub frames_late: u64,
     pub keyframes_requested: u64,
     /// Requests to resend datagrams.
     pub nacks_sent: u64,
@@ -204,23 +208,31 @@ where
     }
 
     /// Decodes the frames among `events` (keeping the newest picture in
-    /// `latest`) and counts the others.
+    /// `latest`) and counts the others. `events` come out of one reassembler
+    /// call: the frames after a recovered one were held behind it and come
+    /// out together with it, so passing over them is no sign of lateness.
     fn handle(
         &mut self,
         events: Vec<ReassemblyEvent>,
         latest: &mut Option<Dec::Frame>,
     ) -> Result<()> {
+        let mut held_for_recovery = false;
         for event in events {
             match event {
                 ReassemblyEvent::Frame(frame) => {
-                    if self.recovery.is_awaited(frame.frame_id) {
+                    let recovered = self.recovery.is_awaited(frame.frame_id);
+                    if recovered {
                         self.stats.frames_recovered += 1;
                     }
                     if let Some(picture) = self.decode(&frame)?
                         && latest.replace(picture).is_some()
                     {
                         self.stats.frames_superseded += 1;
+                        if !held_for_recovery {
+                            self.stats.frames_late += 1;
+                        }
                     }
+                    held_for_recovery |= recovered;
                 }
                 ReassemblyEvent::Lost { .. } => self.stats.frames_lost += 1,
                 ReassemblyEvent::Skipped { .. } => self.stats.frames_skipped += 1,

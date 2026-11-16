@@ -38,10 +38,12 @@
 //! - [`endpoint`]: host endpoint and viewer [`connect`].
 //! - [`session`]: a connected session and its handle.
 //! - [`control`] / [`video`] / [`files`]: channel wrappers.
-//! - [`stats`]: transport statistics (RTT, congestion window, losses).
+//! - [`stats`]: transport statistics (RTT, congestion window, losses, open
+//!   file streams), with `file_activity` counting those streams.
 
 pub mod control;
 pub mod endpoint;
+mod file_activity;
 pub mod files;
 pub mod identity;
 pub mod session;

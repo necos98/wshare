@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use quinn::Connection;
 
+use crate::file_activity::FileActivity;
+
 /// A snapshot of one connection's transport statistics. The counters are
 /// cumulative since the connection opened: diff two snapshots to get the
 /// rates of an interval.
@@ -20,10 +22,17 @@ pub struct TransportStats {
     pub lost_packets: u64,
     /// Packets sent, MTU probes included.
     pub sent_packets: u64,
+    /// File streams open now, in either direction. While there are, the
+    /// losses and the round trip above are the files' as much as the
+    /// video's: a file fills whatever the path holds (see [`crate::files`]).
+    pub file_streams_open: u64,
+    /// File streams opened since the connection started, so that a file
+    /// over between two snapshots is noticed too.
+    pub file_streams_opened: u64,
 }
 
 impl TransportStats {
-    pub(crate) fn of(conn: &Connection) -> Self {
+    pub(crate) fn of(conn: &Connection, files: &FileActivity) -> Self {
         let path = conn.stats().path;
         Self {
             rtt: path.rtt,
@@ -31,6 +40,8 @@ impl TransportStats {
             congestion_window: path.cwnd,
             lost_packets: path.lost_packets,
             sent_packets: path.sent_packets,
+            file_streams_open: files.open(),
+            file_streams_opened: files.opened(),
         }
     }
 }

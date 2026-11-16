@@ -22,6 +22,7 @@ use bytes::Bytes;
 use pipeline::traits::{DatagramSink, DatagramTooLarge};
 use quinn::{Connection, SendDatagramError};
 
+use crate::file_activity::FileActivity;
 use crate::stats::TransportStats;
 use crate::transport::DATAGRAM_SEND_BUFFER;
 
@@ -34,11 +35,13 @@ const FALLBACK_MAX_DATAGRAM: usize = 1200;
 #[derive(Clone)]
 pub struct VideoChannel {
     conn: Connection,
+    /// The file streams sharing the connection, reported with its statistics.
+    files: FileActivity,
 }
 
 impl VideoChannel {
-    pub(crate) fn new(conn: Connection) -> Self {
-        Self { conn }
+    pub(crate) fn new(conn: Connection, files: FileActivity) -> Self {
+        Self { conn, files }
     }
 
     /// Largest datagram that currently fits in one packet. Grows after MTU
@@ -60,7 +63,7 @@ impl VideoChannel {
     /// Statistics of the connection carrying the video, for fitting the
     /// stream's bitrate to the path. Never blocks.
     pub fn transport_stats(&self) -> TransportStats {
-        TransportStats::of(&self.conn)
+        TransportStats::of(&self.conn, &self.files)
     }
 }
 

@@ -4,8 +4,14 @@
 //! control is the backpressure (a writer waits while the reader is behind).
 //!
 //! File streams have a lower priority than the control stream, and video
-//! travels in datagrams, which quinn packs before any stream data: a large
-//! file takes what the video leaves of the link, never the other way round.
+//! travels in datagrams, which quinn packs before any stream data: within
+//! the congestion window the video goes first. The window and the path are
+//! shared all the same, and nothing limits a file's rate: a large file fills
+//! the window and the queue at the path's bottleneck (a Wi-Fi access point),
+//! so the whole connection sees a longer round trip and losses, and the
+//! video waits in that queue too. The open file streams are counted
+//! ([`crate::TransportStats::file_streams_open`]) so that the host's bitrate
+//! adaptation does not take those signals for the video's own congestion.
 
 use std::time::Duration;
 
@@ -15,6 +21,8 @@ use protocol::transfer::{
     HEADER_LENGTH_PREFIX, StreamHeader, decode_header, encode_header, header_length,
 };
 use quinn::{Connection, ReadExactError, RecvStream, SendStream, VarInt};
+
+use crate::file_activity::{FileActivity, OpenFileStream};
 
 /// Below the control stream's priority (0): control messages go first.
 const FILE_PRIORITY: i32 = -1;
@@ -34,11 +42,12 @@ pub const MAX_READ_CHUNK: usize = 256 * 1024;
 #[derive(Clone)]
 pub struct FileChannel {
     conn: Connection,
+    activity: FileActivity,
 }
 
 impl FileChannel {
-    pub(crate) fn new(conn: Connection) -> Self {
-        Self { conn }
+    pub(crate) fn new(conn: Connection, activity: FileActivity) -> Self {
+        Self { conn, activity }
     }
 
     /// Opens a stream for the file `header` describes and sends the header.
@@ -49,6 +58,7 @@ impl FileChannel {
             .open_uni()
             .await
             .context("opening a file stream")?;
+        let open = self.activity.track();
         stream
             .set_priority(FILE_PRIORITY)
             .context("lowering the file stream's priority")?;
@@ -56,7 +66,10 @@ impl FileChannel {
             .write_all(&encode_header(header))
             .await
             .context("sending a file header")?;
-        Ok(FileSender { stream })
+        Ok(FileSender {
+            stream,
+            _open: open,
+        })
     }
 
     /// The next file stream the peer opened; `None` once the connection is
@@ -65,13 +78,17 @@ impl FileChannel {
     /// hold up the next ones.
     pub async fn accept(&self) -> Option<IncomingFile> {
         let stream = self.conn.accept_uni().await.ok()?;
-        Some(IncomingFile { stream })
+        Some(IncomingFile {
+            stream,
+            open: self.activity.track(),
+        })
     }
 }
 
 /// A file stream the peer opened, its header not read yet.
 pub struct IncomingFile {
     stream: RecvStream,
+    open: OpenFileStream,
 }
 
 impl IncomingFile {
@@ -87,6 +104,7 @@ impl IncomingFile {
                 header,
                 FileReceiver {
                     stream: self.stream,
+                    _open: self.open,
                 },
             )),
             Err(e) => {
@@ -115,6 +133,8 @@ fn header_error(error: ReadExactError) -> anyhow::Error {
 /// Sending end of one file stream.
 pub struct FileSender {
     stream: SendStream,
+    /// Counted until the file is over.
+    _open: OpenFileStream,
 }
 
 impl FileSender {
@@ -147,6 +167,8 @@ impl FileSender {
 /// Receiving end of one file stream.
 pub struct FileReceiver {
     stream: RecvStream,
+    /// Counted until the file is over.
+    _open: OpenFileStream,
 }
 
 impl FileReceiver {

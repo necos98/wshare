@@ -13,7 +13,9 @@
 //! when the viewer picks another monitor or quality
 //! ([`StreamingThread::reconfigure`]) and when the monitor changes
 //! resolution: capture and encoder are opened again (see `stream_setup`)
-//! and the session hears it as [`StreamUpdate::Restarted`].
+//! and the session hears it as [`StreamUpdate::Restarted`]. The bitrate
+//! adaptation and the share kept for the sound carry over: the new encoder
+//! starts from the rate the network settled at, not from the maximum.
 //!
 //! While the session's sound is being sent ([`AudioLoad`]), the video keeps
 //! its bitrate below the configured maximum minus what the sound takes.
@@ -347,7 +349,7 @@ fn stream_loop(
             .newest_choice()
             .filter(|wanted| *wanted != live.choice)
         {
-            live = match restart(live, wanted, plan, &transport, &control) {
+            live = match restart(live, wanted, plan, &control) {
                 Ok(live) => live,
                 Err(end) => return Ok(end),
             };
@@ -362,7 +364,7 @@ fn stream_loop(
             Ok(()) => {}
             Err(e) if is_mode_change(&e) => {
                 let same = live.choice;
-                live = match restart(live, same, plan, &transport, &control) {
+                live = match restart(live, same, plan, &control) {
                     Ok(live) => live,
                     Err(end) => return Ok(end),
                 };
@@ -389,19 +391,25 @@ fn stream_loop(
 }
 
 /// Closes the capture and encoder of `live` and opens them for `wanted`,
-/// the stream going on with the next frame id. If `wanted` cannot start,
+/// the stream going on with the next frame id and the bitrate adaptation
+/// going on with the rate it settled at. If `wanted` cannot start,
 /// the previous choice is opened again (and the failure reported); if that
 /// fails too, the stream ends with the returned [`StreamEnd`].
 fn restart(
     live: Live,
     wanted: ScreenChoice,
     plan: &StreamPlan,
-    transport: &VideoChannel,
     control: &StreamControl<'_>,
 ) -> Result<Live, StreamEnd> {
-    let previous = live.choice;
+    let Live {
+        streamer,
+        mut rate,
+        choice: previous,
+        reserved_bps,
+        ..
+    } = live;
     // Closed first: the same monitor cannot be duplicated twice at once.
-    let continuation = live.streamer.into_continuation();
+    let continuation = streamer.into_continuation();
     let reopen =
         |choice: ScreenChoice| reopen_stream(&choice.options(&plan.base), || control.stopped());
     let (opened, choice) = match reopen(wanted) {
@@ -424,8 +432,19 @@ fn restart(
     control.tell_session(StreamUpdate::Restarted { choice, info });
     let options = choice.options(&plan.base);
     let max_bps = options.bitrate_bps();
-    let streamer = HostStreamer::resume(continuation, source, encoder, options.fps, max_bps);
-    Ok(Live::new(streamer, choice, max_bps, transport, control))
+    let mut streamer = HostStreamer::resume(continuation, source, encoder, options.fps, max_bps);
+    // The new encoder starts from the rate the network settled at, within
+    // what the sound still leaves of the new maximum.
+    let ceiling = video_ceiling(max_bps, reserved_bps);
+    let change = rate.resume(ceiling, |bps| streamer.set_bitrate(bps));
+    report_rate_change(Some(change), control);
+    Ok(Live {
+        streamer,
+        rate,
+        choice,
+        max_bps,
+        reserved_bps,
+    })
 }
 
 /// How a stream that could not start over ends: with `error`, unless the

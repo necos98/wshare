@@ -1,23 +1,26 @@
 //! File streams over 127.0.0.1: header and data arrive whole, either side
-//! can give a file up, and the number of streams open at once is bounded.
+//! can give a file up, the number of streams open at once is bounded, and
+//! the transport statistics count the streams open.
 
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use net::{FileChannel, HostEndpoint, Identity, connect};
+use net::{FileChannel, HostEndpoint, Identity, VideoChannel, connect};
 use protocol::control::{ControlMessage, PROTOCOL_VERSION};
 use protocol::transfer::{FileEntry, MAX_FILE_STREAMS, StreamHeader, TransferId};
 use tokio::time::timeout;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The file channels of a connected host (first) and viewer (second). The
-/// endpoint and the control senders must outlive the test.
+/// The file and video channels of a connected host and viewer. The endpoint
+/// and the control senders must outlive the test.
 struct Pair {
     _host: HostEndpoint,
     _controls: (net::ControlSender, net::ControlSender),
     host: FileChannel,
     viewer: FileChannel,
+    host_video: VideoChannel,
+    viewer_video: VideoChannel,
 }
 
 async fn pair() -> Pair {
@@ -29,7 +32,7 @@ async fn pair() -> Pair {
             let session = connect(addr, Some(identity.fingerprint()), None)
                 .await
                 .unwrap();
-            let (mut tx, _rx, _video, files) = session.split();
+            let (mut tx, _rx, video, files) = session.split();
             tx.send(&ControlMessage::Hello {
                 version: PROTOCOL_VERSION,
                 viewer_name: "v".into(),
@@ -37,16 +40,18 @@ async fn pair() -> Pair {
             })
             .await
             .unwrap();
-            (tx, files)
+            (tx, video, files)
         });
-        let (host_tx, mut host_rx, _video, host_files) = accepted.unwrap().split();
+        let (host_tx, mut host_rx, host_video, host_files) = accepted.unwrap().split();
         host_rx.recv().await.unwrap();
-        let (viewer_tx, viewer_files) = viewer;
+        let (viewer_tx, viewer_video, viewer_files) = viewer;
         Pair {
             _host: host,
             _controls: (host_tx, viewer_tx),
             host: host_files,
             viewer: viewer_files,
+            host_video,
+            viewer_video,
         }
     })
     .await
@@ -158,4 +163,33 @@ async fn no_more_streams_than_allowed_are_open_at_once() {
     })
     .await
     .expect("timed out");
+}
+
+/// (open now, opened so far) according to `video`'s transport statistics.
+fn file_streams(video: &VideoChannel) -> (u64, u64) {
+    let stats = video.transport_stats();
+    (stats.file_streams_open, stats.file_streams_opened)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn transport_statistics_count_the_file_streams_open_on_both_sides() {
+    let pair = pair().await;
+    assert_eq!(file_streams(&pair.viewer_video), (0, 0));
+    assert_eq!(file_streams(&pair.host_video), (0, 0));
+    timeout(TIMEOUT, async {
+        let mut sender = pair.viewer.open(&header(1, 3)).await.unwrap();
+        assert_eq!(file_streams(&pair.viewer_video), (1, 1));
+        let (_, mut receiver) = pair.host.accept().await.unwrap().open().await.unwrap();
+        assert_eq!(file_streams(&pair.host_video), (1, 1));
+
+        sender.write(b"abc").await.unwrap();
+        let finished = tokio::spawn(sender.finish());
+        while receiver.read().await.unwrap().is_some() {}
+        drop(receiver);
+        finished.await.unwrap().unwrap();
+    })
+    .await
+    .expect("transfer timed out");
+    assert_eq!(file_streams(&pair.viewer_video), (0, 1));
+    assert_eq!(file_streams(&pair.host_video), (0, 1));
 }

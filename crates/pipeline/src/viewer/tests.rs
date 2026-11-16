@@ -339,6 +339,32 @@ fn backlog_is_decoded_whole_but_only_the_latest_frame_is_presented() {
     assert_eq!(stats.frames_decoded, 4);
     assert_eq!(stats.frames_presented, 2);
     assert_eq!(stats.frames_superseded, 2);
+    assert_eq!(stats.frames_late, 2, "a backlog is video queueing");
+}
+
+#[test]
+fn frames_released_together_by_a_recovery_are_not_late() {
+    let mut h = Harness::started();
+    // Frame 1 loses a datagram; frames 2 and 3 arrive whole and wait for it.
+    let lossy = h.packets(b"lost frame", false, 1);
+    h.feed(&[lossy[0].clone(), lossy[2].clone()], LATER);
+    h.send(b"two", false, LATER + 1);
+    h.send(b"three", false, LATER + 2);
+    assert_eq!(h.presented.borrow().len(), 1, "held behind frame 1");
+
+    // The resend releases the three frames at once: only the newest shows.
+    h.feed(&lossy[1..2], LATER + 30);
+    assert_eq!(h.last_presented(), b"three");
+    let stats = h.viewer.stats();
+    assert_eq!(stats.frames_recovered, 1);
+    assert_eq!(stats.frames_superseded, 2);
+    assert_eq!(stats.frames_late, 0);
+
+    // Lateness after the recovery still counts.
+    let mut backlog = h.packets(b"four", false, 4);
+    backlog.extend(h.packets(b"five", false, 5));
+    h.viewer.on_datagrams(backlog, h.at(LATER + 50)).unwrap();
+    assert_eq!(h.viewer.stats().frames_late, 1);
 }
 
 #[test]

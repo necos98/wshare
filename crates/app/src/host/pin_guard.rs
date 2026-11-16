@@ -73,13 +73,12 @@ mod tests {
     use super::super::sessions::SessionLimits;
     use super::*;
     use crate::access_mode::AccessMode;
+    use crate::host::state::Permissions;
 
     fn new_guard() -> (PinGuard, Arc<SharedState>, Receiver<HostEvent>) {
         let state = Arc::new(SharedState::new(
             "123456".into(),
-            true,
-            true,
-            true,
+            Permissions::default(),
             AccessMode::PinOnly,
             SessionLimits::default(),
         ));

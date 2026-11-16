@@ -4,10 +4,10 @@
 //! reaching it (or the top edge next to it) expands a bar with the
 //! [`buttons`]. Three of them open a drop-down list (see `bar_menu`): the
 //! host's monitors, the video quality and what to do with files; choosing
-//! a row is a [`BarAction`] like a button click. Events over the bar or an
-//! open list are consumed here and not forwarded to the host; a click
-//! elsewhere while a list is open only closes it. Hit-testing comes from an
-//! injected
+//! a row is a [`BarAction`] like a button click. One mutes the host's sound
+//! and says whether it is muted. Events over the bar or an open list are
+//! consumed here and not forwarded to the host; a click elsewhere while a
+//! list is open only closes it. Hit-testing comes from an injected
 //! geometry function (production: `render::toolbar_geometry`), the same one
 //! the renderer draws with, and from `render::menu_geometry` for the list.
 
@@ -38,6 +38,8 @@ pub enum BarAction {
     /// Watch the host's monitor at this position of its list.
     SelectMonitor(u32),
     SetQuality(Quality),
+    /// Hear the host's sound (`true`) or mute it.
+    SetAudio(bool),
     /// Pick files to send to the host.
     SendFiles,
     CancelTransfers,
@@ -62,15 +64,21 @@ pub struct BarButton {
 }
 
 /// Number of buttons, whatever the mode.
-const BUTTON_COUNT: usize = 6;
+const BUTTON_COUNT: usize = 7;
 
 /// Buttons, left to right. The first one switches to the other mode, so it
-/// names that.
-pub const fn buttons(fullscreen: bool) -> [BarButton; BUTTON_COUNT] {
+/// names that; the audio one says whether the host's sound plays
+/// (`audio_on`) and switches it.
+pub const fn buttons(fullscreen: bool, audio_on: bool) -> [BarButton; BUTTON_COUNT] {
     let (label, tooltip) = if fullscreen {
         (text::BAR_WINDOWED, text::BAR_TIP_WINDOWED)
     } else {
         (text::BAR_FULLSCREEN, text::BAR_TIP_FULLSCREEN)
+    };
+    let (audio_label, audio_tooltip) = if audio_on {
+        (text::BAR_AUDIO_ON, text::BAR_TIP_AUDIO_ON)
+    } else {
+        (text::BAR_AUDIO_OFF, text::BAR_TIP_AUDIO_OFF)
     };
     [
         BarButton {
@@ -87,6 +95,11 @@ pub const fn buttons(fullscreen: bool) -> [BarButton; BUTTON_COUNT] {
             label: text::BAR_QUALITY,
             tooltip: text::BAR_TIP_QUALITY,
             role: ButtonRole::Open(MenuKind::Quality),
+        },
+        BarButton {
+            label: audio_label,
+            tooltip: audio_tooltip,
+            role: ButtonRole::Act(BarAction::SetAudio(!audio_on)),
         },
         BarButton {
             label: text::BAR_FILES,
@@ -124,6 +137,8 @@ pub struct ControlBar<G> {
     window: (u32, u32),
     scale: f32,
     fullscreen: bool,
+    /// The host's sound plays (the user did not mute it).
+    audio_on: bool,
     expanded: bool,
     pointer: Option<(i32, i32)>,
     hovered: Option<usize>,
@@ -142,6 +157,7 @@ impl<G: Fn((u32, u32), f32, usize, bool) -> ToolbarGeometry> ControlBar<G> {
             window: (0, 0),
             scale: 1.0,
             fullscreen: false,
+            audio_on: true,
             expanded: false,
             pointer: None,
             hovered: None,
@@ -244,7 +260,7 @@ impl<G: Fn((u32, u32), f32, usize, bool) -> ToolbarGeometry> ControlBar<G> {
 
     /// What to draw.
     pub fn view(&self) -> ToolbarView {
-        let buttons = buttons(self.fullscreen);
+        let buttons = buttons(self.fullscreen, self.audio_on);
         ToolbarView {
             buttons: buttons.iter().map(|b| b.label.to_string()).collect(),
             tooltips: buttons.iter().map(|b| b.tooltip.to_string()).collect(),
@@ -327,8 +343,13 @@ impl<G: Fn((u32, u32), f32, usize, bool) -> ToolbarGeometry> ControlBar<G> {
         if self.current_hit_button() != Some(pressed) {
             return None;
         }
-        match buttons(self.fullscreen).get(pressed)?.role {
-            ButtonRole::Act(action) => Some(action),
+        match buttons(self.fullscreen, self.audio_on).get(pressed)?.role {
+            ButtonRole::Act(action) => {
+                if let BarAction::SetAudio(on) = action {
+                    self.audio_on = on;
+                }
+                Some(action)
+            }
             ButtonRole::Open(kind) => {
                 if self.choices.len(kind) > 0 {
                     self.menu = Some(OpenMenu::new(kind, pressed));

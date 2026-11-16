@@ -31,6 +31,9 @@
 //!                                            or resolution; same connection)
 //!   either          Transfer(message)       (files pushed or pasted, see
 //!                                            [`crate::transfer`])
+//!   viewer -> host  SetAudio(on)            (also from view-only viewers;
+//!                                            the sound itself travels as
+//!                                            datagrams, see [`crate::audio`])
 //!   either          Bye
 //!
 //! Compatibility: peers of different protocol versions must still understand
@@ -72,7 +75,9 @@ use crate::transfer::TransferMessage;
 ///    (`Denied`, `Expired`, `TooManyRequests`) keep the text form.
 /// 10: Transfer (either side): files cross between the two PCs, pushed or
 ///    copied and pasted, each on a unidirectional stream of its own.
-pub const PROTOCOL_VERSION: u16 = 10;
+/// 11: Audio datagrams (host, see [`crate::audio`]) and SetAudio (viewer):
+///    the viewer hears the host and can mute it.
+pub const PROTOCOL_VERSION: u16 = 11;
 
 /// Upper bound for one control message; protects against garbage lengths.
 /// Sized for the largest cursor image (256x256 RGBA = 256 KiB) plus margin.
@@ -265,6 +270,10 @@ pub enum ControlMessage {
     AwaitingApproval,
     /// A step of a file transfer (see [`crate::transfer`]).
     Transfer(TransferMessage),
+    /// The viewer wants the host's sound (`true`, what every connection
+    /// starts with) or mutes it (`false`): the host then stops capturing
+    /// and sending it.
+    SetAudio(bool),
 }
 
 /// Serializes `msg` as one length-prefixed frame.
@@ -479,6 +488,8 @@ mod tests {
                     crate::transfer::FileEntry::file("Foto/mare.jpg", 1 << 40),
                 ],
             }),
+            ControlMessage::SetAudio(false),
+            ControlMessage::SetAudio(true),
             ControlMessage::RequestKeyframe,
             ControlMessage::Bye,
         ]
@@ -763,6 +774,20 @@ mod tests {
                 id: crate::transfer::TransferId(0)
             })),
             18
+        );
+        assert_eq!(index(ControlMessage::SetAudio(true)), 19);
+    }
+
+    #[test]
+    fn set_audio_layout_is_stable() {
+        // Variant 19, then the flag as one byte: 0 = muted, 1 = on.
+        assert_eq!(
+            encode_frame(&ControlMessage::SetAudio(false)),
+            frame_of(&[19, 0])
+        );
+        assert_eq!(
+            encode_frame(&ControlMessage::SetAudio(true)),
+            frame_of(&[19, 1])
         );
     }
 

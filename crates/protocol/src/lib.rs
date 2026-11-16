@@ -1,5 +1,6 @@
 //! Wire formats shared by host and viewer.
 //!
+//! - [`audio`]: unreliable audio datagrams (the host's sound, as PCM).
 //! - [`control`]: reliable control-channel messages (QUIC stream).
 //! - [`feedback`]: the viewer's reception reports, for rate adaptation.
 //! - [`input`]: remote-control payloads (input events, cursor shape).
@@ -8,6 +9,7 @@
 //! - [`transfer`]: files pushed or pasted between the two PCs.
 //! - [`video`]: unreliable video datagrams, their reassembly and loss policy.
 
+pub mod audio;
 pub mod control;
 pub mod feedback;
 pub mod input;

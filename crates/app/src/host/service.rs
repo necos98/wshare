@@ -28,7 +28,7 @@ use super::events::EventSink;
 use super::pin_guard::{PinGuard, rotate_pin};
 use super::session::SessionContext;
 use super::sessions::SessionLimits;
-use super::state::SharedState;
+use super::state::{Permissions, SharedState};
 use super::{HostEvent, HostFailure, HostWarning};
 use crate::handshake::generate_pin;
 use crate::options::HostOptions;
@@ -54,9 +54,12 @@ impl Service {
         let pin = options.pin.clone().unwrap_or_else(generate_pin);
         let state = Arc::new(SharedState::new(
             pin,
-            !options.view_only,
-            options.share_clipboard,
-            options.receive_files,
+            Permissions {
+                input_allowed: !options.view_only,
+                clipboard_shared: options.share_clipboard,
+                receive_files: options.receive_files,
+                audio_shared: options.share_audio,
+            },
             options.access,
             SessionLimits::default(),
         ));

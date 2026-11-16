@@ -91,6 +91,21 @@ impl RateAdaptation {
         }
     }
 
+    /// Moves the ceiling to `max_bps` (the sound started or stopped taking
+    /// its share, see [`pipeline::video_ceiling`]). A target above it comes
+    /// down at once and is handed to `apply` (the encoder).
+    pub(super) fn set_ceiling(
+        &mut self,
+        max_bps: u32,
+        apply: impl FnOnce(u32) -> Result<()>,
+    ) -> Option<RateChange> {
+        if !self.active {
+            return None;
+        }
+        let target = self.controller.set_max(max_bps)?;
+        Some(self.apply(target, apply))
+    }
+
     /// Cheap enough for every loop iteration: until a sample is due it
     /// reads nothing. When one is, samples `counters()` and the viewer's
     /// reports and, if the target changed, hands it to `apply` (the
@@ -109,13 +124,18 @@ impl RateAdaptation {
         let sample = network_sample(&self.previous, &current, self.reports.take());
         self.previous = current;
         let target = self.controller.on_sample(&sample, now)?;
-        Some(match apply(target) {
+        Some(self.apply(target, apply))
+    }
+
+    /// Has the encoder aim at `target`; one that refuses ends the adaptation.
+    fn apply(&mut self, target: u32, apply: impl FnOnce(u32) -> Result<()>) -> RateChange {
+        match apply(target) {
             Ok(()) => RateChange::Retargeted(target),
             Err(error) => {
                 self.active = false;
                 RateChange::Fixed(error)
             }
-        })
+        }
     }
 }
 
@@ -241,6 +261,34 @@ mod tests {
             }
         }
         assert_eq!(target, MAX);
+    }
+
+    #[test]
+    fn the_sound_lowers_the_ceiling_and_the_target_with_it() {
+        let start = Instant::now();
+        let mut rate = RateAdaptation::new(MAX, Arc::default(), counters(0, 0, 0), start);
+        let lower = pipeline::video_ceiling(MAX, 1_700_000);
+        let mut applied = None;
+        let change = rate.set_ceiling(lower, |bps| {
+            applied = Some(bps);
+            Ok(())
+        });
+        assert!(matches!(change, Some(RateChange::Retargeted(bps)) if bps == lower));
+        assert_eq!(applied, Some(lower));
+        assert!(rate.set_ceiling(lower, accept).is_none(), "nothing changed");
+        assert!(
+            rate.set_ceiling(MAX, accept).is_none(),
+            "climbed back later"
+        );
+    }
+
+    #[test]
+    fn a_refused_ceiling_fixes_the_rate_like_a_refused_sample() {
+        let start = Instant::now();
+        let mut rate = RateAdaptation::new(MAX, Arc::default(), counters(0, 0, 0), start);
+        let change = rate.set_ceiling(MAX / 2, |_| Err(anyhow!("refused")));
+        assert!(matches!(change, Some(RateChange::Fixed(_))));
+        assert!(rate.set_ceiling(MAX / 4, accept).is_none());
     }
 
     #[test]

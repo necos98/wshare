@@ -5,6 +5,7 @@ members = [
     "crates/protocol",
     "crates/pipeline",
     "crates/capture",
+    "crates/audio",
     "crates/codec",
     "crates/render",
     "crates/net",
@@ -28,6 +29,7 @@ gpu = { path = "crates/gpu" }
 protocol = { path = "crates/protocol" }
 pipeline = { path = "crates/pipeline" }
 capture = { path = "crates/capture" }
+audio = { path = "crates/audio" }
 codec = { path = "crates/codec" }
 render = { path = "crates/render" }
 net = { path = "crates/net" }

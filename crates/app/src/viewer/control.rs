@@ -9,9 +9,10 @@
 //! disconnect button) ends the session at once and for good.
 //!
 //! The quality the user picked is asked for again on the new connection
-//! (the host forgets it with the old one); the monitor needs nothing, the
-//! host keeps it. When the new connection streams another size, the window
-//! hears of it as of any stream change.
+//! (the host forgets it with the old one), and so is a muted sound; the
+//! monitor needs nothing, the host keeps it. The sound buffered from the
+//! old connection is forgotten. When the new connection streams another
+//! size, the window hears of it as of any stream change.
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -25,6 +26,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 use winit::event_loop::EventLoopProxy;
 
+use super::audio::AudioIn;
 use super::clipboard::ViewerClipboard;
 use super::failure::ViewerFailure;
 use super::feed::{self, Restart};
@@ -65,10 +67,12 @@ pub struct Reconnection {
     pub pin: Option<String>,
 }
 
-/// How the video of the current connection reaches the render thread.
+/// How the video and the sound of the current connection reach the render
+/// thread and the player.
 pub struct VideoFeed {
     pub forward: JoinHandle<()>,
     pub datagrams: std::sync::mpsc::SyncSender<Bytes>,
+    pub audio: AudioIn,
     pub restart: Restart,
     pub handle: LiveHandle,
 }
@@ -85,8 +89,10 @@ impl VideoFeed {
         if !self.restart.wait_done(RESTART_WAIT).await {
             eprintln!("warning: the video pipeline did not restart in time");
         }
+        self.audio.reset();
         self.handle.replace(handle);
-        self.forward = tokio::spawn(feed::forward(video, self.datagrams.clone()));
+        let (datagrams, audio) = (self.datagrams.clone(), self.audio.clone());
+        self.forward = tokio::spawn(feed::forward(video, datagrams, audio));
     }
 }
 
@@ -134,7 +140,7 @@ pub async fn run(task: ControlTask) {
         mut reconnection,
         mut feed,
     } = task;
-    let mut quality = Quality::Automatic;
+    let mut asked = AskedChoices::default();
     let reason = loop {
         let turn = Turn {
             outgoing: &mut outgoing,
@@ -143,7 +149,7 @@ pub async fn run(task: ControlTask) {
             clipboard: &mut clipboard,
             commands: &mut commands,
             transfers: &transfers,
-            quality: &mut quality,
+            asked: &mut asked,
             stream: &mut reconnection.stream,
         };
         let failure = match serve(&mut link, turn).await {
@@ -156,7 +162,7 @@ pub async fn run(task: ControlTask) {
         let _ = window.send_event(UserEvent::Reconnecting);
         println!("{failure}; reconnecting...");
         feed.handle.close("connection lost");
-        let resumed = match reestablish(failure, &mut outgoing, &reconnection).await {
+        let resumed = match reestablish(failure, &mut outgoing, &mut asked, &reconnection).await {
             Ok(connected) => resume(connected, &mut reconnection, &mut feed).await,
             Err(stop) => Err(stop),
         };
@@ -173,7 +179,7 @@ pub async fn run(task: ControlTask) {
                 if let Some(stream) = stream {
                     let _ = window.send_event(UserEvent::StreamChanged(stream));
                 }
-                if let Some(request) = quality_request(quality) {
+                for request in asked.requests() {
                     // A link already broken again shows in the next `serve`.
                     let _ = link.tx.send(&request).await;
                 }
@@ -196,8 +202,8 @@ struct Turn<'a> {
     commands: &'a mut UnboundedReceiver<TransferCommand>,
     /// How the file transfers of each connection start.
     transfers: &'a TransferSetup,
-    /// The quality last asked for, to ask for it again after a break.
-    quality: &'a mut Quality,
+    /// What the user asked the host for, to ask it again after a break.
+    asked: &'a mut AskedChoices,
     /// The stream followed, kept up to date with `StreamChanged`.
     stream: &'a mut StreamInfo,
 }
@@ -205,7 +211,7 @@ struct Turn<'a> {
 /// Serves one connection: forwards our requests, applies what the host
 /// sends. The host's target bitrate goes to `target`, for the statistics.
 /// Copied text and files travel both ways through `clipboard`, the files
-/// themselves through this connection's transfers; `quality` and `stream`
+/// themselves through this connection's transfers; `asked` and `stream`
 /// follow what the user asks and the host streams.
 async fn serve(link: &mut ControlLink, turn: Turn<'_>) -> Served {
     let ControlLink { tx, rx, files } = link;
@@ -216,7 +222,7 @@ async fn serve(link: &mut ControlLink, turn: Turn<'_>) -> Served {
         clipboard,
         commands,
         transfers,
-        quality,
+        asked,
         stream,
     } = turn;
     let (hub, mut for_host) = transfers.start(files.clone());
@@ -234,11 +240,10 @@ async fn serve(link: &mut ControlLink, turn: Turn<'_>) -> Served {
                     if let Err(e) = tx.send(&message).await {
                         return Served::Ended(ViewerFailure::ConnectionLost(format!("{e:#}")));
                     }
-                    match message {
-                        ControlMessage::Bye => return Served::Finished,
-                        ControlMessage::SetQuality(asked) => *quality = asked,
-                        _ => {}
+                    if message == ControlMessage::Bye {
+                        return Served::Finished;
                     }
+                    asked.record(&message);
                 }
             }
             () = clipboard.changed() => {
@@ -298,19 +303,53 @@ fn window_event(message: ControlMessage) -> Option<UserEvent> {
     })
 }
 
-/// What a new connection is asked first: the quality the user picked, as
-/// a new connection starts at the host's own.
-fn quality_request(quality: Quality) -> Option<ControlMessage> {
-    (quality != Quality::Automatic).then_some(ControlMessage::SetQuality(quality))
+/// What the user asked the host for during the session, which a new
+/// connection forgets: it starts at the host's own quality, sound on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AskedChoices {
+    quality: Quality,
+    audio: bool,
+}
+
+impl Default for AskedChoices {
+    fn default() -> Self {
+        Self {
+            quality: Quality::Automatic,
+            audio: true,
+        }
+    }
+}
+
+impl AskedChoices {
+    /// Remembers `message`, if it is one of the choices.
+    fn record(&mut self, message: &ControlMessage) {
+        match message {
+            ControlMessage::SetQuality(quality) => self.quality = *quality,
+            ControlMessage::SetAudio(on) => self.audio = *on,
+            _ => {}
+        }
+    }
+
+    /// What a new connection is asked first: the choices that differ
+    /// from how it starts.
+    fn requests(&self) -> Vec<ControlMessage> {
+        let start = Self::default();
+        let quality =
+            (self.quality != start.quality).then_some(ControlMessage::SetQuality(self.quality));
+        let audio = (self.audio != start.audio).then_some(ControlMessage::SetAudio(self.audio));
+        quality.into_iter().chain(audio).collect()
+    }
 }
 
 /// Connects to the host again, trying after 0, 0.5, 1, 2, 4... seconds (see
 /// [`Backoff`]) until a connection is welcomed, the host gives an answer
 /// that retrying cannot change, the budget is spent, or the user
-/// disconnects. `cause` is why the connection broke.
+/// disconnects. `cause` is why the connection broke; the choices made
+/// meanwhile go to `asked`.
 async fn reestablish(
     cause: ViewerFailure,
     outgoing: &mut UnboundedReceiver<ControlMessage>,
+    asked: &mut AskedChoices,
     plan: &Reconnection,
 ) -> Result<Connected, Stop> {
     let mut backoff = Backoff::new(Instant::now());
@@ -332,7 +371,7 @@ async fn reestablish(
         };
         let limit = backoff.remaining(Instant::now());
         let outcome = tokio::select! {
-            () = until_cancelled(outgoing) => return Err(Stop::Cancelled),
+            () = until_cancelled(outgoing, asked) => return Err(Stop::Cancelled),
             outcome = tokio::time::timeout(limit, attempt) => outcome,
         };
         match outcome {
@@ -395,12 +434,16 @@ async fn resume(
 
 /// Resolves when the user ends the session (goodbye, or the window is gone).
 /// Whatever else is sent meanwhile is dropped: a click or a key from before
-/// the connection came back must not reach the host after it.
-async fn until_cancelled(outgoing: &mut UnboundedReceiver<ControlMessage>) {
+/// the connection came back must not reach the host after it. Choices
+/// (quality, sound) are kept in `asked`, for the new connection.
+async fn until_cancelled(
+    outgoing: &mut UnboundedReceiver<ControlMessage>,
+    asked: &mut AskedChoices,
+) {
     loop {
         match outgoing.recv().await {
             Some(ControlMessage::Bye) | None => return,
-            Some(_) => {}
+            Some(message) => asked.record(&message),
         }
     }
 }

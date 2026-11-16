@@ -12,7 +12,9 @@ use crate::access_mode::AccessMode;
 use crate::host::{HostFailure, HostWarning, SessionFailure};
 use crate::viewer::report::FailureCause;
 
+mod audio;
 mod transfer;
+pub use audio::*;
 pub use transfer::*;
 
 // --- Why a viewer ended -------------------------------------------------
@@ -169,6 +171,7 @@ pub fn host_warning(warning: &HostWarning) -> String {
             "Impossibile condividere lo schermo scelto dal visualizzatore: resta quello di \
              prima ({detail})."
         ),
+        HostWarning::AudioUnavailable(detail) => audio_unavailable(detail),
     }
 }
 
@@ -805,6 +808,10 @@ mod tests {
                 HostWarning::ScreenUnavailable("in use".into()),
                 "Impossibile condividere lo schermo scelto dal visualizzatore: resta quello di \
                  prima (in use).",
+            ),
+            (
+                HostWarning::AudioUnavailable("no device".into()),
+                "Impossibile condividere l'audio: la sessione continua senza (no device).",
             ),
         ];
         for (warning, text) in cases {

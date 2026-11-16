@@ -17,6 +17,8 @@
 //!   (reassemble -> decode -> present), fed through a bounded queue
 //!   (see `feed`); it also reports to the host how the video arrives, for
 //!   the host's bitrate adaptation (see `rate`).
+//! - audio thread: plays the host's sound, which the network task takes out
+//!   of the datagrams into a jitter buffer (see `audio`).
 //!
 //! Files dropped on the window or chosen in its "File" menu go to the host
 //! (see `transfers`, `window_files`); the host's land in this user's
@@ -24,6 +26,7 @@
 //! the desktop interface, the viewer also takes file commands on stdin
 //! (see `channel`).
 
+mod audio;
 mod bar_menu;
 pub mod channel;
 mod clipboard;
@@ -72,6 +75,7 @@ use crate::cli::ViewOptions;
 use crate::clipboard::ViewerRules;
 use crate::options::DEFAULT_PORT;
 use crate::target::{self, Resolved, parse_target};
+use audio::{AudioIn, AudioPlayer};
 use clipboard::ViewerClipboard;
 use control::{ControlLink, ControlTask, Reconnection, VideoFeed};
 use control_policy::ControlPolicy;
@@ -176,7 +180,13 @@ pub fn run(options: ViewOptions) -> Result<()> {
     let (outgoing_tx, outgoing_rx) = unbounded_channel::<ControlMessage>();
     let handle = LiveHandle::new(handle);
     let restart = feed::Restart::default();
-    let forward = runtime.spawn(feed::forward(video, datagram_tx.clone()));
+    let audio_in = AudioIn::new();
+    // Plays until the end of the session; without it the session goes on
+    // silent.
+    let _player = AudioPlayer::start(audio_in.clone())
+        .inspect_err(|e| eprintln!("warning: the host's sound cannot be played: {e:#}"))
+        .ok();
+    let forward = runtime.spawn(feed::forward(video, datagram_tx.clone(), audio_in.clone()));
     let target = TargetRate::default();
     let rules = ViewerRules {
         host_allows: input_allowed,
@@ -208,6 +218,7 @@ pub fn run(options: ViewOptions) -> Result<()> {
         feed: VideoFeed {
             forward,
             datagrams: datagram_tx,
+            audio: audio_in,
             restart: restart.clone(),
             handle: handle.clone(),
         },

@@ -14,6 +14,9 @@
 //! ([`StreamingThread::reconfigure`]) and when the monitor changes
 //! resolution: capture and encoder are opened again (see `stream_setup`)
 //! and the session hears it as [`StreamUpdate::Restarted`].
+//!
+//! While the session's sound is being sent ([`AudioLoad`]), the video keeps
+//! its bitrate below the configured maximum minus what the sound takes.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,13 +27,14 @@ use std::time::Instant;
 use anyhow::{Context, Result, anyhow};
 use codec::{DesktopSource, HwEncoder, MediaFoundation};
 use net::VideoChannel;
-use pipeline::{HostStats, HostStreamer, RecentFrames, StreamContinuation};
+use pipeline::{HostStats, HostStreamer, RecentFrames, StreamContinuation, video_ceiling};
 use protocol::control::{ControlMessage, StreamInfo};
 use protocol::feedback::ReceptionReport;
 use protocol::recovery::Nack;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
+use super::audio::AudioLoad;
 use super::events::EventSink;
 use super::rate_adaptation::{Counters, RateAdaptation, RateChange, ViewerReports};
 use super::screen_choice::ScreenChoice;
@@ -90,11 +94,13 @@ impl StreamingThread {
     /// `updates` receives what the stream produces for the session (see
     /// [`StreamUpdate`]). `events` gets the warnings of an encoder that
     /// cannot adapt its rate and of a choice that could not be streamed.
+    /// `audio` tells the bandwidth the session's sound takes.
     pub(super) fn start(
         plan: StreamPlan,
         video: VideoChannel,
         updates: UnboundedSender<StreamUpdate>,
         events: EventSink,
+        audio: AudioLoad,
     ) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let keyframe = Arc::new(AtomicBool::new(false));
@@ -124,6 +130,7 @@ impl StreamingThread {
                         choices: choices_rx,
                         updates,
                         events,
+                        audio,
                     };
                     let result = stream_loop(&plan, video, control, ready_tx, go_rx);
                     done.notify_one();
@@ -225,6 +232,8 @@ struct StreamControl<'a> {
     choices: mpsc::Receiver<ScreenChoice>,
     updates: UnboundedSender<StreamUpdate>,
     events: EventSink,
+    /// The bandwidth the session's sound takes now.
+    audio: AudioLoad,
 }
 
 impl StreamControl<'_> {
@@ -253,6 +262,10 @@ struct Live {
     streamer: Streamer,
     rate: RateAdaptation,
     choice: ScreenChoice,
+    /// The configured maximum of this stream, sound included.
+    max_bps: u32,
+    /// The share of `max_bps` the ceiling of the video leaves to the sound.
+    reserved_bps: u32,
 }
 
 impl Live {
@@ -276,6 +289,8 @@ impl Live {
             streamer,
             rate,
             choice,
+            max_bps,
+            reserved_bps: 0,
         }
     }
 }
@@ -364,6 +379,7 @@ fn stream_loop(
         for message in pointer_messages(live.streamer.source_mut().take_pointer_changes()) {
             control.tell_viewer(message);
         }
+        follow_audio(&mut live, &control);
         adapt_bitrate(&mut live, &transport, &control);
     }
     Ok(StreamEnd {
@@ -425,6 +441,20 @@ fn ended(
     }
 }
 
+/// Moves the video's ceiling when the sound starts or stops being sent,
+/// so both fit in the configured maximum.
+fn follow_audio(live: &mut Live, control: &StreamControl<'_>) {
+    let reserved = control.audio.reserved_bps();
+    if reserved == live.reserved_bps {
+        return;
+    }
+    live.reserved_bps = reserved;
+    let ceiling = video_ceiling(live.max_bps, reserved);
+    let Live { streamer, rate, .. } = live;
+    let change = rate.set_ceiling(ceiling, |bps| streamer.set_bitrate(bps));
+    report_rate_change(change, control);
+}
+
 /// Lets the encoder follow the network when a sample is due, and tells the
 /// viewer its new target. An encoder that refuses a rate is reported once;
 /// the stream then stays at the rate it has.
@@ -436,6 +466,12 @@ fn adapt_bitrate(live: &mut Live, transport: &VideoChannel, control: &StreamCont
         || counters(transport, frames_skipped),
         |bps| streamer.set_bitrate(bps),
     );
+    report_rate_change(change, control);
+}
+
+/// Tells the viewer the encoder's new target, or reports once that the
+/// encoder refused one.
+fn report_rate_change(change: Option<RateChange>, control: &StreamControl<'_>) {
     match change {
         None => {}
         Some(RateChange::Retargeted(bps)) => {

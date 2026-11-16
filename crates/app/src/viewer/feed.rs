@@ -6,6 +6,10 @@
 //! At each wake-up the render thread takes everything waiting
 //! ([`next_batch`]), so it decodes a backlog in one go and shows only its
 //! newest picture instead of replaying it.
+//!
+//! The host's sound shares the datagram channel: audio datagrams are taken
+//! out here and go straight to the jitter buffer ([`AudioIn`]), never
+//! behind the video in this queue.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,6 +18,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use net::VideoChannel;
+use protocol::audio::is_audio;
+
+use super::audio::AudioIn;
 
 /// Datagrams the queue holds, about 1.4 MB of video. A frame at the
 /// default 20 Mbit/s and 60 fps is ~30 datagrams, so a render thread that
@@ -77,15 +84,26 @@ pub fn discard_waiting(datagrams: &Receiver<Bytes>) {
     while datagrams.try_recv().is_ok() {}
 }
 
-/// Moves datagrams from the network to the render thread until either side
-/// is gone. Must run on a multi-thread runtime: a full queue is waited on
-/// in place, which a current-thread runtime does not allow.
-pub async fn forward(video: VideoChannel, out: SyncSender<Bytes>) {
+/// Moves datagrams from the network to the render thread (video) and to
+/// `audio` (sound) until either side is gone. Must run on a multi-thread
+/// runtime: a full queue is waited on in place, which a current-thread
+/// runtime does not allow.
+pub async fn forward(video: VideoChannel, out: SyncSender<Bytes>, audio: AudioIn) {
     while let Ok(datagram) = video.recv().await {
-        if !hand_over(&out, datagram) {
+        if !route(datagram, &out, &audio) {
             break; // render thread is gone
         }
     }
+}
+
+/// Hands `datagram` to the sound or the video. `false`: the render thread
+/// is gone.
+fn route(datagram: Bytes, out: &SyncSender<Bytes>, audio: &AudioIn) -> bool {
+    if is_audio(&datagram) {
+        audio.push(&datagram);
+        return true;
+    }
+    hand_over(out, datagram)
 }
 
 /// Queues `datagram`, waiting while the queue is full. `false`: the render
@@ -220,6 +238,20 @@ mod tests {
         assert!(hand_over(&tx, datagram(7)));
         drop(tx);
         assert_eq!(reader.join().unwrap(), [datagram(7)]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sound_never_enters_the_video_queue() {
+        let (tx, rx) = queue();
+        let audio = AudioIn::new();
+        let sound = protocol::audio::packetize(0, 0, &[1, 2], 100).remove(0);
+        assert!(route(sound, &tx, &audio));
+        assert!(route(datagram(1), &tx, &audio));
+        let mut batch = Vec::new();
+        next_batch(&rx, NO_WAIT, &mut batch).unwrap();
+        assert_eq!(batch, [datagram(1)]);
+        drop(rx);
+        assert!(!route(datagram(2), &tx, &audio));
     }
 
     #[tokio::test(flavor = "multi_thread")]

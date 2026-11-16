@@ -97,6 +97,15 @@ impl NetworkSample {
     }
 }
 
+/// The share of `max_bps`, the bitrate the user configured, left to the
+/// video while `reserved_bps` go to other traffic on the same path (the
+/// audio). Never below the floor, or `max_bps` itself if that is lower.
+pub fn video_ceiling(max_bps: u32, reserved_bps: u32) -> u32 {
+    max_bps
+        .saturating_sub(reserved_bps)
+        .max(MIN_BITRATE_BPS.min(max_bps))
+}
+
 /// The adaptive target bitrate. Pure: time comes in with every sample.
 #[derive(Debug, Clone)]
 pub struct BitrateController {
@@ -125,6 +134,20 @@ impl BitrateController {
 
     pub fn target_bps(&self) -> u32 {
         self.target_bps
+    }
+
+    /// Moves the ceiling to `max_bps` (e.g. the audio started or stopped,
+    /// see [`video_ceiling`]). A lower ceiling brings the target down at
+    /// once, which is returned; a higher one is reached by the usual
+    /// increases, as after a congestion.
+    pub fn set_max(&mut self, max_bps: u32) -> Option<u32> {
+        self.max_bps = max_bps;
+        self.min_bps = MIN_BITRATE_BPS.min(max_bps);
+        let next = self.target_bps.clamp(self.min_bps, self.max_bps);
+        (next != self.target_bps).then(|| {
+            self.target_bps = next;
+            next
+        })
     }
 
     /// Takes the sample of the interval ending at `now`; returns the new
@@ -224,6 +247,32 @@ mod tests {
         fn elapsed(&self) -> Duration {
             self.now - self.start
         }
+    }
+
+    #[test]
+    fn the_video_gets_what_the_audio_leaves_down_to_the_floor() {
+        assert_eq!(video_ceiling(MAX, 1_700_000), MAX - 1_700_000);
+        assert_eq!(video_ceiling(MAX, 0), MAX);
+        assert_eq!(video_ceiling(2_000_000, 1_700_000), MIN_BITRATE_BPS);
+        assert_eq!(video_ceiling(1_000_000, 1_700_000), 1_000_000);
+    }
+
+    #[test]
+    fn a_lower_ceiling_cuts_the_target_at_once_a_higher_one_is_climbed_to() {
+        let mut clock = Clock::new(MAX);
+        let lower = video_ceiling(MAX, 1_700_000);
+        assert_eq!(clock.controller.set_max(lower), Some(lower));
+        assert_eq!(clock.controller.set_max(lower), None);
+        assert!(
+            clock
+                .run(calm(), Duration::from_secs(10))
+                .iter()
+                .all(|&t| t == lower)
+        );
+        assert_eq!(clock.controller.set_max(MAX), None, "no jump up");
+        let targets = clock.run(calm(), Duration::from_secs(10));
+        assert_eq!(*targets.last().unwrap(), MAX);
+        assert!(targets.windows(2).all(|pair| pair[0] <= pair[1]));
     }
 
     #[test]

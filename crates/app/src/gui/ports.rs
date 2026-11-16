@@ -110,6 +110,9 @@ pub trait SharingControl {
     fn set_clipboard_shared(&self, shared: bool);
     /// Lets the viewer's files in, or not, also for a viewer connected now.
     fn set_receive_files(&self, receive: bool);
+    /// Lets the viewer hear this PC's sound, or not, also a viewer
+    /// connected now.
+    fn set_audio_shared(&self, shared: bool);
     /// Sends files to the connected viewer; `false` without one.
     fn send_files(&self, picked: Vec<PathBuf>) -> bool;
     /// Cancels one transfer of the connected viewer (`None`: all).

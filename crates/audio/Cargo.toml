@@ -1,0 +1,17 @@
+[package]
+name = "audio"
+version.workspace = true
+edition.workspace = true
+
+# WASAPI: the host's sound captured in loopback, the viewer's played back.
+# Only the `windows` crate, nothing to build.
+[dependencies]
+anyhow.workspace = true
+protocol.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+] }

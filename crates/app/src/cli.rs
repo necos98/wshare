@@ -66,7 +66,7 @@ wshare - LAN screen sharing (no arguments: open the window)
                open the window; --minimized starts hidden in the notification area
                (Windows start-up passes it when the option is on in the settings)
   wshare host  [--monitor N] [--fps F] [--mbps B] [--codec h264|hevc] [--port P] [--pin PIN]
-               [--view-only] [--no-clipboard] [--no-file-receive] [--downloads DIR]
+               [--view-only] [--no-clipboard] [--no-file-receive] [--downloads DIR] [--no-audio]
                --mbps is the maximum bitrate (default 20): the host lowers it while the
                network is congested and raises it back gradually
                a viewer that gave the PIN once connects without it from then on
@@ -78,6 +78,8 @@ wshare - LAN screen sharing (no arguments: open the window)
                copied files are shared the same way (pasted in Explorer on the other PC)
                files the viewer drops or sends land in DIR (default Downloads\\wshare), if
                remote control is allowed; --no-file-receive refuses them
+               the viewer hears this PC's sound (it can mute it from its bar);
+               --no-audio keeps it local
   wshare view  [HOST | IP[:PORT]] [--pin PIN] [--host-id ID] [--view-only] [--fullscreen] [--stats]
                [--downloads DIR]
                the PIN is needed only the first time: the host then remembers this PC,
@@ -87,6 +89,7 @@ wshare - LAN screen sharing (no arguments: open the window)
                in the viewer: Ctrl+Alt+Enter full screen, Ctrl+Alt+I statistics
                files dropped on the window (or sent from its bar) go to the host; the
                host's land in DIR (default Downloads\\wshare)
+               the host's sound plays here; the Audio button of the bar mutes it
   wshare list                       hosts found on the LAN
   wshare monitors                   monitors of this PC
   wshare bench [--monitor N] [--fps F] [--mbps B] [--codec h264|hevc] [--seconds S] [--out FILE]";
@@ -178,6 +181,7 @@ fn parse_host(args: &[String]) -> Result<HostOptions> {
         share_clipboard: true,
         access: AccessMode::PinOnly,
         receive_files: true,
+        share_audio: true,
         downloads: None,
     };
     for_each_arg(args, |flag, value| {
@@ -190,6 +194,7 @@ fn parse_host(args: &[String]) -> Result<HostOptions> {
             "--view-only" => options.view_only = true,
             "--no-clipboard" => options.share_clipboard = false,
             "--no-file-receive" => options.receive_files = false,
+            "--no-audio" => options.share_audio = false,
             "--downloads" => options.downloads = Some(PathBuf::from(value()?)),
             _ => return Ok(false),
         }
@@ -296,12 +301,13 @@ mod tests {
         assert!(!h.view_only);
         assert!(h.share_clipboard);
         assert!(h.receive_files, "files are accepted by default");
+        assert!(h.share_audio, "the sound is shared by default");
         assert_eq!(h.downloads, None, "the user's Downloads folder");
     }
 
     #[test]
     fn host_with_every_option() {
-        let line = "host --monitor 1 --fps 30 --mbps 50 --codec HEVC --port 9000 --pin 123456 --view-only --no-clipboard --no-file-receive --downloads D:/ricevuti";
+        let line = "host --monitor 1 --fps 30 --mbps 50 --codec HEVC --port 9000 --pin 123456 --view-only --no-clipboard --no-file-receive --downloads D:/ricevuti --no-audio";
         let Command::Host(h) = parse(&args(line)).unwrap() else {
             panic!()
         };
@@ -319,6 +325,7 @@ mod tests {
         assert!(h.view_only);
         assert!(!h.share_clipboard);
         assert!(!h.receive_files);
+        assert!(!h.share_audio);
         assert_eq!(h.downloads, Some(PathBuf::from("D:/ricevuti")));
     }
 

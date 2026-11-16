@@ -63,12 +63,34 @@ pub(super) enum SessionRefusal {
     TooManyPending,
 }
 
+/// The switches of the person at the host, as the service starts with them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Permissions {
+    pub(super) input_allowed: bool,
+    pub(super) clipboard_shared: bool,
+    pub(super) receive_files: bool,
+    pub(super) audio_shared: bool,
+}
+
+impl Default for Permissions {
+    /// Everything allowed, as the settings start.
+    fn default() -> Self {
+        Self {
+            input_allowed: true,
+            clipboard_shared: true,
+            receive_files: true,
+            audio_shared: true,
+        }
+    }
+}
+
 pub(super) struct SharedState {
     pin: Mutex<String>,
     access: Mutex<AccessMode>,
     input_allowed: watch::Sender<bool>,
     clipboard_shared: watch::Sender<bool>,
     receive_files: watch::Sender<bool>,
+    audio_shared: watch::Sender<bool>,
     /// The file transfers of the viewer connected now, if any.
     transfers: Mutex<Option<UnboundedSender<TransferCommand>>>,
     stop: Cancel,
@@ -81,9 +103,7 @@ pub(super) struct SharedState {
 impl SharedState {
     pub(super) fn new(
         pin: String,
-        input_allowed: bool,
-        clipboard_shared: bool,
-        receive_files: bool,
+        permissions: Permissions,
         access: AccessMode,
         limits: SessionLimits,
     ) -> Self {
@@ -91,9 +111,10 @@ impl SharedState {
         Self {
             pin: Mutex::new(pin),
             access: Mutex::new(access),
-            input_allowed: watch::channel(input_allowed).0,
-            clipboard_shared: watch::channel(clipboard_shared).0,
-            receive_files: watch::channel(receive_files).0,
+            input_allowed: watch::channel(permissions.input_allowed).0,
+            clipboard_shared: watch::channel(permissions.clipboard_shared).0,
+            receive_files: watch::channel(permissions.receive_files).0,
+            audio_shared: watch::channel(permissions.audio_shared).0,
             transfers: Mutex::new(None),
             stop,
             stop_listener,
@@ -158,6 +179,21 @@ impl SharedState {
 
     pub(super) fn watch_receive_files(&self) -> watch::Receiver<bool> {
         self.receive_files.subscribe()
+    }
+
+    /// Lets the viewer hear this PC's sound, or not; sessions watching it
+    /// are woken only on an actual change.
+    pub(super) fn set_audio_shared(&self, shared: bool) {
+        self.audio_shared.send_if_modified(|current| {
+            let changed = *current != shared;
+            *current = shared;
+            changed
+        });
+    }
+
+    /// A receiver that wakes when sharing the sound is turned on or off.
+    pub(super) fn watch_audio(&self) -> watch::Receiver<bool> {
+        self.audio_shared.subscribe()
     }
 
     /// The admitted viewer's transfers take commands on `commands` (`None`:
@@ -251,9 +287,7 @@ mod tests {
     fn state() -> Arc<SharedState> {
         Arc::new(SharedState::new(
             "111111".into(),
-            true,
-            true,
-            true,
+            Permissions::default(),
             AccessMode::PinOnly,
             SessionLimits::default(),
         ))

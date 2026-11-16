@@ -301,6 +301,24 @@ fn the_clipboard_setting_is_live_and_reaches_the_service_only_when_it_changes() 
 }
 
 #[test]
+fn the_audio_setting_is_live_and_saved() {
+    let (mut c, log) = controller();
+    c.handle(Intent::SetSharing(true));
+    calls(&log);
+
+    changed(&mut c, |s| s.share_audio = false);
+    assert_eq!(calls(&log), ["audio false"]);
+    assert!(!c.state().restart_needed());
+    assert!(!log.borrow().saved.last().unwrap().share_audio);
+
+    changed(&mut c, |s| s.fps = 30);
+    assert!(calls(&log).is_empty(), "other settings do not touch it");
+
+    changed(&mut c, |s| s.share_audio = true);
+    assert_eq!(calls(&log), ["audio true"]);
+}
+
+#[test]
 fn the_sharing_starts_with_the_saved_clipboard_setting() {
     let (mut c, log) = controller_with_settings(Settings {
         share_clipboard: false,

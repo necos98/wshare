@@ -66,6 +66,8 @@ pub struct HostOptions {
     /// Accept the files the viewer drops or sends (they also need remote
     /// control).
     pub receive_files: bool,
+    /// Let the viewer hear this PC's sound (it can still mute it).
+    pub share_audio: bool,
     /// Where the viewer's files land; `None`: this user's
     /// `Downloads\wshare` (see `paths::default_downloads`).
     pub downloads: Option<PathBuf>,

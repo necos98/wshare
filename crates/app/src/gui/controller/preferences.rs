@@ -79,6 +79,11 @@ impl<
         {
             sharing.set_receive_files(self.state.settings.receive_files);
         }
+        if old.share_audio != self.state.settings.share_audio
+            && let Some(sharing) = &self.sharing
+        {
+            sharing.set_audio_shared(self.state.settings.share_audio);
+        }
         if old.access != self.state.settings.access
             && let Some(sharing) = &self.sharing
         {

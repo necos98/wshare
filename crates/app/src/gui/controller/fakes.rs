@@ -93,6 +93,9 @@ impl SharingControl for FakeControl {
             .calls
             .push(format!("receive_files {receive}"));
     }
+    fn set_audio_shared(&self, shared: bool) {
+        self.0.borrow_mut().calls.push(format!("audio {shared}"));
+    }
     fn send_files(&self, picked: Vec<PathBuf>) -> bool {
         let mut log = self.0.borrow_mut();
         if log.no_viewer {

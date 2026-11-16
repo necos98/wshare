@@ -23,6 +23,7 @@ fn options(monitor: usize) -> HostOptions {
         share_clipboard: true,
         access: AccessMode::PinOnly,
         receive_files: true,
+        share_audio: true,
         downloads: None,
     }
 }

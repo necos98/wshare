@@ -125,7 +125,8 @@ async fn reestablish_in_time(
     plan: &Reconnection,
     outgoing: &mut tokio::sync::mpsc::UnboundedReceiver<ControlMessage>,
 ) -> Result<Connected, Stop> {
-    tokio::time::timeout(WAIT, reestablish(lost(), outgoing, plan))
+    let mut asked = AskedChoices::default();
+    tokio::time::timeout(WAIT, reestablish(lost(), outgoing, &mut asked, plan))
         .await
         .expect("reestablish did not finish")
 }
@@ -247,19 +248,22 @@ async fn closing_the_window_cancels_too() {
 }
 
 #[tokio::test]
-async fn until_cancelled_drops_everything_but_the_goodbye() {
+async fn until_cancelled_drops_everything_but_the_goodbye_and_keeps_the_choices() {
     let (sender, mut outgoing) = unbounded_channel();
+    let mut asked = AskedChoices::default();
     sender.send(ControlMessage::RequestKeyframe).unwrap();
+    sender.send(ControlMessage::SetAudio(false)).unwrap();
     sender
         .send(ControlMessage::Clipboard("old".into()))
         .unwrap();
     sender.send(ControlMessage::Bye).unwrap();
     sender.send(ControlMessage::RequestKeyframe).unwrap();
-    until_cancelled(&mut outgoing).await;
+    until_cancelled(&mut outgoing, &mut asked).await;
     assert!(
         outgoing.try_recv().is_ok(),
         "only what came before the goodbye was dropped"
     );
+    assert_eq!(asked.requests(), [ControlMessage::SetAudio(false)]);
 }
 
 #[test]
@@ -312,11 +316,25 @@ fn the_window_hears_of_monitors_and_stream_changes() {
 }
 
 #[test]
-fn only_a_quality_other_than_automatic_is_asked_for_again() {
-    assert_eq!(quality_request(Quality::Automatic), None);
+fn only_choices_that_differ_from_a_new_connection_are_asked_for_again() {
+    let mut asked = AskedChoices::default();
+    assert!(asked.requests().is_empty());
+    asked.record(&ControlMessage::SetQuality(Quality::Low));
+    asked.record(&ControlMessage::RequestKeyframe);
+    assert_eq!(asked.requests(), [ControlMessage::SetQuality(Quality::Low)]);
+    asked.record(&ControlMessage::SetAudio(false));
     assert_eq!(
-        quality_request(Quality::Low),
-        Some(ControlMessage::SetQuality(Quality::Low))
+        asked.requests(),
+        [
+            ControlMessage::SetQuality(Quality::Low),
+            ControlMessage::SetAudio(false)
+        ]
+    );
+    asked.record(&ControlMessage::SetQuality(Quality::Automatic));
+    asked.record(&ControlMessage::SetAudio(true));
+    assert!(
+        asked.requests().is_empty(),
+        "back to how a connection starts"
     );
 }
 

@@ -25,6 +25,7 @@ use tokio::sync::watch;
 
 use super::admission::{Admission, Applicant, admit, send_rejection, viewer_trust};
 use super::approvals::Approvals;
+use super::audio::{AudioLoad, AudioPlan, SessionAudio};
 use super::clipboard::{ClipboardSettings, SessionClipboard};
 use super::devices::Devices;
 use super::events::EventSink;
@@ -152,6 +153,10 @@ async fn serve_admitted(
     };
 
     let (updates_tx, mut updates_rx) = unbounded_channel();
+    // The sound goes on the connection of the video, and takes from its
+    // bitrate what it needs.
+    let audio_sink = video.clone();
+    let load = AudioLoad::default();
     let prepared = async {
         // Looked up per session: the monitor layout may change while the
         // service runs.
@@ -167,7 +172,8 @@ async fn serve_admitted(
             base: ctx.stream.clone(),
             choice: screens.current(),
         };
-        let mut streaming = StreamingThread::start(plan, video, updates_tx, ctx.events.clone())?;
+        let mut streaming =
+            StreamingThread::start(plan, video, updates_tx, ctx.events.clone(), load.clone())?;
         let info = streaming.ready().await?;
         anyhow::Ok((monitors, screens, input, streaming, info))
     };
@@ -209,6 +215,7 @@ async fn serve_admitted(
         address,
     });
     streaming.go();
+    let audio = start_audio(ctx, audio_sink, load);
 
     let mut gate = InputGate::new(input);
     let settings = ClipboardSettings {
@@ -227,6 +234,7 @@ async fn serve_admitted(
         switch: InputSwitch::new(told),
         clipboard,
         transfers,
+        audio: audio.as_ref(),
         screens,
         monitor: &ctx.monitor,
         cancel: &mut cancel,
@@ -240,6 +248,12 @@ async fn serve_admitted(
     }
     drop(gate);
     viewer.handle.close("session over");
+    if let Some(audio) = audio
+        && let Err(e) = audio.stop().await
+    {
+        let warning = HostWarning::AudioUnavailable(format!("{e:#}"));
+        ctx.events.emit(HostEvent::Warning(warning));
+    }
     let (stats, stream_error) = match streaming.stop().await {
         Ok(StreamEnd { stats, error }) => (stats, error),
         Err(e) => (HostStats::default(), Some(e)),
@@ -250,6 +264,23 @@ async fn serve_admitted(
         stats,
         error,
     });
+}
+
+/// Starts the session's sound; without it (no thread) the session goes on
+/// silent, with a warning.
+fn start_audio(ctx: &SessionContext, sink: VideoChannel, load: AudioLoad) -> Option<SessionAudio> {
+    let plan = AudioPlan {
+        sink,
+        shared: ctx.state.watch_audio(),
+        load,
+        events: ctx.events.clone(),
+    };
+    SessionAudio::start(plan)
+        .inspect_err(|e| {
+            let warning = HostWarning::AudioUnavailable(format!("{e:#}"));
+            ctx.events.emit(HostEvent::Warning(warning));
+        })
+        .ok()
 }
 
 fn welcome(host_name: &str, stream: StreamInfo, input_allowed: bool) -> ControlMessage {
@@ -298,6 +329,8 @@ struct ControlLoop<'a> {
     clipboard: SessionClipboard,
     /// The files sent, dropped or pasted, both ways.
     transfers: SessionTransfers,
+    /// The session's sound, if it could start.
+    audio: Option<&'a SessionAudio>,
     /// The monitor and quality the viewer chose.
     screens: SessionScreens,
     /// Where the monitor chosen is kept for the next sessions.
@@ -337,6 +370,11 @@ impl ControlLoop<'_> {
                     Some(ControlMessage::SetQuality(quality)) => {
                         let choice = self.screens.set_quality(quality);
                         self.reconfigure(choice);
+                    }
+                    Some(ControlMessage::SetAudio(on)) => {
+                        if let Some(audio) = self.audio {
+                            audio.set_viewer_wants(on);
+                        }
                     }
                     Some(ControlMessage::Bye) | None => return Ok(SessionEnd::ViewerLeft),
                     Some(_) => {} // ignore unexpected messages

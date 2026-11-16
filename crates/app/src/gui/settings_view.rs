@@ -106,6 +106,8 @@ fn sharing_group(ui: &mut Ui, state: &GuiState, edited: &mut Settings) {
         port_row(ui, edited);
         ui.checkbox(&mut edited.allow_input, text::SETTINGS_ALLOW_INPUT);
         ui.checkbox(&mut edited.share_clipboard, text::SETTINGS_SHARE_CLIPBOARD);
+        ui.checkbox(&mut edited.share_audio, text::SETTING_SHARE_AUDIO)
+            .on_hover_text(text::SETTING_SHARE_AUDIO_HINT);
         access_row(ui, edited);
     });
 }

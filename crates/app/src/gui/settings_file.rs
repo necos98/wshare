@@ -55,6 +55,7 @@ mod tests {
             share_clipboard: false,
             access: AccessMode::PinOrConfirmation,
             receive_files: false,
+            share_audio: false,
             downloads: "D:/Ricevuti".into(),
             viewer_fullscreen: true,
             viewer_stats: true,

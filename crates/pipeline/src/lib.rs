@@ -6,6 +6,7 @@
 //! D3D11 renderer, QUIC transport) live in other crates and implement these
 //! traits (Dependency Inversion).
 
+pub mod audio;
 pub mod backlog;
 pub mod bitrate;
 pub mod burst;
@@ -17,7 +18,7 @@ pub mod retransmit;
 pub mod traits;
 pub mod viewer;
 
-pub use bitrate::{BitrateController, NetworkSample};
+pub use bitrate::{BitrateController, NetworkSample, video_ceiling};
 pub use host::{HostStats, HostStreamer, StreamContinuation};
 pub use pacer::FramePacer;
 pub use retransmit::RecentFrames;

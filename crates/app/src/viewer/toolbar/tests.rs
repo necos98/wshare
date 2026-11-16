@@ -18,8 +18,8 @@ fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Rect {
 }
 
 /// Hand-built layout, independent of the renderer's numbers. For a
-/// 1000 px window: handle 440..560 x 0..12; six buttons of 100 px from
-/// x = 200 to 800 (y 5..35) in a bar 150..850 x 0..40.
+/// 1000 px window: handle 440..560 x 0..12; seven buttons of 100 px from
+/// x = 150 to 850 (y 5..35) in a bar 100..900 x 0..40.
 fn fake(window: (u32, u32), _scale: f32, count: usize, expanded: bool) -> ToolbarGeometry {
     let cx = window.0 as i32 / 2;
     let start = cx - count as i32 * 50;
@@ -52,12 +52,13 @@ fn t(ms: u64, base: Instant) -> Instant {
 }
 
 const ON_HANDLE: (i32, i32) = (500, 5);
-const ON_FULLSCREEN: (i32, i32) = (250, 20);
-const ON_SCREEN: (i32, i32) = (350, 20);
-const ON_QUALITY: (i32, i32) = (450, 20);
-const ON_FILES: (i32, i32) = (550, 20);
-const ON_STATS: (i32, i32) = (650, 20);
-const ON_DISCONNECT: (i32, i32) = (750, 20);
+const ON_FULLSCREEN: (i32, i32) = (200, 20);
+const ON_SCREEN: (i32, i32) = (300, 20);
+const ON_QUALITY: (i32, i32) = (400, 20);
+const ON_AUDIO: (i32, i32) = (500, 20);
+const ON_FILES: (i32, i32) = (600, 20);
+const ON_STATS: (i32, i32) = (700, 20);
+const ON_DISCONNECT: (i32, i32) = (800, 20);
 const ON_BAR_GAP: (i32, i32) = (500, 38);
 const VIDEO: (i32, i32) = (500, 300);
 
@@ -75,7 +76,7 @@ fn a_window_has_the_bar_too() {
     assert!(b.view().expanded, "the handle reveals the bar");
     assert!(mv(&mut b, ON_STATS, now).consumed);
     assert!(b.wants_arrow());
-    assert_eq!(b.view().hovered, Some(4));
+    assert_eq!(b.view().hovered, Some(5));
     mv(&mut b, VIDEO, now);
     assert!(b.next_deadline().is_some(), "and it folds away again");
 }
@@ -109,6 +110,7 @@ fn the_first_button_names_the_other_mode_and_hints_the_shortcut() {
             "Schermo intero",
             "Schermo",
             "Qualità",
+            "Audio",
             "File",
             "Statistiche",
             "Disconnetti"
@@ -120,6 +122,7 @@ fn the_first_button_names_the_other_mode_and_hints_the_shortcut() {
             "Schermo intero (Ctrl+Alt+Invio)",
             "Scegli quale monitor dell'altro computer guardare",
             "Scegli la qualità del video",
+            "Disattiva l'audio dell'altro computer",
             "Invia file all'altro computer o annulla i trasferimenti",
             "Mostra o nascondi le statistiche (Ctrl+Alt+I)",
             "Chiudi la connessione"
@@ -158,6 +161,7 @@ fn view_starts_collapsed_in_fullscreen_with_labels() {
             "Finestra",
             "Schermo",
             "Qualità",
+            "Audio",
             "File",
             "Statistiche",
             "Disconnetti"
@@ -205,13 +209,13 @@ fn stays_open_over_bar_and_tracks_hover() {
     mv(&mut b, ON_HANDLE, now);
     let out = mv(&mut b, ON_STATS, now);
     assert!(out.consumed);
-    assert_eq!(b.view().hovered, Some(4));
+    assert_eq!(b.view().hovered, Some(5));
     assert_eq!(b.next_deadline(), None);
     mv(&mut b, ON_BAR_GAP, now);
     assert_eq!(b.view().hovered, None);
     assert!(b.wants_arrow());
     mv(&mut b, ON_DISCONNECT, now);
-    assert_eq!(b.view().hovered, Some(5));
+    assert_eq!(b.view().hovered, Some(6));
 }
 
 #[test]
@@ -426,7 +430,7 @@ fn changed_view_reported_once() {
     assert!(b.take_changed_view().unwrap().expanded);
     mv(&mut b, ON_DISCONNECT, now);
     assert!(b.take_changed_view().is_some());
-    mv(&mut b, (701, 20), now); // same button: no change
+    mv(&mut b, (801, 20), now); // same button: no change
     assert!(b.take_changed_view().is_none());
     b.set_fullscreen(false);
     let relabelled = b.take_changed_view().unwrap();
@@ -475,9 +479,9 @@ fn row(left: i32, index: i32) -> (i32, i32) {
 }
 
 /// Left edges of the "Screen", "Quality" and "File" buttons.
-const SCREEN_LEFT: i32 = 300;
-const QUALITY_LEFT: i32 = 400;
-const FILES_LEFT: i32 = 500;
+const SCREEN_LEFT: i32 = 250;
+const QUALITY_LEFT: i32 = 350;
+const FILES_LEFT: i32 = 550;
 
 fn click(b: &mut ControlBar<Geo>, p: (i32, i32), now: Instant) -> Outcome {
     mv(b, p, now);
@@ -674,7 +678,7 @@ fn the_files_menu_sends_and_cancels() {
     mv(&mut b, ON_HANDLE, now);
     assert_eq!(click(&mut b, ON_FILES, now).action, None, "it opens");
     let menu = b.view().menu.expect("menu open");
-    assert_eq!((menu.button, menu.items.len()), (3, 1));
+    assert_eq!((menu.button, menu.items.len()), (4, 1));
     let chosen = click(&mut b, row(FILES_LEFT, 0), now);
     assert_eq!(chosen.action, Some(BarAction::SendFiles));
     assert!(b.view().menu.is_none(), "choosing closes it");
@@ -689,4 +693,36 @@ fn the_files_menu_sends_and_cancels() {
     click(&mut b, ON_FILES, now);
     let chosen = click(&mut b, row(FILES_LEFT, 1), now);
     assert_eq!(chosen.action, Some(BarAction::CancelTransfers));
+}
+
+// ---- audio ----
+
+#[test]
+fn the_audio_button_mutes_and_unmutes_and_says_which() {
+    let now = Instant::now();
+    let mut b = bar();
+    mv(&mut b, ON_HANDLE, now);
+    assert_eq!(b.view().buttons[3], "Audio");
+    assert_eq!(
+        click(&mut b, ON_AUDIO, now).action,
+        Some(BarAction::SetAudio(false))
+    );
+    let muted = b.view();
+    assert_eq!(muted.buttons[3], "Audio (muto)");
+    assert_eq!(muted.tooltips[3], "Riattiva l'audio dell'altro computer");
+    assert_eq!(
+        click(&mut b, ON_AUDIO, now).action,
+        Some(BarAction::SetAudio(true))
+    );
+    assert_eq!(b.view().buttons[3], "Audio");
+}
+
+#[test]
+fn muting_survives_switching_full_screen() {
+    let now = Instant::now();
+    let mut b = bar();
+    mv(&mut b, ON_HANDLE, now);
+    click(&mut b, ON_AUDIO, now);
+    b.set_fullscreen(false);
+    assert_eq!(b.view().buttons[3], "Audio (muto)");
 }

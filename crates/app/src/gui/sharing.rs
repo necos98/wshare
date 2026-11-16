@@ -73,6 +73,10 @@ impl SharingControl for RunningHost {
         self.handle.set_receive_files(receive);
     }
 
+    fn set_audio_shared(&self, shared: bool) {
+        self.handle.set_audio_shared(shared);
+    }
+
     fn send_files(&self, picked: Vec<PathBuf>) -> bool {
         self.handle.send_files(picked)
     }

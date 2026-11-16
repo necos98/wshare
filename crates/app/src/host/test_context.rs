@@ -14,7 +14,7 @@ use super::events::recording::recorder;
 use super::pin_guard::PinGuard;
 use super::session::SessionContext;
 use super::sessions::SessionLimits;
-use super::state::SharedState;
+use super::state::{Permissions, SharedState};
 use crate::access_mode::AccessMode;
 use crate::options::StreamOptions;
 use crate::trust::AuthorizedDevices;
@@ -36,9 +36,7 @@ pub(super) fn test_context(access: AccessMode, approval_timeout: Duration) -> Te
     let sink = EventSink::new(observer);
     let state = Arc::new(SharedState::new(
         PIN.into(),
-        true,
-        true,
-        true,
+        Permissions::default(),
         access,
         SessionLimits::default(),
     ));

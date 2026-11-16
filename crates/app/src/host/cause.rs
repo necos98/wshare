@@ -110,6 +110,9 @@ pub enum HostWarning {
     /// The monitor or quality the viewer chose could not be streamed: the
     /// stream went on as it was.
     ScreenUnavailable(String),
+    /// This PC's sound cannot be captured (no playback device, ...): the
+    /// session goes on without it. Said once until the sound comes back.
+    AudioUnavailable(String),
 }
 
 impl fmt::Display for HostWarning {
@@ -156,6 +159,12 @@ impl fmt::Display for HostWarning {
             }
             Self::ScreenUnavailable(detail) => {
                 write!(f, "the screen the viewer chose cannot be shared: {detail}")
+            }
+            Self::AudioUnavailable(detail) => {
+                write!(
+                    f,
+                    "the sound cannot be shared, the session goes on without it: {detail}"
+                )
             }
         }
     }
@@ -277,6 +286,10 @@ mod tests {
         assert_eq!(
             HostWarning::ScreenUnavailable("in use".into()).to_string(),
             "the screen the viewer chose cannot be shared: in use"
+        );
+        assert_eq!(
+            HostWarning::AudioUnavailable("no device".into()).to_string(),
+            "the sound cannot be shared, the session goes on without it: no device"
         );
     }
 }

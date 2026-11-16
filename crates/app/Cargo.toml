@@ -14,6 +14,7 @@ winresource = "0.1.34"
 
 [dependencies]
 anyhow.workspace = true
+audio.workspace = true
 capture.workspace = true
 codec.workspace = true
 discovery.workspace = true

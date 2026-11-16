@@ -67,6 +67,8 @@ pub struct Settings {
     /// Whether the viewer may drop, send or paste files on this PC (they
     /// also need `allow_input`).
     pub receive_files: bool,
+    /// Whether the viewer hears this PC's sound (it can still mute it).
+    pub share_audio: bool,
     /// Where received files land, on this PC as host and as viewer; empty:
     /// `Downloads\wshare`.
     pub downloads: String,
@@ -96,6 +98,7 @@ impl Default for Settings {
             share_clipboard: true,
             access: AccessMode::PinOnly,
             receive_files: true,
+            share_audio: true,
             downloads: String::new(),
             viewer_fullscreen: false,
             viewer_stats: false,
@@ -177,6 +180,7 @@ impl Settings {
             share_clipboard: self.share_clipboard,
             access: self.access,
             receive_files: self.receive_files,
+            share_audio: self.share_audio,
             downloads: self.downloads_folder(),
         }
     }
@@ -199,6 +203,7 @@ mod tests {
         assert!(settings.allow_input);
         assert!(settings.share_clipboard);
         assert!(settings.receive_files, "files are accepted by default");
+        assert!(settings.share_audio, "the sound is shared by default");
         assert_eq!(settings.downloads_folder(), None);
         assert!(settings.notifications && settings.connection_indicator);
         assert_eq!(
@@ -251,6 +256,16 @@ mod tests {
         assert_eq!(options.pin, None);
         assert!(options.receive_files);
         assert_eq!(options.downloads, None);
+    }
+
+    #[test]
+    fn sharing_the_sound_follows_its_setting() {
+        assert!(Settings::default().host_options().share_audio);
+        let settings = Settings {
+            share_audio: false,
+            ..Settings::default()
+        };
+        assert!(!settings.host_options().share_audio);
     }
 
     #[test]

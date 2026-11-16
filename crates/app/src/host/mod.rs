@@ -19,6 +19,8 @@
 //! - `devices`: the viewers admitted without a PIN, shared with the handle.
 //! - `streaming`: the capture/encode thread of a session; `stream_setup`
 //!   opens its capture and encoder.
+//! - `audio`: the sound of a session, captured and sent while the host's
+//!   switch and the viewer's Audio button want it.
 //! - `screen_choice`: the monitor and quality a viewer chose.
 //! - `monitor_list`: the monitors as the viewer and remote input see them.
 //! - `screen_switch`: a session switching screens (requests, aftermath).
@@ -39,6 +41,7 @@ mod adapter_mac;
 mod admission;
 mod approval_limiter;
 mod approvals;
+mod audio;
 mod cause;
 mod clipboard;
 mod console;
@@ -184,6 +187,12 @@ impl HostHandle {
     /// need it too. They also need remote control.
     pub fn set_receive_files(&self, receive: bool) {
         self.service.state().set_receive_files(receive);
+    }
+
+    /// Lets the viewer hear this PC's sound, or not, effective immediately,
+    /// also for a viewer already connected (whose own mute still applies).
+    pub fn set_audio_shared(&self, shared: bool) {
+        self.service.state().set_audio_shared(shared);
     }
 
     /// Sends `picked` (files and folders) to the connected viewer, into its

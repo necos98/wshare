@@ -186,7 +186,7 @@ impl<
         } = ports;
         let (settings, warning) = backend.load();
         let mut state = GuiState {
-            unattended: UnattendedState::read(unattended.installed()),
+            unattended: UnattendedState::read(unattended.installed(), &settings.service_settings()),
             settings_notice: warning.map(|detail| text::settings_unreadable(&detail)),
             ..GuiState::default()
         };

@@ -18,6 +18,7 @@ use crate::host::{ApprovalAnswer, ApprovalId, HostEvent, HostFailure};
 use crate::options::HostOptions;
 use crate::transfer::TransferCommand;
 use crate::trust::KnownHost;
+use crate::unattended::ServiceSettings;
 
 /// Shared log of what the fakes were asked to do.
 #[derive(Default)]
@@ -57,6 +58,8 @@ pub(super) struct Log {
     /// its state cannot be read.
     pub(super) unattended_installed: bool,
     pub(super) unattended_unreadable: bool,
+    /// The host settings handed to the last install of the service.
+    pub(super) unattended_settings: Option<ServiceSettings>,
 }
 
 pub(super) type Shared = Rc<RefCell<Log>>;
@@ -361,10 +364,11 @@ impl UnattendedAccess for FakeUnattended {
         Ok(log.unattended_installed)
     }
 
-    fn install(&self, port: u16, password: Option<String>) {
+    fn install(&self, settings: ServiceSettings, password: Option<String>) {
         let mut log = self.0.borrow_mut();
         log.calls
-            .push(format!("unattended install {port} {password:?}"));
+            .push(format!("unattended install {} {password:?}", settings.port));
+        log.unattended_settings = Some(settings);
     }
 
     fn uninstall(&self) {

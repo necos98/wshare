@@ -42,12 +42,14 @@ mod scm;
 mod secure_attention;
 mod service_log;
 mod service_main;
+mod service_settings;
 mod supervisor;
 
 pub use command::{ServiceCommand, parse};
 pub use elevation::{ElevatedOutcome, installed_state, run_elevated};
 pub use password::{MAX_PASSWORD_CHARS, PasswordHash};
 pub use rules::{PasswordCheck, needs_password_check, verdict};
+pub use service_settings::ServiceSettings;
 
 use anyhow::Result;
 

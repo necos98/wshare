@@ -21,23 +21,25 @@ impl<
     U: UnattendedAccess,
 > Controller<S, L, K, B, W, D, U>
 {
-    /// Installs or updates the service, with `password` (empty: none).
+    /// Installs or updates the service, with the host settings that apply
+    /// to it and `password` (empty: none).
     pub(super) fn enable_unattended(&mut self, password: String) {
         if self.state.unattended.busy() {
             return;
         }
         self.set_sharing(false);
-        self.state.unattended.begin(true);
+        let settings = self.state.settings.service_settings();
+        self.state.unattended.begin_install(settings.clone());
         let password = password.trim();
         let password = (!password.is_empty()).then(|| password.to_string());
-        self.unattended.install(self.state.settings.port, password);
+        self.unattended.install(settings, password);
     }
 
     pub(super) fn disable_unattended(&mut self) {
         if self.state.unattended.busy() {
             return;
         }
-        self.state.unattended.begin(false);
+        self.state.unattended.begin_uninstall();
         self.unattended.uninstall();
     }
 

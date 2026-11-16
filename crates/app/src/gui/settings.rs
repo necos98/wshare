@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::access_mode::AccessMode;
 use crate::options::{DEFAULT_PORT, HostOptions, StreamOptions};
+use crate::unattended::ServiceSettings;
 
 pub const MIN_FPS: u32 = 1;
 pub const MAX_FPS: u32 = 240;
@@ -162,6 +163,17 @@ impl Settings {
         }
     }
 
+    /// The settings the unattended-access service applies, copied to it at
+    /// every install or update; the others do not apply to it.
+    pub fn service_settings(&self) -> ServiceSettings {
+        ServiceSettings {
+            port: self.port,
+            stream: self.stream_options(),
+            share_clipboard: self.share_clipboard,
+            share_audio: self.share_audio,
+        }
+    }
+
     /// What the sharing service is started with. The PIN is always a
     /// random one: viewers that must not type it are authorized devices.
     pub fn host_options(&self) -> HostOptions {
@@ -250,6 +262,30 @@ mod tests {
         assert_eq!(options.pin, None);
         assert!(options.receive_files);
         assert_eq!(options.downloads, None);
+    }
+
+    #[test]
+    fn the_service_gets_the_settings_that_apply_to_it() {
+        assert_eq!(
+            Settings::default().service_settings(),
+            ServiceSettings::default(),
+            "the defaults match"
+        );
+        let settings = Settings {
+            monitor: 1,
+            fps: 30,
+            max_mbps: 8,
+            codec: CodecChoice::Hevc,
+            port: 9000,
+            share_clipboard: false,
+            share_audio: false,
+            ..Settings::default()
+        };
+        let service = settings.service_settings();
+        assert_eq!(service.port, 9000);
+        assert_eq!(service.stream, settings.stream_options());
+        assert!(!service.share_clipboard);
+        assert!(!service.share_audio);
     }
 
     #[test]

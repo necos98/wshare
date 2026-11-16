@@ -12,10 +12,13 @@ use super::settings_view::group;
 use super::unattended_state::UnattendedState;
 use super::view::{DETAIL_SIZE, error_color};
 
-/// `password`: the field as typed, kept between frames.
+/// `update_needed`: the service has other host settings than the window's
+/// (see `UnattendedState::needs_update`). `password`: the field as typed,
+/// kept between frames.
 pub(super) fn section(
     ui: &mut Ui,
     state: &UnattendedState,
+    update_needed: bool,
     password: &mut String,
     intents: &mut Vec<Intent>,
 ) {
@@ -31,6 +34,9 @@ pub(super) fn section(
             };
             if !status.is_empty() {
                 ui.label(status);
+            }
+            if update_needed {
+                ui.colored_label(error_color(ui), text::UNATTENDED_UPDATE_NEEDED);
             }
             ui.label(text::UNATTENDED_PASSWORD_LABEL);
             ui.add_enabled(

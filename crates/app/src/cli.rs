@@ -93,13 +93,17 @@ wshare - LAN screen sharing (no arguments: open the window)
                files dropped on the window (or sent from its bar) go to the host; the
                host's land in DIR (default Downloads\\wshare)
                the host's sound plays here; the Audio button of the bar mutes it
-  wshare service install [--port P] [--password] [--from DIR]
+  wshare service install [--port P] [--monitor N] [--fps F] [--mbps B] [--codec h264|hevc]
+               [--no-clipboard] [--no-audio] [--password] [--from DIR]
                unattended access (as an administrator): this PC can be used with nobody in
                front of it, also at the lock screen, the sign-in screen and UAC prompts, and
                the viewer can send Ctrl+Alt+Del. Only devices already authorized (that
                connected once with the PIN) are admitted; --password also asks them for a
                password. While it is on, this PC is shared by the service, not the window.
-               Run it again to copy newly authorized devices or change the password.
+               The sharing options work as for wshare host; remote control is always
+               allowed and files are never received.
+               Run it again to copy newly authorized devices, change the password or the
+               sharing options.
   wshare service uninstall          turn unattended access off and remove everything it installed
   wshare service status             whether unattended access is installed and running
   wshare list                       hosts found on the LAN
@@ -150,7 +154,7 @@ pub(crate) fn for_each_arg(
 }
 
 /// Handles a flag belonging to [`StreamOptions`]; returns false if it isn't one.
-fn stream_flag(
+pub(crate) fn stream_flag(
     stream: &mut StreamOptions,
     flag: &str,
     value: &mut dyn FnMut() -> Result<String>,
@@ -255,7 +259,15 @@ fn host_id(value: &str) -> Result<String> {
     Ok(value.to_ascii_lowercase())
 }
 
-fn parse_codec(value: &str) -> Result<Codec> {
+/// The name `--codec` takes for `codec` (read back by [`parse_codec`]).
+pub(crate) fn codec_name(codec: Codec) -> &'static str {
+    match codec {
+        Codec::H264 => "h264",
+        Codec::Hevc => "hevc",
+    }
+}
+
+pub(crate) fn parse_codec(value: &str) -> Result<Codec> {
     match value.to_ascii_lowercase().as_str() {
         "h264" | "avc" => Ok(Codec::H264),
         "hevc" | "h265" => Ok(Codec::Hevc),
@@ -429,6 +441,13 @@ mod tests {
         };
         assert_eq!(b.seconds, 3);
         assert_eq!(b.out.as_deref(), Some("x.h264"));
+    }
+
+    #[test]
+    fn codec_names_are_read_back() {
+        for codec in [Codec::H264, Codec::Hevc] {
+            assert_eq!(parse_codec(codec_name(codec)).unwrap(), codec);
+        }
     }
 
     #[test]

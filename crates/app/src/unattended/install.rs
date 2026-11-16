@@ -8,7 +8,8 @@
 //!    could replace;
 //! 4. the identity and the authorized devices of the user are copied to
 //!    the protected folder `%ProgramData%\wshare-service`, made anew, with
-//!    the settings of the service;
+//!    the settings of the service (password hash, port, monitor, frame
+//!    rate, bitrate, codec, clipboard and sound);
 //! 5. the service is created (or updated) and started.
 //!
 //! Uninstall stops and deletes the service and removes both folders.
@@ -63,14 +64,17 @@ pub(super) fn install(options: &InstallOptions) -> Result<()> {
         copy_if_present(&source.join(name), &data.join(name))?;
     }
     ServiceConfig {
-        port: options.port,
+        settings: options.settings.clone(),
         password,
     }
     .save(&locations::config_file(&data))?;
 
     scm::install(&exe)?;
     scm::start()?;
-    println!("Unattended access is on (UDP port {}).", options.port);
+    println!(
+        "Unattended access is on (UDP port {}).",
+        options.settings.port
+    );
     if authorized == 0 {
         println!(
             "No device is authorized yet: unattended access admits only devices that \

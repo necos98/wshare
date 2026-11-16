@@ -17,6 +17,7 @@ use crate::host::{ApprovalAnswer, ApprovalId, HostEvent};
 use crate::options::HostOptions;
 use crate::transfer::TransferCommand;
 use crate::trust::KnownHost;
+use crate::unattended::ServiceSettings;
 
 use super::model::{ViewerId, ViewerUpdate};
 use super::settings::{Settings, ViewerDisplay};
@@ -240,11 +241,11 @@ pub enum UnattendedOutcome {
 pub trait UnattendedAccess {
     /// Whether the service is installed now.
     fn installed(&self) -> Result<bool>;
-    /// Installs the service (or updates it: authorized devices copied again,
-    /// password replaced) without waiting: Windows asks the user for
-    /// administrator rights, and [`AppEvent::Unattended`] tells how it
+    /// Installs the service (or updates it: authorized devices, `settings`
+    /// and password copied again) without waiting: Windows asks the user
+    /// for administrator rights, and [`AppEvent::Unattended`] tells how it
     /// ended. `password`: the one viewers must give; `None` for none.
-    fn install(&self, port: u16, password: Option<String>);
+    fn install(&self, settings: ServiceSettings, password: Option<String>);
     /// Removes the service and its files, like [`Self::install`].
     fn uninstall(&self);
 }

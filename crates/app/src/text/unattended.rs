@@ -33,8 +33,20 @@ pub const UNATTENDED_PASSWORD_HINT: &str =
     "Se impostata, va inserita anche dai dispositivi autorizzati.";
 pub const UNATTENDED_ENABLE: &str = "Attiva…";
 pub const UNATTENDED_UPDATE: &str = "Aggiorna…";
-pub const UNATTENDED_UPDATE_HINT: &str =
-    "«Aggiorna» copia di nuovo i dispositivi autorizzati e cambia la password.";
+pub const UNATTENDED_UPDATE_HINT: &str = "«Aggiorna» copia di nuovo i dispositivi autorizzati, \
+     cambia la password e ricopia le impostazioni usate dal servizio: porta, monitor, \
+     fotogrammi, bitrate, codec, appunti e audio.";
+/// The window's settings differ from those copied to the service.
+pub const UNATTENDED_UPDATE_NEEDED: &str = "Hai cambiato impostazioni usate dall'accesso non \
+     presidiato: premi «Aggiorna…» per applicarle al servizio.";
+/// Under the sharing settings while the service is installed.
+pub const SETTINGS_APPLIED_BY_UPDATE: &str = "Con l'accesso non presidiato attivo, monitor, \
+     fotogrammi, bitrate, codec, porta, appunti e audio passano al servizio solo con \
+     «Aggiorna…» (in fondo alla pagina).";
+/// Next to the settings the service ignores, disabled while it is installed.
+pub const SETTINGS_NOT_FOR_UNATTENDED: &str = "Non valgono con l'accesso non presidiato attivo: \
+     il servizio consente sempre il controllo remoto ai soli dispositivi autorizzati e non \
+     riceve file.";
 pub const UNATTENDED_DISABLE: &str = "Disattiva…";
 pub const UNATTENDED_WORKING: &str = "In corso: conferma la richiesta di Windows…";
 pub const UNATTENDED_ENABLED: &str = "Accesso non presidiato attivato.";

@@ -27,12 +27,13 @@ amministratore.
 
 - **Dalla finestra**: Impostazioni → «Accesso non presidiato» → «Attiva…»
   (Windows chiede la conferma di un amministratore). «Aggiorna…» copia di
-  nuovo i dispositivi autorizzati e cambia la password; «Disattiva…» toglie
-  tutto.
+  nuovo i dispositivi autorizzati, cambia la password e ricopia le
+  impostazioni usate dal servizio; «Disattiva…» toglie tutto.
 - **Dal terminale**, come amministratore:
 
   ```
-  wshare service install [--port P] [--password] [--from DIR]
+  wshare service install [--port P] [--monitor N] [--fps F] [--mbps B] [--codec h264|hevc]
+                         [--no-clipboard] [--no-audio] [--password] [--from DIR]
   wshare service uninstall
   wshare service status
   ```
@@ -40,11 +41,35 @@ amministratore.
   `--password` chiede (due volte, senza mostrarla) una password che anche i
   dispositivi autorizzati dovranno inserire. `--from` indica la cartella dati
   da cui copiare identità e dispositivi autorizzati (di default quella
-  dell'utente che esegue il comando; la finestra passa la propria).
+  dell'utente che esegue il comando; la finestra passa la propria). Le
+  opzioni di condivisione funzionano come in `wshare host`.
 
 Si connettono **solo i dispositivi già autorizzati**: prima di attivarlo,
 connetti ogni PC che dovrà usarlo una volta con il PIN. Dopo averne
 autorizzati altri, usa «Aggiorna…» (o ripeti `install`).
+
+### Impostazioni rispettate
+
+Il servizio non legge le Impostazioni della finestra: all'attivazione e a
+ogni «Aggiorna…» la finestra gli passa (come argomenti del comando elevato,
+la password solo come hash) quelle che hanno senso senza nessuno davanti, e
+`install` le salva in `service.toml`:
+
+| Impostazione | Con l'accesso non presidiato |
+| --- | --- |
+| Monitor, fotogrammi al secondo, bitrate massimo, codec, porta | applicate dopo «Aggiorna…» |
+| Condividi appunti (testo e file copiati) | applicata dopo «Aggiorna…»: spenta, gli appunti restano privati |
+| Condividi audio | applicata dopo «Aggiorna…» |
+| Consenti controllo remoto | non si applica: il controllo è sempre consentito |
+| Accesso (solo PIN, conferma…) | non si applica: solo dispositivi autorizzati, più la password se impostata |
+| Ricevi file | non si applica: i file non vengono mai ricevuti (finirebbero come SYSTEM nel profilo di nessuno) |
+
+Con il servizio installato, nel pannello le opzioni che non si applicano sono
+disattivate con una nota, e se si cambia un'impostazione applicata la sezione
+«Accesso non presidiato» ricorda di premere «Aggiorna…». Un `service.toml`
+scritto da una versione precedente, senza queste impostazioni, si carica con
+quello che il servizio faceva prima: monitor principale, 60 fps, 20 Mbit/s,
+H.264, appunti e audio condivisi (basta «Aggiorna…» per allinearlo).
 
 Nel visualizzatore il pulsante **«Ctrl+Alt+Canc»** della barra in alto invia
 la sequenza all'host; se l'host chiede la password, la finestra la chiede
@@ -96,7 +121,8 @@ Tre processi, tutti `wshare.exe`:
   (`OpenInputDesktop` + `SetThreadDesktop`, crate `input_desktop`) quando la
   duplicazione perde l'accesso o un'iniezione viene bloccata. I file inviati
   dal visualizzatore non vengono ricevuti (finirebbero come SYSTEM nel profilo
-  di nessuno); appunti e audio sì.
+  di nessuno); appunti e audio seguono `service.toml` (vedi «Impostazioni
+  rispettate»).
 - **Ctrl+Alt+Canc**: i tasti iniettati non lo generano mai. Il visualizzatore
   invia `SecureAttention` (protocollo 12); l'agente lo passa al servizio, che
   chiama `SendSAS`. Per la durata della chiamata il servizio abilita la policy

@@ -68,6 +68,48 @@ fn turning_it_on_stops_the_window_sharing_first_and_hands_over_the_password() {
 }
 
 #[test]
+fn the_service_gets_the_host_settings_of_the_window() {
+    let (mut c, log) = controller();
+    let private = Settings {
+        share_clipboard: false,
+        share_audio: false,
+        port: 9000,
+        ..c.state().settings.clone()
+    };
+    c.handle(Intent::ChangeSettings(private.clone()));
+    c.handle(Intent::EnableUnattended {
+        password: String::new(),
+    });
+    assert_eq!(
+        log.borrow().unattended_settings,
+        Some(private.service_settings())
+    );
+    let sent = log.borrow().unattended_settings.clone().unwrap();
+    assert!(!sent.share_clipboard, "the clipboard stays private");
+}
+
+#[test]
+fn changing_a_setting_of_the_service_asks_for_an_update_until_it_is_done() {
+    let (mut c, log) = installed(true);
+    let current = |c: &TestController| c.state().settings.service_settings();
+    assert!(!c.state().unattended.needs_update(&current(&c)));
+
+    let private = Settings {
+        share_clipboard: false,
+        ..c.state().settings.clone()
+    };
+    c.handle(Intent::ChangeSettings(private));
+    assert!(c.state().unattended.needs_update(&current(&c)));
+
+    c.handle(Intent::EnableUnattended {
+        password: String::new(),
+    });
+    c.on_event(AppEvent::Unattended(UnattendedOutcome::Done));
+    assert!(log.borrow().unattended_installed);
+    assert!(!c.state().unattended.needs_update(&current(&c)));
+}
+
+#[test]
 fn an_empty_password_means_none() {
     let (mut c, log) = controller();
     c.handle(Intent::EnableUnattended {

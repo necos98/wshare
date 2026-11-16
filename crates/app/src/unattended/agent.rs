@@ -32,7 +32,7 @@ use crate::access_mode::AccessMode;
 use crate::gui::overlay::Overlay;
 use crate::gui::ports::{AppEvent, Inbox, TrayAction, Waker};
 use crate::host::{HostEvent, HostHandle, HostObserver};
-use crate::options::{HostOptions, StreamOptions};
+use crate::options::HostOptions;
 use crate::paths;
 use crate::text;
 use crate::trust::Timestamp;
@@ -67,19 +67,21 @@ pub(super) fn run() -> Result<()> {
     result
 }
 
-/// Unattended access shares the main screen with remote control and the
-/// clipboard. Files are not received: they would land as SYSTEM in the
-/// profile of nobody.
+/// Unattended access shares the screen, the clipboard and the sound as the
+/// host's settings say (copied by `install`), always with remote control.
+/// Files are not received: they would land as SYSTEM in the profile of
+/// nobody. The access mode does not count (see `HostOptions::unattended`).
 fn host_options(config: ServiceConfig) -> HostOptions {
+    let settings = config.settings;
     HostOptions {
-        stream: StreamOptions::default(),
-        port: config.port,
+        stream: settings.stream,
+        port: settings.port,
         pin: None,
         view_only: false,
-        share_clipboard: true,
+        share_clipboard: settings.share_clipboard,
         access: AccessMode::PinOnly,
         receive_files: false,
-        share_audio: true,
+        share_audio: settings.share_audio,
         downloads: None,
         unattended: Some(UnattendedPolicy {
             password: config.password,
@@ -241,4 +243,65 @@ fn on_host_event(event: HostEvent, indicator: Option<&mut Overlay>) -> Result<()
 /// One dated line of the service log.
 fn log(line: impl std::fmt::Display) {
     eprintln!("{} agent: {line}", Timestamp::now());
+}
+
+#[cfg(test)]
+mod tests {
+    use codec::Codec;
+
+    use super::*;
+    use crate::options::StreamOptions;
+    use crate::unattended::service_settings::ServiceSettings;
+
+    fn loaded(text: &str) -> ServiceConfig {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("service.toml");
+        std::fs::write(&path, text).unwrap();
+        ServiceConfig::load(&path).unwrap()
+    }
+
+    #[test]
+    fn the_host_follows_the_settings_copied_to_the_service() {
+        let config = ServiceConfig {
+            settings: ServiceSettings {
+                port: 9000,
+                stream: StreamOptions {
+                    monitor: 1,
+                    fps: 30,
+                    mbps: 8,
+                    codec: Codec::Hevc,
+                },
+                share_clipboard: false,
+                share_audio: false,
+            },
+            password: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("service.toml");
+        config.save(&path).unwrap();
+
+        let options = host_options(ServiceConfig::load(&path).unwrap());
+        assert!(!options.share_clipboard, "the clipboard stays private");
+        assert!(!options.share_audio);
+        assert_eq!(options.port, 9000);
+        assert_eq!(options.stream, config.settings.stream);
+    }
+
+    #[test]
+    fn a_service_toml_without_the_new_settings_keeps_what_it_did() {
+        let options = host_options(loaded("port = 7420\n"));
+        assert!(options.share_clipboard && options.share_audio);
+        assert_eq!(options.stream, StreamOptions::default());
+        assert_eq!(options.port, 7420);
+    }
+
+    #[test]
+    fn only_what_makes_sense_unattended_is_fixed() {
+        let options = host_options(loaded("port = 7420\nshare_clipboard = false\n"));
+        assert!(!options.share_clipboard);
+        assert!(!options.view_only, "remote control is the point");
+        assert!(!options.receive_files, "no files as SYSTEM");
+        assert_eq!(options.pin, None);
+        assert!(options.unattended.is_some());
+    }
 }

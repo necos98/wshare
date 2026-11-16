@@ -40,15 +40,24 @@ pub fn show(
     restart_banner(ui, state, intents);
 
     let mut edited = state.settings.clone();
+    let update_needed = state
+        .unattended
+        .needs_update(&state.settings.service_settings());
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
             sharing_group(ui, state, &mut edited);
-            files_group(ui, &mut edited, intents);
+            files_group(ui, state, &mut edited, intents);
             viewing_group(ui, &mut edited);
             startup_group(ui, &mut edited);
             feedback_group(ui, &mut edited);
-            unattended_view::section(ui, &state.unattended, unattended_password, intents);
+            unattended_view::section(
+                ui,
+                &state.unattended,
+                update_needed,
+                unattended_password,
+                intents,
+            );
         });
     if edited != state.settings {
         intents.push(Intent::ChangeSettings(edited));
@@ -87,8 +96,15 @@ pub(super) fn group(ui: &mut Ui, title: &str, hint: Option<&str>, add_rows: impl
     ui.add_space(GAP);
 }
 
+/// While the unattended-access service is installed, the settings it
+/// applies say they need «Aggiorna», and those it ignores are disabled.
 fn sharing_group(ui: &mut Ui, state: &GuiState, edited: &mut Settings) {
-    group(ui, text::SETTINGS_SHARING, None, |ui| {
+    let hint = state
+        .unattended
+        .shares_this_pc()
+        .then_some(text::SETTINGS_APPLIED_BY_UPDATE);
+    let window_only = state.unattended.window_only_settings_editable();
+    group(ui, text::SETTINGS_SHARING, hint, |ui| {
         monitor_row(ui, state, edited);
         number_row(
             ui,
@@ -113,23 +129,29 @@ fn sharing_group(ui: &mut Ui, state: &GuiState, edited: &mut Settings) {
         );
         codec_row(ui, edited);
         port_row(ui, edited);
-        ui.checkbox(&mut edited.allow_input, text::SETTINGS_ALLOW_INPUT);
         ui.checkbox(&mut edited.share_clipboard, text::SETTINGS_SHARE_CLIPBOARD);
         ui.checkbox(&mut edited.share_audio, text::SETTING_SHARE_AUDIO)
             .on_hover_text(text::SETTING_SHARE_AUDIO_HINT);
-        access_row(ui, edited);
+        window_only_rows(ui, window_only, |ui| {
+            ui.checkbox(&mut edited.allow_input, text::SETTINGS_ALLOW_INPUT);
+            access_row(ui, edited);
+        });
     });
 }
 
-/// Files received from the other PC, as host and as viewer.
-fn files_group(ui: &mut Ui, edited: &mut Settings, intents: &mut Vec<Intent>) {
+/// Files received from the other PC, as host and as viewer: the folder
+/// counts for viewer windows even while the service shares this PC.
+fn files_group(ui: &mut Ui, state: &GuiState, edited: &mut Settings, intents: &mut Vec<Intent>) {
+    let window_only = state.unattended.window_only_settings_editable();
     group(ui, text::SETTINGS_FILES, None, |ui| {
-        ui.checkbox(&mut edited.receive_files, text::SETTING_RECEIVE_FILES);
-        ui.label(
-            RichText::new(text::SETTING_RECEIVE_FILES_HINT)
-                .size(DETAIL_SIZE)
-                .weak(),
-        );
+        window_only_rows(ui, window_only, |ui| {
+            ui.checkbox(&mut edited.receive_files, text::SETTING_RECEIVE_FILES);
+            ui.label(
+                RichText::new(text::SETTING_RECEIVE_FILES_HINT)
+                    .size(DETAIL_SIZE)
+                    .weak(),
+            );
+        });
         ui.horizontal(|ui| {
             ui.label(text::SETTING_DOWNLOADS);
             if ui.button(text::SETTING_DOWNLOADS_PICK).clicked() {
@@ -143,6 +165,19 @@ fn files_group(ui: &mut Ui, edited: &mut Settings, intents: &mut Vec<Intent>) {
                 .weak(),
         );
     });
+}
+
+/// Rows of settings only the window's own sharing uses: disabled, with the
+/// reason, when not `editable` (the unattended-access service ignores them).
+fn window_only_rows(ui: &mut Ui, editable: bool, add_rows: impl FnOnce(&mut Ui)) {
+    ui.add_enabled_ui(editable, add_rows);
+    if !editable {
+        ui.label(
+            RichText::new(text::SETTINGS_NOT_FOR_UNATTENDED)
+                .size(DETAIL_SIZE)
+                .weak(),
+        );
+    }
 }
 
 /// The folder as typed; taken when the field loses the focus.

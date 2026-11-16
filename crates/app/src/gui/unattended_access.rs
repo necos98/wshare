@@ -4,7 +4,7 @@
 //! the user first, and the password is hashed: both take a while).
 //!
 //! The password itself never leaves this process: the elevated command
-//! gets its salted hash.
+//! gets its salted hash, with the host settings the service applies.
 
 use std::thread;
 
@@ -12,7 +12,7 @@ use anyhow::Result;
 
 use crate::paths;
 use crate::text;
-use crate::unattended::{self, ElevatedOutcome, PasswordHash};
+use crate::unattended::{self, ElevatedOutcome, PasswordHash, ServiceSettings};
 
 use super::ports::{AppEvent, Inbox, UnattendedAccess, UnattendedOutcome};
 
@@ -57,8 +57,8 @@ impl UnattendedAccess for WindowsUnattended {
         Ok(unattended::installed_state()?.installed())
     }
 
-    fn install(&self, port: u16, password: Option<String>) {
-        self.run(move || install_args(port, password.as_deref()));
+    fn install(&self, settings: ServiceSettings, password: Option<String>) {
+        self.run(move || install_args(&settings, password.as_deref()));
     }
 
     fn uninstall(&self) {
@@ -66,17 +66,14 @@ impl UnattendedAccess for WindowsUnattended {
     }
 }
 
-/// `service install`, taking over this user's identity and authorized
-/// devices (the administrator who confirms may be another user).
-fn install_args(port: u16, password: Option<&str>) -> Result<Vec<String>> {
-    let mut args = vec![
-        "service".to_string(),
-        "install".to_string(),
-        "--port".to_string(),
-        port.to_string(),
-        "--from".to_string(),
-        paths::config_dir()?.display().to_string(),
-    ];
+/// `service install` with the host settings the service applies, taking
+/// over this user's identity and authorized devices (the administrator who
+/// confirms may be another user).
+fn install_args(settings: &ServiceSettings, password: Option<&str>) -> Result<Vec<String>> {
+    let mut args = vec!["service".to_string(), "install".to_string()];
+    args.extend(settings.install_args());
+    args.push("--from".to_string());
+    args.push(paths::config_dir()?.display().to_string());
     if let Some(password) = password {
         args.push("--password-hash".to_string());
         args.push(PasswordHash::new(password)?.to_string());

@@ -1,6 +1,7 @@
 //! What the viewer window tells the user over the picture: the shortcuts
 //! when the session starts, a change of the host's permission for remote
-//! control, and the warning that the picture stopped. Pure: the render loop
+//! control, the warning that the picture stopped, the file transfers in
+//! progress and how they ended. Pure: the render loop
 //! feeds it the time and draws what it says.
 
 use std::time::{Duration, Instant};
@@ -11,6 +12,8 @@ use crate::text;
 pub const SHORTCUTS_FOR: Duration = Duration::from_secs(4);
 /// How long a change of the host's permission stays visible.
 pub const CONTROL_CHANGE_FOR: Duration = Duration::from_secs(3);
+/// How long the end of a transfer stays visible.
+pub const MESSAGE_FOR: Duration = Duration::from_secs(5);
 
 /// A message that goes away by itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,11 +42,23 @@ impl Notice {
     }
 }
 
+/// What the window asks the board to show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoticeUpdate {
+    Show(Notice),
+    /// A message for [`MESSAGE_FOR`] (a transfer that ended).
+    Message(String),
+    /// The line of the transfers in progress; `None` when there are none.
+    Transfers(Option<String>),
+}
+
 /// The lines to show now: that the session is being re-established while it lasts, else the
-/// warning that the picture stopped while it lasts, else the latest timed notice until it expires.
+/// warning that the picture stopped while it lasts, else the latest timed notice until it expires,
+/// else the transfers in progress.
 #[derive(Debug, Default)]
 pub struct NoticeBoard {
-    timed: Option<(Notice, Instant)>,
+    timed: Option<(Vec<String>, Instant)>,
+    transfers: Option<String>,
     unstable: bool,
     reconnecting: bool,
     /// What the renderer was last told (`None` before the first time).
@@ -53,7 +68,15 @@ pub struct NoticeBoard {
 impl NoticeBoard {
     /// Shows `notice` for its time, replacing the one on screen.
     pub fn show(&mut self, notice: Notice, now: Instant) {
-        self.timed = Some((notice, now + notice.lasts()));
+        self.timed = Some((notice.lines(), now + notice.lasts()));
+    }
+
+    pub fn apply(&mut self, update: NoticeUpdate, now: Instant) {
+        match update {
+            NoticeUpdate::Show(notice) => self.show(notice, now),
+            NoticeUpdate::Message(text) => self.timed = Some((vec![text], now + MESSAGE_FOR)),
+            NoticeUpdate::Transfers(line) => self.transfers = line,
+        }
     }
 
     /// The connection broke and is being re-established (`true`), or is
@@ -70,7 +93,7 @@ impl NoticeBoard {
     /// The lines to draw if they differ from the last ones returned here
     /// (outer `Some`); inner `None` means nothing to draw any more.
     pub fn take_changed(&mut self, now: Instant) -> Option<Option<Vec<String>>> {
-        if self.timed.is_some_and(|(_, until)| now >= until) {
+        if self.timed.as_ref().is_some_and(|(_, until)| now >= *until) {
             self.timed = None;
         }
         let lines = self.lines();
@@ -93,7 +116,10 @@ impl NoticeBoard {
         if self.unstable {
             return Some(vec![text::NOTICE_UNSTABLE.to_string()]);
         }
-        self.timed.map(|(notice, _)| notice.lines())
+        self.timed
+            .as_ref()
+            .map(|(lines, _)| lines.clone())
+            .or_else(|| self.transfers.clone().map(|line| vec![line]))
     }
 }
 
@@ -189,6 +215,29 @@ mod tests {
         board.set_reconnecting(false);
         board.set_unstable(false);
         assert_eq!(board.take_changed(at(base, 10_001)), Some(None));
+    }
+
+    #[test]
+    fn the_transfers_show_under_every_other_message_until_they_end() {
+        let base = Instant::now();
+        let mut board = NoticeBoard::default();
+        board.apply(NoticeUpdate::Transfers(Some("Invio: 10%".into())), base);
+        assert_eq!(board.take_changed(base), one("Invio: 10%"));
+        board.apply(NoticeUpdate::Message("Inviato «a»".into()), at(base, 100));
+        assert_eq!(board.take_changed(at(base, 100)), one("Inviato «a»"));
+        assert_eq!(
+            board.take_changed(at(base, 100 + MESSAGE_FOR.as_millis() as u64)),
+            one("Invio: 10%"),
+            "the progress again once the message expired"
+        );
+        board.set_unstable(true);
+        assert_eq!(
+            board.take_changed(at(base, 6000)),
+            one("Connessione instabile…")
+        );
+        board.set_unstable(false);
+        board.apply(NoticeUpdate::Transfers(None), at(base, 6001));
+        assert_eq!(board.take_changed(at(base, 6001)), Some(None));
     }
 
     #[test]

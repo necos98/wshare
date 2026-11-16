@@ -38,12 +38,14 @@ pub(super) fn test_context(access: AccessMode, approval_timeout: Duration) -> Te
         PIN.into(),
         true,
         true,
+        true,
         access,
         SessionLimits::default(),
     ));
     let ctx = Arc::new(SessionContext {
         host_name: "HOST".into(),
         stream: StreamOptions::default(),
+        downloads: dir.path().join("downloads"),
         monitor: AtomicUsize::new(0),
         state: Arc::clone(&state),
         devices: Arc::new(Devices::new(store, sink.clone())),

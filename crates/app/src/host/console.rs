@@ -151,6 +151,10 @@ pub(super) fn describe(event: &HostEvent) -> Vec<(Output, String)> {
                 .to_string(),
         )],
         HostEvent::Warning(warning) => vec![(Stderr, format!("warning: {warning}"))],
+        HostEvent::Transfer(event) => crate::transfer::terminal::describe(event)
+            .map(|line| (Stdout, line))
+            .into_iter()
+            .collect(),
         HostEvent::Stopped { error: None } => vec![(Stdout, "Stopped sharing.".to_string())],
         HostEvent::Stopped { error: Some(_) } => vec![],
         // `wshare host` runs in `AccessMode::PinOnly`: nobody is asked, and

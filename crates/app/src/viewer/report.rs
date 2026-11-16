@@ -9,6 +9,7 @@
 //!   `@wshare:connected:<host name>` once the handshake succeeded, or
 //!   `@wshare:failed:<cause>[:<detail>]` when the viewer ends because of a
 //!   [`FailureCause`];
+//! - the file transfers' lines, in both directions (see `channel`);
 //! - the exit code: 0 for a normal end, [`FailureCause::exit_code`] after a
 //!   failure (101 is a panic). The code alone still names the causes that
 //!   carry no detail, e.g. when the process died before printing the line.
@@ -21,8 +22,8 @@ pub const REPORT_ENABLED: &str = "1";
 /// Exit code of a failure that has no cause of its own.
 pub const GENERIC_EXIT_CODE: i32 = 1;
 
-const LINE_PREFIX: &str = "@wshare:";
-const SEPARATOR: char = ':';
+pub(super) const LINE_PREFIX: &str = "@wshare:";
+pub(super) const SEPARATOR: char = ':';
 const CONNECTED_TAG: &str = "connected";
 const FAILED_TAG: &str = "failed";
 const AWAITING_APPROVAL_TAG: &str = "awaiting-approval";
@@ -209,7 +210,7 @@ pub fn reporting_enabled(env: Option<&str>) -> bool {
 }
 
 /// Line breaks would end the report early (a host picks its own name).
-fn single_line(text: &str) -> String {
+pub(super) fn single_line(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()

@@ -1,6 +1,6 @@
 //! The control bar's drop-down menus: what they offer (the host's monitors,
-//! the quality levels) with the choice in effect, and the state of the one
-//! open. Pure, like the bar itself.
+//! the quality levels, what can be done with files) with the choice in
+//! effect, and the state of the one open. Pure, like the bar itself.
 
 use protocol::session::{MAX_MONITORS, MonitorEntry, Quality, bounded_name};
 use render::MenuView;
@@ -14,6 +14,43 @@ pub enum MenuKind {
     /// The host's monitors.
     Screen,
     Quality,
+    /// Sending files, cancelling transfers, the folder of received files.
+    Files,
+}
+
+/// A row of the files menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileRow {
+    Send,
+    Cancel,
+    OpenReceived,
+}
+
+impl FileRow {
+    fn action(self) -> BarAction {
+        match self {
+            Self::Send => BarAction::SendFiles,
+            Self::Cancel => BarAction::CancelTransfers,
+            Self::OpenReceived => BarAction::OpenReceived,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Send => text::FILES_SEND,
+            Self::Cancel => text::FILES_CANCEL,
+            Self::OpenReceived => text::FILES_OPEN_RECEIVED,
+        }
+    }
+}
+
+/// What the files menu can offer now.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FileState {
+    /// Transfers are in progress: they can be cancelled.
+    pub transfers: bool,
+    /// Files were received: their folder can be opened.
+    pub received: bool,
 }
 
 /// What the menus offer, as the host last told and the user last chose.
@@ -23,6 +60,7 @@ pub struct SessionChoices {
     /// Position in `monitors` of the one shared, if within the list.
     current_monitor: Option<usize>,
     quality: Quality,
+    files: FileState,
 }
 
 impl SessionChoices {
@@ -46,9 +84,30 @@ impl SessionChoices {
         self.quality = quality;
     }
 
+    /// What the files menu offers from now on.
+    pub fn set_files(&mut self, files: FileState) {
+        self.files = files;
+    }
+
+    fn file_rows(&self) -> Vec<FileRow> {
+        let mut rows = vec![FileRow::Send];
+        if self.files.transfers {
+            rows.push(FileRow::Cancel);
+        }
+        if self.files.received {
+            rows.push(FileRow::OpenReceived);
+        }
+        rows
+    }
+
     /// The rows of `kind`, top to bottom.
     pub fn labels(&self, kind: MenuKind) -> Vec<String> {
         match kind {
+            MenuKind::Files => self
+                .file_rows()
+                .into_iter()
+                .map(|row| row.label().to_string())
+                .collect(),
             MenuKind::Screen => self
                 .monitors
                 .iter()
@@ -66,6 +125,7 @@ impl SessionChoices {
         match kind {
             MenuKind::Screen => self.monitors.len(),
             MenuKind::Quality => Quality::ALL.len(),
+            MenuKind::Files => self.file_rows().len(),
         }
     }
 
@@ -74,6 +134,7 @@ impl SessionChoices {
         match kind {
             MenuKind::Screen => self.current_monitor,
             MenuKind::Quality => Quality::ALL.iter().position(|q| *q == self.quality),
+            MenuKind::Files => None,
         }
     }
 
@@ -85,6 +146,7 @@ impl SessionChoices {
         Some(match kind {
             MenuKind::Screen => BarAction::SelectMonitor(u32::try_from(row).ok()?),
             MenuKind::Quality => BarAction::SetQuality(Quality::ALL[row]),
+            MenuKind::Files => self.file_rows()[row].action(),
         })
     }
 }
@@ -194,6 +256,39 @@ mod tests {
         choices.set_quality(Quality::Medium);
         assert_eq!(choices.checked(MenuKind::Quality), Some(2));
         assert_eq!(choices.action(MenuKind::Quality, 4), None);
+    }
+
+    #[test]
+    fn the_files_menu_offers_what_can_be_done_now() {
+        let mut choices = SessionChoices::default();
+        assert_eq!(choices.labels(MenuKind::Files), ["Invia file…"]);
+        assert_eq!(
+            choices.action(MenuKind::Files, 0),
+            Some(BarAction::SendFiles)
+        );
+        assert_eq!(choices.checked(MenuKind::Files), None);
+        choices.set_files(FileState {
+            transfers: true,
+            received: true,
+        });
+        assert_eq!(choices.len(MenuKind::Files), 3);
+        assert_eq!(
+            choices.action(MenuKind::Files, 1),
+            Some(BarAction::CancelTransfers)
+        );
+        assert_eq!(
+            choices.action(MenuKind::Files, 2),
+            Some(BarAction::OpenReceived)
+        );
+        choices.set_files(FileState {
+            transfers: false,
+            received: true,
+        });
+        assert_eq!(
+            choices.action(MenuKind::Files, 1),
+            Some(BarAction::OpenReceived)
+        );
+        assert_eq!(choices.action(MenuKind::Files, 2), None);
     }
 
     #[test]

@@ -9,6 +9,7 @@ use net::Fingerprint;
 use crate::host::HostEvent;
 use crate::options::HostOptions;
 use crate::text;
+use crate::transfer::TransferEvent;
 use crate::trust::AuthorizedDevice;
 use crate::viewer::report::FailureCause;
 
@@ -19,6 +20,7 @@ use super::ports::MonitorChoice;
 use super::remembered::RememberedHosts;
 use super::settings::Settings;
 use super::settings_state::Page;
+use super::transfers::FileTransfers;
 
 /// Identifies a viewer process launched by the interface.
 pub type ViewerId = u64;
@@ -55,6 +57,8 @@ pub struct Sharing {
     pub screen: Option<String>,
     /// A viewer waiting for the click that accepts or refuses it.
     pub approval: Option<ApprovalPrompt>,
+    /// The files going to or coming from the connected viewer.
+    pub files: FileTransfers,
 }
 
 impl Default for Sharing {
@@ -72,6 +76,7 @@ impl Default for Sharing {
             authorized: Vec::new(),
             screen: None,
             approval: None,
+            files: FileTransfers::default(),
         }
     }
 }
@@ -153,6 +158,7 @@ impl Sharing {
             }
             HostEvent::ViewerDisconnected { error, .. } => {
                 self.viewer = None;
+                self.files.session_over();
                 self.input_blocked = false;
                 self.notice = error.map(|e| text::session_ended(&e));
             }
@@ -162,8 +168,12 @@ impl Sharing {
                 height,
             } => self.screen = Some(text::shared_screen(&monitor, width, height)),
             HostEvent::InputBlocked => self.input_blocked = true,
+            HostEvent::Transfer(event) => {
+                self.files.apply(event);
+            }
             HostEvent::Warning(warning) => self.notice = Some(text::host_warning(&warning)),
             HostEvent::Stopped { error } => {
+                self.files.session_over();
                 self.stopped(error.map(|failure| text::sharing_failed(&failure)));
             }
         }
@@ -207,6 +217,8 @@ pub struct ViewerSession {
     /// LAN id of the host, when it was picked from the list.
     pub host_id: Option<String>,
     pub status: ViewerStatus,
+    /// The files going to or coming from its host.
+    pub files: FileTransfers,
 }
 
 impl ViewerSession {
@@ -240,6 +252,8 @@ pub enum ViewerUpdate {
     AwaitingApproval,
     /// The handshake succeeded and its window is open.
     Connected,
+    /// A file transfer of the viewer started, moved on or ended.
+    Transfer(TransferEvent),
     /// The process ended. `cause` is why it failed, from its status line or
     /// else from its exit code; `None` when it said nothing.
     Exited {
@@ -282,6 +296,8 @@ pub struct GuiState {
     pub restarting: bool,
     /// Balloons waiting to be shown (see `notifications`).
     pub notifications: Vec<Notification>,
+    /// A problem with files (nobody to send to, a folder not opened...).
+    pub files_notice: Option<String>,
 }
 
 impl GuiState {
@@ -330,6 +346,11 @@ impl GuiState {
                     self.remembered.connected(&host_id);
                 }
             }
+            ViewerUpdate::Transfer(event) => {
+                if let Some(viewer) = self.viewer_mut(id) {
+                    viewer.files.apply(event);
+                }
+            }
             ViewerUpdate::Exited { success: true, .. } => self.viewers.retain(|v| v.id != id),
             ViewerUpdate::Exited {
                 success: false,
@@ -339,6 +360,7 @@ impl GuiState {
                 let Some(viewer) = self.viewer_mut(id) else {
                     return;
                 };
+                viewer.files.session_over();
                 // The PIN can be asked again in the row of a host that was
                 // picked from the list and is still there.
                 let listed_host = viewer
@@ -703,6 +725,7 @@ pub(crate) mod tests {
             address,
             host_id: None,
             status: ViewerStatus::Connecting,
+            files: FileTransfers::default(),
         });
         assert_eq!(
             state.viewers[0].status_line(),
@@ -735,6 +758,7 @@ pub(crate) mod tests {
             address,
             host_id: None,
             status: ViewerStatus::Connecting,
+            files: FileTransfers::default(),
         });
         state.apply_viewer_update(4, failed_with(FailureCause::WrongPin));
         assert_eq!(
@@ -764,6 +788,7 @@ pub(crate) mod tests {
             address: addr("10.0.0.5:7420"),
             host_id: None,
             status: ViewerStatus::Connecting,
+            files: FileTransfers::default(),
         });
         state.apply_viewer_update(3, failed_with(FailureCause::TooManyAttempts));
         assert_eq!(
@@ -793,6 +818,7 @@ pub(crate) mod tests {
             address: addr("192.168.1.3:7420"),
             host_id: Some(id.clone()),
             status: ViewerStatus::Connecting,
+            files: FileTransfers::default(),
         });
         (state, id)
     }
@@ -826,6 +852,7 @@ pub(crate) mod tests {
             address: addr("192.168.1.3:7420"),
             host_id: Some(id.clone()),
             status: ViewerStatus::Connecting,
+            files: FileTransfers::default(),
         });
         state.apply_viewer_update(8, ViewerUpdate::Connected);
         assert!(state.host_row(&id).unwrap().remembered, "admitted again");
@@ -852,6 +879,7 @@ pub(crate) mod tests {
             address: addr("10.0.0.5:7420"),
             host_id: None,
             status: ViewerStatus::Connecting,
+            files: FileTransfers::default(),
         });
         state.apply_viewer_update(2, failed_with(FailureCause::WrongPin));
         assert_eq!(state.viewers[0].status_line(), "10.0.0.5: PIN errato.");
@@ -910,6 +938,7 @@ pub(crate) mod tests {
             address: addr("10.0.0.5:7420"),
             host_id: None,
             status: ViewerStatus::Connecting,
+            files: FileTransfers::default(),
         });
         state.apply_viewer_update(2, failed_with(FailureCause::PinRequired));
         assert_eq!(

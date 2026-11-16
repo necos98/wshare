@@ -1,9 +1,11 @@
 //! [`SharingService`] backed by the real host service ([`HostHandle`]).
 
+use std::path::PathBuf;
 use std::thread::{self, JoinHandle};
 
 use anyhow::Result;
 use net::Fingerprint;
+use protocol::transfer::TransferId;
 
 use crate::access_mode::AccessMode;
 use crate::host::{ApprovalAnswer, ApprovalId, HostEvent, HostHandle, HostObserver};
@@ -65,6 +67,18 @@ impl SharingControl for RunningHost {
 
     fn set_clipboard_shared(&self, shared: bool) {
         self.handle.set_clipboard_shared(shared);
+    }
+
+    fn set_receive_files(&self, receive: bool) {
+        self.handle.set_receive_files(receive);
+    }
+
+    fn send_files(&self, picked: Vec<PathBuf>) -> bool {
+        self.handle.send_files(picked)
+    }
+
+    fn cancel_transfer(&self, id: Option<TransferId>) {
+        self.handle.cancel_transfer(id);
     }
 
     fn set_access_mode(&self, access: AccessMode) {

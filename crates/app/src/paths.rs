@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
+use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::UI::Shell::{FOLDERID_Downloads, KNOWN_FOLDER_FLAG, SHGetKnownFolderPath};
 
 use crate::data_migration;
 
@@ -14,6 +16,8 @@ const AUTHORIZED_VIEWERS_FILE: &str = "authorized_viewers.toml";
 const KNOWN_HOSTS_FILE: &str = "known_hosts.toml";
 const LOGS_DIR: &str = "logs";
 const APP_DIR: &str = "wshare";
+/// The usual name of the Downloads folder in a profile.
+const DOWNLOADS_DIR: &str = "Downloads";
 
 /// Resolved once: the migration must run (and warn) only once per process.
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -57,6 +61,32 @@ pub fn authorized_viewers_file() -> Result<PathBuf> {
 /// Viewer side: hosts pinned by fingerprint (see `trust::KnownHosts`).
 pub fn known_hosts_file() -> Result<PathBuf> {
     Ok(config_dir()?.join(KNOWN_HOSTS_FILE))
+}
+
+/// Where received files land unless the settings name another folder:
+/// `wshare` in this user's Downloads folder (wherever they moved it), or
+/// in `%USERPROFILE%\Downloads` if Windows cannot say. Not created here.
+pub fn default_downloads() -> PathBuf {
+    known_downloads()
+        .or_else(|| {
+            env_dir("USERPROFILE")
+                .ok()
+                .map(|home| home.join(DOWNLOADS_DIR))
+        })
+        .unwrap_or_else(std::env::temp_dir)
+        .join(APP_DIR)
+}
+
+/// The Downloads known folder.
+fn known_downloads() -> Option<PathBuf> {
+    // SAFETY: the returned string is read, then freed with the allocator
+    // the shell used for it, as documented.
+    unsafe {
+        let path = SHGetKnownFolderPath(&FOLDERID_Downloads, KNOWN_FOLDER_FLAG(0), None).ok()?;
+        let text = path.to_string().ok();
+        CoTaskMemFree(Some(path.0.cast_const().cast()));
+        text.map(PathBuf::from)
+    }
 }
 
 fn env_dir(name: &str) -> Result<PathBuf> {

@@ -56,6 +56,7 @@ impl Service {
             pin,
             !options.view_only,
             options.share_clipboard,
+            options.receive_files,
             options.access,
             SessionLimits::default(),
         ));
@@ -230,6 +231,10 @@ fn serve(
         let context = Arc::new(SessionContext {
             host_name: host.name.clone(),
             stream: options.stream.clone(),
+            downloads: options
+                .downloads
+                .clone()
+                .unwrap_or_else(paths::default_downloads),
             monitor: AtomicUsize::new(options.stream.monitor),
             state: Arc::clone(state),
             devices: Arc::clone(devices),

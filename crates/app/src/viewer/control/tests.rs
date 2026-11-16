@@ -60,7 +60,7 @@ impl ScriptedHost {
                 while let Ok(session) = endpoint.accept().await {
                     let answer = script[turn.min(script.len() - 1)].clone();
                     turn += 1;
-                    let (mut tx, mut rx, video) = session.split();
+                    let (mut tx, mut rx, video, _) = session.split();
                     let Ok(Some(ControlMessage::Hello { pin, .. })) = rx.recv().await else {
                         continue;
                     };

@@ -6,7 +6,11 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::access::{AccessError, ClipboardAccess, Retry};
 use super::rules::{ClipboardGuard, Outgoing};
+use protocol::transfer::{FileEntry, OfferId};
+
+use super::file_sharing::FileSharing;
 use super::system::SystemClipboard;
+use super::virtual_files;
 use super::window::ClipboardWindow;
 
 /// What became of text that arrived from the other PC.
@@ -32,7 +36,7 @@ impl ClipboardSync<SystemClipboard> {
     /// dropped.
     pub fn open() -> Result<Self> {
         let (window, changes) = ClipboardWindow::open()?;
-        let access = SystemClipboard::owned_by(window.owner());
+        let access = SystemClipboard::owned_by(&window);
         Ok(Self {
             access,
             guard: ClipboardGuard::default(),
@@ -82,6 +86,39 @@ impl<A: ClipboardAccess> ClipboardSync<A> {
         self.guard.applied(text);
         Ok(Received::Applied)
     }
+
+    /// Puts the other PC's copied files `entries` on the clipboard, if their
+    /// list passes the checks (an unacceptable one is ignored). Writing
+    /// them makes the clipboard change here too; that change reads as
+    /// nothing to share (they are not `CF_HDROP`), so nothing bounces back.
+    pub fn receive_files(
+        &mut self,
+        offer: OfferId,
+        entries: Vec<FileEntry>,
+        sharing: &dyn FileSharing,
+    ) -> Result<Received, AccessError> {
+        let Ok(files) = virtual_files::prepare(offer, entries, sharing.paste_link()) else {
+            return Ok(Received::Ignored);
+        };
+        self.access.offer_files(files)?;
+        Ok(Received::Applied)
+    }
+}
+
+/// The files side of what the clipboard now holds: copied files are
+/// offered to the other PC (`on_error` hears why they cannot be); anything
+/// else withdraws the files offered before. The same files still copied
+/// change nothing.
+pub fn share_copied_files(
+    outgoing: &Outgoing,
+    sharing: &dyn FileSharing,
+    on_error: Box<dyn FnOnce(String) + Send>,
+) {
+    match outgoing {
+        Outgoing::SendFiles(picked) => sharing.offer(picked.clone(), on_error),
+        Outgoing::Unchanged => {}
+        _ => sharing.withdraw(),
+    }
 }
 
 #[cfg(test)]
@@ -95,6 +132,7 @@ pub(crate) mod fake {
 
     use super::super::access::{AccessError, ClipboardAccess, Retry};
     use super::super::rules::ClipboardContent;
+    use super::super::virtual_files::RemoteFiles;
     use super::ClipboardSync;
 
     #[derive(Default)]
@@ -104,6 +142,8 @@ pub(crate) mod fake {
         pub busy_writes: u32,
         pub fail_writes: bool,
         pub written: Vec<String>,
+        /// The paths of each list of files put on the clipboard.
+        pub offered: Vec<Vec<String>>,
     }
 
     #[derive(Clone, Default)]
@@ -130,6 +170,17 @@ pub(crate) mod fake {
             }
             contents.written.push(text.to_string());
             contents.content = Some(ClipboardContent::Text(text.to_string()));
+            Ok(())
+        }
+
+        fn offer_files(&self, files: RemoteFiles) -> Result<(), AccessError> {
+            let mut contents = self.0.borrow_mut();
+            if contents.fail_writes {
+                return Err(AccessError::Failed("denied".into()));
+            }
+            let paths = files.entries.into_iter().map(|e| e.path).collect();
+            contents.offered.push(paths);
+            contents.content = Some(ClipboardContent::NoText);
             Ok(())
         }
     }

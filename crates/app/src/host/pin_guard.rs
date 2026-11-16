@@ -79,6 +79,7 @@ mod tests {
             "123456".into(),
             true,
             true,
+            true,
             AccessMode::PinOnly,
             SessionLimits::default(),
         ));

@@ -21,6 +21,9 @@ edition = "2024"
 [workspace.dependencies]
 anyhow = "1.0.104"
 windows = "0.62.2"
+# `#[implement]` (COM objects of the windows crate) names this crate; it is
+# the one `windows` already builds on, nothing new is compiled.
+windows-core = "0.62.2"
 gpu = { path = "crates/gpu" }
 protocol = { path = "crates/protocol" }
 pipeline = { path = "crates/pipeline" }

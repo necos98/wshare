@@ -238,6 +238,7 @@ fn connect_to_a_listed_host() {
         host_id: None, // "bbbb" is not a well-formed host id
         pin: Some("123456".into()),
         display: ViewerDisplay::default(),
+        downloads: None,
     };
     assert_eq!(log.borrow().launched, [(1, request)]);
     let viewer = &c.state().viewers[0];

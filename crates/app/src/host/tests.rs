@@ -22,6 +22,8 @@ fn options(monitor: usize) -> HostOptions {
         view_only: false,
         share_clipboard: true,
         access: AccessMode::PinOnly,
+        receive_files: true,
+        downloads: None,
     }
 }
 

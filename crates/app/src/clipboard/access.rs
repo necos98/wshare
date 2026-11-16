@@ -6,6 +6,7 @@ use std::fmt;
 use std::time::Duration;
 
 use super::rules::ClipboardContent;
+use super::virtual_files::RemoteFiles;
 
 /// How many times a clipboard held by another program is tried.
 pub const BUSY_ATTEMPTS: u32 = 5;
@@ -34,6 +35,9 @@ impl std::error::Error for AccessError {}
 pub trait ClipboardAccess {
     fn read(&self) -> Result<ClipboardContent, AccessError>;
     fn write(&self, text: &str) -> Result<(), AccessError>;
+    /// Puts the other PC's copied files on the clipboard, pasteable in
+    /// Explorer (their bytes travel only when pasted).
+    fn offer_files(&self, files: RemoteFiles) -> Result<(), AccessError>;
 }
 
 /// How long to insist on a busy clipboard.

@@ -2,11 +2,12 @@
 //!
 //! A handle sits at the top centre of the window, in full screen or not;
 //! reaching it (or the top edge next to it) expands a bar with the
-//! [`buttons`]. Two of them open a drop-down list (see `bar_menu`): the
-//! host's monitors and the video quality; choosing a row is a
-//! [`BarAction`] like a button click. Events over the bar or an open list
-//! are consumed here and not forwarded to the host; a click elsewhere while
-//! a list is open only closes it. Hit-testing comes from an injected
+//! [`buttons`]. Three of them open a drop-down list (see `bar_menu`): the
+//! host's monitors, the video quality and what to do with files; choosing
+//! a row is a [`BarAction`] like a button click. Events over the bar or an
+//! open list are consumed here and not forwarded to the host; a click
+//! elsewhere while a list is open only closes it. Hit-testing comes from an
+//! injected
 //! geometry function (production: `render::toolbar_geometry`), the same one
 //! the renderer draws with, and from `render::menu_geometry` for the list.
 
@@ -15,7 +16,7 @@ use std::time::{Duration, Instant};
 use protocol::session::{MonitorEntry, Quality};
 use render::{MenuGeometry, MenuHit, ToolbarGeometry, ToolbarHit, ToolbarView, menu_geometry};
 
-use super::bar_menu::{MenuKind, OpenMenu, SessionChoices};
+use super::bar_menu::{FileState, MenuKind, OpenMenu, SessionChoices};
 use crate::text;
 
 /// The bar collapses this long after the pointer left it.
@@ -37,6 +38,11 @@ pub enum BarAction {
     /// Watch the host's monitor at this position of its list.
     SelectMonitor(u32),
     SetQuality(Quality),
+    /// Pick files to send to the host.
+    SendFiles,
+    CancelTransfers,
+    /// Open the folder where the host's files landed.
+    OpenReceived,
 }
 
 /// What a button does when clicked.
@@ -56,7 +62,7 @@ pub struct BarButton {
 }
 
 /// Number of buttons, whatever the mode.
-const BUTTON_COUNT: usize = 5;
+const BUTTON_COUNT: usize = 6;
 
 /// Buttons, left to right. The first one switches to the other mode, so it
 /// names that.
@@ -81,6 +87,11 @@ pub const fn buttons(fullscreen: bool) -> [BarButton; BUTTON_COUNT] {
             label: text::BAR_QUALITY,
             tooltip: text::BAR_TIP_QUALITY,
             role: ButtonRole::Open(MenuKind::Quality),
+        },
+        BarButton {
+            label: text::BAR_FILES,
+            tooltip: text::BAR_TIP_FILES,
+            role: ButtonRole::Open(MenuKind::Files),
         },
         BarButton {
             label: text::BAR_STATS,
@@ -161,6 +172,13 @@ impl<G: Fn((u32, u32), f32, usize, bool) -> ToolbarGeometry> ControlBar<G> {
         self.presses.clear();
         self.pointer = None;
         self.menu = None;
+    }
+
+    /// What the "File" menu offers now (transfers to cancel, a folder of
+    /// received files to open).
+    pub fn set_files(&mut self, files: FileState, now: Instant) {
+        self.choices.set_files(files);
+        self.refresh(now);
     }
 
     /// The host's monitors and the one it shares, for the "Screen" menu.

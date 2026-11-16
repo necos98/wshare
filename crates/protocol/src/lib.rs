@@ -5,6 +5,7 @@
 //! - [`input`]: remote-control payloads (input events, cursor shape).
 //! - [`recovery`]: the viewer's requests to resend lost video datagrams.
 //! - [`session`]: what the viewer chooses mid-session (monitor, quality).
+//! - [`transfer`]: files pushed or pasted between the two PCs.
 //! - [`video`]: unreliable video datagrams, their reassembly and loss policy.
 
 pub mod control;
@@ -12,6 +13,7 @@ pub mod feedback;
 pub mod input;
 pub mod recovery;
 pub mod session;
+pub mod transfer;
 pub mod video;
 
 use thiserror::Error;

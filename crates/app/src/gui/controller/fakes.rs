@@ -4,16 +4,19 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use discovery::MacAddress;
 use net::Fingerprint;
+use protocol::transfer::TransferId;
 
 use super::*;
 use crate::access_mode::AccessMode;
-use crate::gui::ports::MonitorChoice;
+use crate::gui::ports::{ChoicePurpose, MonitorChoice};
 use crate::host::{ApprovalAnswer, ApprovalId, HostEvent, HostFailure};
 use crate::options::HostOptions;
+use crate::transfer::TransferCommand;
 use crate::trust::KnownHost;
 
 /// Shared log of what the fakes were asked to do.
@@ -40,6 +43,16 @@ pub(super) struct Log {
     pub(super) fail_autostart: bool,
     pub(super) monitors: Vec<MonitorChoice>,
     pub(super) fail_monitors: bool,
+    /// The dialogs opened, and the folders opened in Explorer.
+    pub(super) chosen: Vec<ChoicePurpose>,
+    pub(super) opened: Vec<PathBuf>,
+    pub(super) fail_open: bool,
+    /// The files given to the service to send; `no_viewer`: it has none.
+    pub(super) sent: Vec<Vec<PathBuf>>,
+    pub(super) no_viewer: bool,
+    /// The file commands handed to viewer windows.
+    pub(super) commands: Vec<(ViewerId, TransferCommand)>,
+    pub(super) fail_command: bool,
 }
 
 pub(super) type Shared = Rc<RefCell<Log>>;
@@ -51,6 +64,7 @@ pub(super) struct FakeLauncher(Shared);
 pub(super) struct FakeKnownHosts(Shared);
 pub(super) struct FakeSettings(Shared);
 pub(super) struct FakeWake(Shared);
+pub(super) struct FakeDesktop(Shared);
 
 impl SharingService for FakeService {
     fn start(&mut self, options: HostOptions, generation: u64) -> Result<Box<dyn SharingControl>> {
@@ -72,6 +86,27 @@ impl SharingControl for FakeControl {
             .borrow_mut()
             .calls
             .push(format!("clipboard {shared}"));
+    }
+    fn set_receive_files(&self, receive: bool) {
+        self.0
+            .borrow_mut()
+            .calls
+            .push(format!("receive_files {receive}"));
+    }
+    fn send_files(&self, picked: Vec<PathBuf>) -> bool {
+        let mut log = self.0.borrow_mut();
+        if log.no_viewer {
+            return false;
+        }
+        log.sent.push(picked);
+        true
+    }
+    fn cancel_transfer(&self, id: Option<TransferId>) {
+        let call = format!(
+            "cancel_transfer {}",
+            id.map_or("all".into(), |id| id.0.to_string())
+        );
+        self.0.borrow_mut().calls.push(call);
     }
     fn set_access_mode(&self, access: AccessMode) {
         self.0.borrow_mut().calls.push(format!("access {access:?}"));
@@ -118,6 +153,30 @@ impl ViewerLauncher for FakeLauncher {
 
     fn cancel(&mut self, id: ViewerId) {
         self.0.borrow_mut().calls.push(format!("cancel {id}"));
+    }
+
+    fn command(&mut self, id: ViewerId, command: TransferCommand) -> Result<()> {
+        let mut log = self.0.borrow_mut();
+        if log.fail_command {
+            bail!("the viewer is not running");
+        }
+        log.commands.push((id, command));
+        Ok(())
+    }
+}
+
+impl Desktop for FakeDesktop {
+    fn choose(&self, purpose: ChoicePurpose) {
+        self.0.borrow_mut().chosen.push(purpose);
+    }
+
+    fn open_folder(&self, folder: &std::path::Path) -> Result<()> {
+        let mut log = self.0.borrow_mut();
+        if log.fail_open {
+            bail!("access denied");
+        }
+        log.opened.push(folder.to_path_buf());
+        Ok(())
     }
 }
 
@@ -183,7 +242,7 @@ pub(super) fn short(fingerprint: &Fingerprint) -> String {
 }
 
 pub(super) type TestController =
-    Controller<FakeService, FakeLauncher, FakeKnownHosts, FakeSettings, FakeWake>;
+    Controller<FakeService, FakeLauncher, FakeKnownHosts, FakeSettings, FakeWake, FakeDesktop>;
 
 /// A controller whose known-hosts store holds `known`.
 pub(super) fn controller_knowing(known: Vec<KnownHost>) -> (TestController, Shared) {
@@ -195,6 +254,7 @@ pub(super) fn controller_knowing(known: Vec<KnownHost>) -> (TestController, Shar
         FakeKnownHosts(log.clone()),
         FakeSettings(log.clone()),
         FakeWake(log.clone()),
+        FakeDesktop(log.clone()),
     );
     (controller, log)
 }
@@ -253,6 +313,7 @@ pub(super) fn controller_from(log: &Shared) -> TestController {
         FakeKnownHosts(log.clone()),
         FakeSettings(log.clone()),
         FakeWake(log.clone()),
+        FakeDesktop(log.clone()),
     )
 }
 

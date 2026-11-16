@@ -16,6 +16,7 @@ use super::model::{GuiState, Sharing, ViewerSession, ViewerStatus, format_pin};
 use super::pairing_view::{self, RememberedAction};
 use super::settings_state::Page;
 use super::settings_view;
+use super::transfers_view;
 
 /// Text fields being edited; not part of the application state.
 #[derive(Debug, Default)]
@@ -55,6 +56,10 @@ pub fn show(ui: &mut Ui, state: &GuiState, drafts: &mut Drafts) -> Vec<Intent> {
                 approval_view::show(ui, prompt, &mut intents);
             }
             sharing_section(ui, &state.sharing, &mut intents);
+            if let Some(notice) = &state.files_notice {
+                ui.add_space(4.0);
+                ui.colored_label(error_color(ui), notice);
+            }
             if let Some(notice) = &state.settings_notice {
                 ui.add_space(4.0);
                 ui.colored_label(error_color(ui), notice);
@@ -170,6 +175,7 @@ fn sharing_section(ui: &mut Ui, sharing: &Sharing, intents: &mut Vec<Intent>) {
         if let Some(notice) = &sharing.notice {
             ui.label(RichText::new(notice).size(DETAIL_SIZE).weak());
         }
+        transfers_view::host_files(ui, sharing, intents);
         pairing_view::authorized_devices(ui, &sharing.authorized, Timestamp::now(), intents);
     });
 }
@@ -419,6 +425,9 @@ fn viewers_section(ui: &mut Ui, viewers: &[ViewerSession], intents: &mut Vec<Int
                         });
                     }
                 });
+                if viewer.status == ViewerStatus::Connected {
+                    transfers_view::viewer_files(ui, viewer, intents);
+                }
             }
             ViewerStatus::Failed(_) => {
                 ui.horizontal_top(|ui| {

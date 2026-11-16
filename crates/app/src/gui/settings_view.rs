@@ -36,6 +36,7 @@ pub fn show(ui: &mut Ui, state: &GuiState, intents: &mut Vec<Intent>) {
         .auto_shrink(false)
         .show(ui, |ui| {
             sharing_group(ui, state, &mut edited);
+            files_group(ui, &mut edited, intents);
             viewing_group(ui, &mut edited);
             startup_group(ui, &mut edited);
             feedback_group(ui, &mut edited);
@@ -107,6 +108,47 @@ fn sharing_group(ui: &mut Ui, state: &GuiState, edited: &mut Settings) {
         ui.checkbox(&mut edited.share_clipboard, text::SETTINGS_SHARE_CLIPBOARD);
         access_row(ui, edited);
     });
+}
+
+/// Files received from the other PC, as host and as viewer.
+fn files_group(ui: &mut Ui, edited: &mut Settings, intents: &mut Vec<Intent>) {
+    group(ui, text::SETTINGS_FILES, None, |ui| {
+        ui.checkbox(&mut edited.receive_files, text::SETTING_RECEIVE_FILES);
+        ui.label(
+            RichText::new(text::SETTING_RECEIVE_FILES_HINT)
+                .size(DETAIL_SIZE)
+                .weak(),
+        );
+        ui.horizontal(|ui| {
+            ui.label(text::SETTING_DOWNLOADS);
+            if ui.button(text::SETTING_DOWNLOADS_PICK).clicked() {
+                intents.push(Intent::ChooseDownloads);
+            }
+        });
+        downloads_field(ui, edited);
+        ui.label(
+            RichText::new(text::SETTING_DOWNLOADS_HINT)
+                .size(DETAIL_SIZE)
+                .weak(),
+        );
+    });
+}
+
+/// The folder as typed; taken when the field loses the focus.
+fn downloads_field(ui: &mut Ui, edited: &mut Settings) {
+    let id = ui.make_persistent_id("settings_downloads_text");
+    let mut buffer: String = ui
+        .data_mut(|d| d.get_temp(id))
+        .unwrap_or_else(|| edited.downloads.clone());
+    let field = ui.add(TextEdit::singleline(&mut buffer).desired_width(f32::INFINITY));
+    if field.lost_focus() {
+        edited.downloads = buffer.trim().to_string();
+    }
+    if field.has_focus() {
+        ui.data_mut(|d| d.insert_temp(id, buffer));
+    } else {
+        ui.data_mut(|d| d.remove::<String>(id));
+    }
 }
 
 fn viewing_group(ui: &mut Ui, edited: &mut Settings) {

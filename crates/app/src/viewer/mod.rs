@@ -11,12 +11,21 @@
 //! - tokio runtime: control channel and datagram reception; when the
 //!   connection breaks by itself it also reconnects to the same host (see
 //!   `control` and `reconnect`) while the window stays open;
+//! - clipboard thread: listens for clipboard changes and holds the host's
+//!   copied files as virtual files (an OLE apartment, see `clipboard`);
 //! - render thread: owns the GPU objects, runs `ViewerStreamer`
 //!   (reassemble -> decode -> present), fed through a bounded queue
 //!   (see `feed`); it also reports to the host how the video arrives, for
 //!   the host's bitrate adaptation (see `rate`).
+//!
+//! Files dropped on the window or chosen in its "File" menu go to the host
+//! (see `transfers`, `window_files`); the host's land in this user's
+//! `Downloads\wshare` or the folder given with `--downloads`. Launched by
+//! the desktop interface, the viewer also takes file commands on stdin
+//! (see `channel`).
 
 mod bar_menu;
+pub mod channel;
 mod clipboard;
 mod control;
 mod control_policy;
@@ -41,7 +50,9 @@ mod stall;
 mod stats;
 mod stream_requests;
 mod toolbar;
+mod transfers;
 mod window;
+mod window_files;
 
 use std::io::Write;
 use std::net::SocketAddr;
@@ -49,7 +60,9 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use discovery::computer_name;
-use net::{ControlReceiver, ControlSender, Fingerprint, Identity, SessionHandle, VideoChannel};
+use net::{
+    ControlReceiver, ControlSender, FileChannel, Fingerprint, Identity, SessionHandle, VideoChannel,
+};
 use protocol::control::{ControlMessage, PROTOCOL_VERSION, RejectReason, StreamInfo};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
@@ -69,7 +82,8 @@ use pairing::Pairing;
 use rate::TargetRate;
 use report::{REPORT_ENV, ViewerReport};
 use stats::LinkProbe;
-use window::{UserEvent, ViewerWindow, WindowOptions};
+use transfers::TransferSetup;
+use window::{HostRequests, UserEvent, ViewerWindow, WindowOptions};
 
 /// Environment variable holding the PIN when `--pin` is absent (used by
 /// the desktop interface, so the PIN is not visible on the command line).
@@ -92,6 +106,7 @@ struct Connected {
     tx: ControlSender,
     rx: ControlReceiver,
     video: VideoChannel,
+    files: FileChannel,
     handle: SessionHandle,
 }
 
@@ -121,6 +136,7 @@ pub fn run(options: ViewOptions) -> Result<()> {
         tx,
         rx,
         video,
+        files,
         handle,
     } = connected;
     // Before the "Connected" line: the desktop interface re-reads the known
@@ -162,17 +178,26 @@ pub fn run(options: ViewOptions) -> Result<()> {
     let restart = feed::Restart::default();
     let forward = runtime.spawn(feed::forward(video, datagram_tx.clone()));
     let target = TargetRate::default();
-    // Opened only now, with the session: nothing is shared before or after it.
-    let clipboard = ViewerClipboard::open(ViewerRules {
+    let rules = ViewerRules {
         host_allows: input_allowed,
         view_only: options.view_only,
-    });
+    };
+    // Opened only now, with the session: nothing is shared before or after it.
+    let clipboard = ViewerClipboard::open(rules);
+    let (transfers, commands_tx, commands_rx) = TransferSetup::new(
+        options.downloads.clone(),
+        rules,
+        event_loop.create_proxy(),
+        reporting,
+    );
     let control = runtime.spawn(control::run(ControlTask {
-        link: ControlLink { tx, rx },
+        link: ControlLink { tx, rx, files },
         outgoing: outgoing_rx,
         window: event_loop.create_proxy(),
         target: target.clone(),
         clipboard,
+        commands: commands_rx,
+        transfers,
         reconnection: Reconnection {
             addr,
             host: fingerprint,
@@ -204,7 +229,10 @@ pub fn run(options: ViewOptions) -> Result<()> {
             rtt: Box::new(move || rtt_handle.rtt()),
             target,
         },
-        outgoing_tx.clone(),
+        HostRequests {
+            control: outgoing_tx.clone(),
+            files: commands_tx,
+        },
         policy,
         event_loop.create_proxy(),
     );
@@ -280,9 +308,10 @@ fn authenticate(
     let mut pin = match first_attempt(given, pairing.expected().is_some()) {
         FirstAttempt::Pin(pin) => Some(pin),
         FirstAttempt::WithoutPin => None,
-        FirstAttempt::AskPin => ask_pin(&format!(
-            "PIN shown on {label} (empty: ask the host to accept this PC): "
-        ))?,
+        FirstAttempt::AskPin => prompt_pin(
+            &format!("PIN shown on {label} (empty: ask the host to accept this PC): "),
+            reporting,
+        )?,
     };
     loop {
         match runtime.block_on(connect(
@@ -293,7 +322,7 @@ fn authenticate(
             || announce_waiting(reporting),
         )) {
             Err(e) if pin.is_none() && is_pin_required(&e) => {
-                pin = ask_pin(&format!("{label} requires the PIN: "))?;
+                pin = prompt_pin(&format!("{label} requires the PIN: "), reporting)?;
                 if pin.is_none() {
                     return Err(e);
                 }
@@ -324,7 +353,7 @@ async fn connect(
         .peer_fingerprint()
         .ok_or_else(|| anyhow!("the host presented no certificate"))?;
     let handle = session.handle();
-    let (mut tx, mut rx, video) = session.split();
+    let (mut tx, mut rx, video, files) = session.split();
     tx.send(&ControlMessage::Hello {
         version: PROTOCOL_VERSION,
         viewer_name: computer_name(),
@@ -351,6 +380,7 @@ async fn connect(
             tx,
             rx,
             video,
+            files,
             handle,
         }),
         Some(ControlMessage::Rejected { reason }) => Err(ViewerFailure::Rejected(reason).into()),
@@ -377,6 +407,21 @@ fn announce_waiting(reporting: bool) {
         println!("{}", ViewerReport::AwaitingApproval.to_line());
     }
     println!("Waiting for the host to accept this PC...");
+}
+
+/// Asks for the PIN on the terminal; `None` without asking when the desktop
+/// interface launched the viewer (`reporting`): its stdin carries commands,
+/// never a PIN (see `channel`).
+fn prompt_pin(question: &str, reporting: bool) -> Result<Option<String>> {
+    if !may_prompt_pin(reporting) {
+        return Ok(None);
+    }
+    ask_pin(question)
+}
+
+/// Only a terminal user is asked for the PIN.
+fn may_prompt_pin(reporting: bool) -> bool {
+    !reporting
 }
 
 /// Asks for the PIN on the terminal; `None` if nothing was typed (or there
@@ -442,6 +487,16 @@ mod tests {
                 FirstAttempt::Pin("123456".into())
             );
         }
+    }
+
+    #[test]
+    fn a_viewer_launched_by_the_interface_never_reads_a_pin_from_stdin() {
+        assert!(may_prompt_pin(false), "a terminal is asked");
+        assert!(
+            !may_prompt_pin(true),
+            "the interface's stdin carries commands"
+        );
+        assert_eq!(prompt_pin("PIN: ", true).unwrap(), None);
     }
 
     #[test]

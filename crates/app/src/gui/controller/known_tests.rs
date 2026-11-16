@@ -64,6 +64,7 @@ fn a_known_host_not_announced_is_listed_offline_and_connects_at_its_last_address
             host_id: Some(id),
             pin: None,
             display: ViewerDisplay::default(),
+            downloads: None,
         }
     );
     assert_eq!(c.state().connect_error, None);

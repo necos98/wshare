@@ -1,8 +1,11 @@
 //! Applies user intents and background events to the [`GuiState`],
 //! driving the outside world through the ports. No direct I/O.
 
+use std::path::PathBuf;
+
 use discovery::DiscoveryEvent;
 use net::Fingerprint;
+use protocol::transfer::TransferId;
 
 use crate::host::{HostEvent, HostFailure};
 use crate::options::DEFAULT_PORT;
@@ -12,11 +15,12 @@ use crate::text;
 use super::host_row::HostRow;
 use super::model::{GuiState, ViewerId, ViewerSession, ViewerStatus, ViewerUpdate};
 use super::ports::{
-    AppEvent, KnownHostsStore, LaunchRequest, PendingStop, SettingsBackend, SharingControl,
-    SharingService, TrayAction, ViewerLauncher, WakeOnLan,
+    AppEvent, ChoicePurpose, Desktop, KnownHostsStore, LaunchRequest, PendingStop, SettingsBackend,
+    SharingControl, SharingService, TrayAction, ViewerLauncher, WakeOnLan,
 };
 use super::settings::Settings;
 use super::settings_state::Page;
+use super::transfers::FileTransfers;
 
 /// What the user asked for (from the window or the tray).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +77,22 @@ pub enum Intent {
     /// Restarts the sharing so the saved streaming settings apply.
     RestartSharing,
     ShowWindow,
+    /// "Invia file al visualizzatore…": choose files for the viewer
+    /// connected here.
+    SendToViewer,
+    /// "Invia file…" of a viewer window: choose files for its host.
+    SendFromViewer(ViewerId),
+    /// Cancels a transfer of the viewer connected here (`None`: all).
+    CancelHostTransfer(Option<TransferId>),
+    /// Cancels a transfer of a viewer window (`transfer: None`: all).
+    CancelViewerTransfer {
+        viewer: ViewerId,
+        transfer: Option<TransferId>,
+    },
+    /// Opens a folder of received files.
+    OpenFolder(PathBuf),
+    /// "Sfoglia…" of the folder of received files.
+    ChooseDownloads,
     /// The window's close button.
     CloseWindow,
     Quit,
@@ -105,6 +125,7 @@ pub struct Controller<
     K: KnownHostsStore,
     B: SettingsBackend,
     W: WakeOnLan,
+    D: Desktop,
 > {
     state: GuiState,
     service: S,
@@ -112,6 +133,7 @@ pub struct Controller<
     known_hosts: K,
     backend: B,
     wake: W,
+    desktop: D,
     sharing: Option<Box<dyn SharingControl>>,
     /// A service switched off and still stopping in the background.
     stopping: Option<Box<dyn PendingStop>>,
@@ -122,10 +144,16 @@ pub struct Controller<
     restart_pending: bool,
 }
 
-impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBackend, W: WakeOnLan>
-    Controller<S, L, K, B, W>
+impl<
+    S: SharingService,
+    L: ViewerLauncher,
+    K: KnownHostsStore,
+    B: SettingsBackend,
+    W: WakeOnLan,
+    D: Desktop,
+> Controller<S, L, K, B, W, D>
 {
-    pub fn new(service: S, launcher: L, known_hosts: K, backend: B, wake: W) -> Self {
+    pub fn new(service: S, launcher: L, known_hosts: K, backend: B, wake: W, desktop: D) -> Self {
         let (settings, warning) = backend.load();
         let mut state = GuiState::default();
         state.sharing.input_allowed = settings.allow_input;
@@ -138,6 +166,7 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBacken
             known_hosts,
             backend,
             wake,
+            desktop,
             sharing: None,
             stopping: None,
             generation: 0,
@@ -193,6 +222,14 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBacken
             Intent::SetFavorite { id, favorite } => self.set_favorite(&id, favorite),
             Intent::DismissViewer(id) => self.state.viewers.retain(|v| v.id != id),
             Intent::CancelViewer(id) => self.cancel_viewer(id),
+            Intent::SendToViewer => self.choose(ChoicePurpose::SendToViewer),
+            Intent::SendFromViewer(viewer) => self.choose(ChoicePurpose::SendFromViewer(viewer)),
+            Intent::CancelHostTransfer(transfer) => self.cancel_host_transfer(transfer),
+            Intent::CancelViewerTransfer { viewer, transfer } => {
+                self.cancel_viewer_transfer(viewer, transfer);
+            }
+            Intent::OpenFolder(folder) => self.open_folder(&folder),
+            Intent::ChooseDownloads => self.choose(ChoicePurpose::Downloads),
             Intent::ShowWindow => return Some(WindowCommand::Show),
             Intent::CloseWindow => {
                 let decision = close_decision(self.state.sharing.enabled);
@@ -211,6 +248,14 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBacken
 
     pub fn on_event(&mut self, event: AppEvent) -> Option<WindowCommand> {
         match event {
+            AppEvent::Host {
+                generation,
+                event: HostEvent::Transfer(event),
+            } => {
+                if generation == self.generation && self.sharing.is_some() {
+                    self.host_transfer(event);
+                }
+            }
             AppEvent::Host { generation, event } => {
                 if generation == self.generation && self.sharing.is_some() {
                     let stopped = matches!(event, HostEvent::Stopped { .. });
@@ -263,6 +308,7 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBacken
                     }
                 }
             }
+            AppEvent::Chosen { purpose, paths } => self.chosen(purpose, paths),
             AppEvent::Tray(action) => {
                 let intent = match action {
                     TrayAction::Open => Intent::ShowWindow,
@@ -364,6 +410,7 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBacken
                     host_id: Fingerprint::is_host_id(&row.id).then_some(row.id),
                     pin,
                     display: self.state.settings.viewer_display(),
+                    downloads: self.state.settings.downloads_folder(),
                 };
                 self.launch(row.name, request);
             }
@@ -389,6 +436,7 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBacken
                     host_id: None,
                     pin: non_empty(pin),
                     display: self.state.settings.viewer_display(),
+                    downloads: self.state.settings.downloads_folder(),
                 };
                 self.launch(label, request);
             }
@@ -417,6 +465,7 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBacken
             address,
             host_id: request.host_id,
             status,
+            files: FileTransfers::default(),
         });
         self.state.selected_host = None;
         self.state.wake_notice = None;
@@ -477,6 +526,9 @@ mod approval_tests;
 mod connection_tests;
 #[cfg(test)]
 mod fakes;
+mod files;
+#[cfg(test)]
+mod files_tests;
 mod known;
 #[cfg(test)]
 mod known_tests;

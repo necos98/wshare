@@ -18,7 +18,7 @@ use windows::Win32::Foundation::HWND;
 
 use super::Outgoing;
 use super::feed::{Restart, discard_waiting, next_batch};
-use super::notice::{Notice, NoticeBoard};
+use super::notice::{Notice, NoticeBoard, NoticeUpdate};
 use super::rate::ReceptionReporter;
 use super::sink::ViewSink;
 use super::stall::StallWatch;
@@ -53,7 +53,7 @@ pub struct RenderThread {
     stats_visible: Arc<AtomicBool>,
     reconnecting: Arc<AtomicBool>,
     toolbar: Arc<ToolbarSlot>,
-    notices: Sender<Notice>,
+    notices: Sender<NoticeUpdate>,
     streams: Sender<StreamInfo>,
     thread: Option<JoinHandle<Result<ViewerStats>>>,
 }
@@ -115,8 +115,22 @@ impl RenderThread {
 
     /// Shows `notice` over the video for its time.
     pub fn show_notice(&self, notice: Notice) {
+        self.update_notices(NoticeUpdate::Show(notice));
+    }
+
+    /// Shows `text` over the video for a few seconds.
+    pub fn show_message(&self, text: String) {
+        self.update_notices(NoticeUpdate::Message(text));
+    }
+
+    /// Shows the line of the transfers in progress (`None`: none left).
+    pub fn set_transfers(&self, line: Option<String>) {
+        self.update_notices(NoticeUpdate::Transfers(line));
+    }
+
+    fn update_notices(&self, update: NoticeUpdate) {
         // The loop is gone only when the window is closing.
-        let _ = self.notices.send(notice);
+        let _ = self.notices.send(update);
     }
 
     /// The host streams `stream` from now on: the decoder expects its size
@@ -171,7 +185,7 @@ struct Shared<'a> {
     stats_visible: &'a AtomicBool,
     reconnecting: &'a AtomicBool,
     toolbar: &'a ToolbarSlot,
-    notices: &'a Receiver<Notice>,
+    notices: &'a Receiver<NoticeUpdate>,
     streams: &'a Receiver<StreamInfo>,
 }
 
@@ -244,8 +258,8 @@ fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
         }
         board.set_unstable(silence.unstable);
         board.set_reconnecting(reconnecting.load(Ordering::Relaxed));
-        while let Ok(notice) = notices.try_recv() {
-            board.show(notice, now);
+        while let Ok(update) = notices.try_recv() {
+            board.apply(update, now);
         }
         while let Ok(stream) = streams.try_recv() {
             streamer

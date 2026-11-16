@@ -7,6 +7,7 @@ use std::time::Duration;
 use quinn::{Connection, RecvStream, SendStream, VarInt};
 
 use crate::control::{ControlReceiver, ControlSender};
+use crate::files::FileChannel;
 use crate::identity::Fingerprint;
 use crate::video::VideoChannel;
 
@@ -65,12 +66,14 @@ impl Session {
         self.handle().close("bye");
     }
 
-    /// Splits into the control sender/receiver and the video channel.
-    pub fn split(self) -> (ControlSender, ControlReceiver, VideoChannel) {
+    /// Splits into the control sender/receiver, the video channel and the
+    /// file channel.
+    pub fn split(self) -> (ControlSender, ControlReceiver, VideoChannel, FileChannel) {
         (
             ControlSender::new(self.send),
             ControlReceiver::new(self.recv),
-            VideoChannel::new(self.conn),
+            VideoChannel::new(self.conn.clone()),
+            FileChannel::new(self.conn),
         )
     }
 }

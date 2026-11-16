@@ -17,9 +17,10 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use net::{ControlReceiver, ControlSender, Fingerprint, Identity, VideoChannel};
+use net::{ControlReceiver, ControlSender, FileChannel, Fingerprint, Identity, VideoChannel};
 use protocol::control::{ControlMessage, StreamInfo};
 use protocol::session::Quality;
+use protocol::transfer::TransferMessage;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 use winit::event_loop::EventLoopProxy;
@@ -30,17 +31,21 @@ use super::feed::{self, Restart};
 use super::live_handle::LiveHandle;
 use super::rate::TargetRate;
 use super::reconnect::{self, Backoff, RECONNECT_BUDGET};
+use super::transfers::TransferSetup;
 use super::window::UserEvent;
 use super::{Connected, connect, outbox};
+use crate::transfer::TransferCommand;
 
 /// Time the render thread gets to start its pipeline over; past it the
 /// session goes on anyway (a render thread that is gone ends the window).
 const RESTART_WAIT: Duration = Duration::from_secs(2);
 
-/// The two halves of the control channel of one connection.
+/// The two halves of the control channel of one connection, and its file
+/// streams.
 pub struct ControlLink {
     pub tx: ControlSender,
     pub rx: ControlReceiver,
+    pub files: FileChannel,
 }
 
 /// What it takes to connect to the same host again.
@@ -92,6 +97,9 @@ pub struct ControlTask {
     pub window: EventLoopProxy<UserEvent>,
     pub target: TargetRate,
     pub clipboard: ViewerClipboard,
+    /// The user's file commands (window, desktop interface).
+    pub commands: UnboundedReceiver<TransferCommand>,
+    pub transfers: TransferSetup,
     pub reconnection: Reconnection,
     pub feed: VideoFeed,
 }
@@ -121,6 +129,8 @@ pub async fn run(task: ControlTask) {
         window,
         target,
         mut clipboard,
+        mut commands,
+        transfers,
         mut reconnection,
         mut feed,
     } = task;
@@ -131,6 +141,8 @@ pub async fn run(task: ControlTask) {
             window: &window,
             target: &target,
             clipboard: &mut clipboard,
+            commands: &mut commands,
+            transfers: &transfers,
             quality: &mut quality,
             stream: &mut reconnection.stream,
         };
@@ -156,6 +168,7 @@ pub async fn run(task: ControlTask) {
             }) => {
                 link = new_link;
                 clipboard.set_host_allows(input_allowed);
+                transfers.permissions.set_host_allows(input_allowed);
                 let _ = window.send_event(UserEvent::InputAllowed(input_allowed));
                 if let Some(stream) = stream {
                     let _ = window.send_event(UserEvent::StreamChanged(stream));
@@ -180,6 +193,9 @@ struct Turn<'a> {
     window: &'a EventLoopProxy<UserEvent>,
     target: &'a TargetRate,
     clipboard: &'a mut ViewerClipboard,
+    commands: &'a mut UnboundedReceiver<TransferCommand>,
+    /// How the file transfers of each connection start.
+    transfers: &'a TransferSetup,
     /// The quality last asked for, to ask for it again after a break.
     quality: &'a mut Quality,
     /// The stream followed, kept up to date with `StreamChanged`.
@@ -188,20 +204,30 @@ struct Turn<'a> {
 
 /// Serves one connection: forwards our requests, applies what the host
 /// sends. The host's target bitrate goes to `target`, for the statistics.
-/// Copied text travels both ways through `clipboard`; `quality` and
-/// `stream` follow what the user asks and the host streams.
+/// Copied text and files travel both ways through `clipboard`, the files
+/// themselves through this connection's transfers; `quality` and `stream`
+/// follow what the user asks and the host streams.
 async fn serve(link: &mut ControlLink, turn: Turn<'_>) -> Served {
-    let ControlLink { tx, rx } = link;
+    let ControlLink { tx, rx, files } = link;
     let Turn {
         outgoing,
         window,
         target,
         clipboard,
+        commands,
+        transfers,
         quality,
         stream,
     } = turn;
+    let (hub, mut for_host) = transfers.start(files.clone());
     loop {
         tokio::select! {
+            Some(message) = for_host.recv() => {
+                if let Err(e) = tx.send(&message).await {
+                    return Served::Ended(ViewerFailure::ConnectionLost(format!("{e:#}")));
+                }
+            }
+            Some(command) = commands.recv() => hub.command(command),
             message = outgoing.recv() => {
                 let Some(first) = message else { return Served::Finished };
                 for message in outbox::next_batch(first, outgoing) {
@@ -216,7 +242,7 @@ async fn serve(link: &mut ControlLink, turn: Turn<'_>) -> Served {
                 }
             }
             () = clipboard.changed() => {
-                if let Some(message) = clipboard.local_change().await
+                if let Some(message) = clipboard.local_change(&hub).await
                     && let Err(e) = tx.send(&message).await
                 {
                     return Served::Ended(ViewerFailure::ConnectionLost(format!("{e:#}")));
@@ -229,12 +255,19 @@ async fn serve(link: &mut ControlLink, turn: Turn<'_>) -> Served {
                 Ok(None) => return Served::Ended(ViewerFailure::HostLeft),
                 Ok(Some(ControlMessage::InputAllowed(allowed))) => {
                     clipboard.set_host_allows(allowed);
+                    transfers.permissions.set_host_allows(allowed);
                     let _ = window.send_event(UserEvent::InputAllowed(allowed));
                 }
                 Ok(Some(ControlMessage::TargetBitrate { bps })) => target.set(bps),
                 Ok(Some(ControlMessage::Clipboard(text))) => {
                     clipboard.remote_text(&text).await;
                 }
+                Ok(Some(ControlMessage::Transfer(message))) => match message {
+                    TransferMessage::ClipboardFiles { offer, entries } => {
+                        clipboard.remote_files(offer, entries, &hub);
+                    }
+                    other => hub.on_message(other),
+                },
                 Ok(Some(message)) => {
                     if let ControlMessage::StreamChanged(changed) = &message {
                         *stream = changed.clone();
@@ -337,6 +370,7 @@ async fn resume(
         tx,
         rx,
         video,
+        files,
         handle,
         ..
     } = connected;
@@ -353,7 +387,7 @@ async fn resume(
         stream
     });
     Ok(Resumed {
-        link: ControlLink { tx, rx },
+        link: ControlLink { tx, rx, files },
         input_allowed,
         stream: changed,
     })

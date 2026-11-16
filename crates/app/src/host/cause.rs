@@ -104,6 +104,9 @@ pub enum HostWarning {
     ClipboardTooLarge,
     /// Reading or writing the clipboard failed.
     ClipboardFailed(String),
+    /// Files copied on this PC cannot be pasted on the viewer (too many,
+    /// unreadable...).
+    FilesNotShared(String),
     /// The monitor or quality the viewer chose could not be streamed: the
     /// stream went on as it was.
     ScreenUnavailable(String),
@@ -148,6 +151,9 @@ impl fmt::Display for HostWarning {
                 protocol::control::MAX_CLIPBOARD_BYTES / 1024
             ),
             Self::ClipboardFailed(detail) => write!(f, "clipboard sharing failed: {detail}"),
+            Self::FilesNotShared(detail) => {
+                write!(f, "the copied files cannot be shared: {detail}")
+            }
             Self::ScreenUnavailable(detail) => {
                 write!(f, "the screen the viewer chose cannot be shared: {detail}")
             }

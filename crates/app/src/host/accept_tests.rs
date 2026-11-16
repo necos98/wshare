@@ -103,7 +103,7 @@ fn hello(pin: &str) -> ControlMessage {
 }
 
 fn channels(session: Session) -> (ControlSender, ControlReceiver) {
-    let (tx, rx, _video) = session.split();
+    let (tx, rx, _video, _) = session.split();
     (tx, rx)
 }
 

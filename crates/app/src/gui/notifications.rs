@@ -4,6 +4,7 @@
 
 use crate::host::HostEvent;
 use crate::text;
+use crate::transfer::{Ended, Kind};
 
 use super::model::ConnectedViewer;
 
@@ -11,6 +12,16 @@ use super::model::ConnectedViewer;
 pub struct Notification {
     pub title: String,
     pub body: String,
+}
+
+/// The balloon for a pushed transfer of the connected viewer that ended
+/// (`viewer` is its name). Pasted files are not announced: Explorer shows
+/// their copy itself.
+pub fn for_transfer(ended: &Ended, viewer: Option<&str>) -> Option<Notification> {
+    (ended.info.kind == Kind::Push).then(|| Notification {
+        title: text::NOTIFY_TITLE.to_string(),
+        body: text::transfer_notification(ended, viewer),
+    })
 }
 
 /// The balloon for `event`, if it deserves one. `viewer` is the one
@@ -51,6 +62,33 @@ mod tests {
             name: name.into(),
             address: address(),
         }
+    }
+
+    #[test]
+    fn pushed_files_are_announced_and_pasted_ones_are_not() {
+        use protocol::transfer::TransferId;
+
+        use crate::transfer::{Direction, Outcome, TransferInfo};
+
+        let ended = |kind| Ended {
+            info: TransferInfo {
+                id: TransferId(1),
+                direction: Direction::Receiving,
+                kind,
+                name: "Foto".into(),
+                files: 2,
+                total_bytes: 9,
+            },
+            outcome: Outcome::Completed {
+                folder: Some(std::path::PathBuf::from("C:/in")),
+            },
+        };
+        let notification = for_transfer(&ended(Kind::Push), Some("PORTATILE")).unwrap();
+        assert_eq!(
+            notification.body,
+            "Ricevuto «Foto» (PORTATILE). Salvati in C:/in"
+        );
+        assert_eq!(for_transfer(&ended(Kind::Paste), None), None);
     }
 
     #[test]

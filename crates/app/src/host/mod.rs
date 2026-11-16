@@ -25,7 +25,9 @@
 //! - `rate_adaptation`: the encoder's bitrate fitted to the network.
 //! - `input_gate`: remote input behind the "allow input" switch.
 //! - `input_switch`: what a session does when that switch flips.
-//! - `clipboard`: the shared clipboard of a session.
+//! - `clipboard`: the shared clipboard (text and copied files) of a session.
+//! - `transfers`: the file transfers of a session (pushed, pasted), with the
+//!   permissions read live from `state`.
 //! - `state`: PIN, input and clipboard flags, the shared monitor and end
 //!   signals shared with the handle.
 //! - `cause`: the typed reasons of failures and warnings.
@@ -61,6 +63,7 @@ mod streaming;
 mod test_context;
 #[cfg(test)]
 mod tests;
+mod transfers;
 
 use std::net::SocketAddr;
 
@@ -74,6 +77,7 @@ pub use cause::{HostFailure, HostWarning, SessionFailure};
 
 use crate::access_mode::AccessMode;
 use crate::options::HostOptions;
+use crate::transfer::{TransferCommand, TransferEvent};
 use crate::trust::AuthorizedDevice;
 
 /// Something that happened while sharing. Front-ends render these; the
@@ -128,6 +132,8 @@ pub enum HostEvent {
     /// Windows refused injected input (elevated window, UAC, lock screen).
     /// Sent once per blocked stretch.
     InputBlocked,
+    /// A file transfer with the viewer started, moved on or ended.
+    Transfer(TransferEvent),
     /// Something non-fatal worth showing.
     Warning(HostWarning),
     /// The service ended; `error` explains why if it was not asked to stop.
@@ -171,6 +177,28 @@ impl HostHandle {
     /// nothing it sends is written to this PC's clipboard.
     pub fn set_clipboard_shared(&self, shared: bool) {
         self.service.state().set_clipboard_shared(shared);
+    }
+
+    /// Lets the files the viewer drops or sends in, or not, effective
+    /// immediately (a transfer already accepted goes on). Copied files
+    /// need it too. They also need remote control.
+    pub fn set_receive_files(&self, receive: bool) {
+        self.service.state().set_receive_files(receive);
+    }
+
+    /// Sends `picked` (files and folders) to the connected viewer, into its
+    /// download folder. `false` without a viewer. Progress and the end come
+    /// as [`HostEvent::Transfer`].
+    pub fn send_files(&self, picked: Vec<std::path::PathBuf>) -> bool {
+        self.service
+            .state()
+            .transfer_command(TransferCommand::Send(picked))
+    }
+
+    /// Cancels a transfer of the connected viewer (`None`: all of them).
+    pub fn cancel_transfer(&self, id: Option<protocol::transfer::TransferId>) {
+        let command = id.map_or(TransferCommand::CancelAll, TransferCommand::Cancel);
+        self.service.state().transfer_command(command);
     }
 
     /// Changes how a viewer that is not authorized is let in, effective for

@@ -1,20 +1,25 @@
-//! The real clipboard: `CF_UNICODETEXT` through the Win32 clipboard API.
+//! The real clipboard: `CF_UNICODETEXT` and `CF_HDROP` through the Win32
+//! clipboard API, the other PC's files through OLE (see `window`).
 
+use std::path::PathBuf;
+
+use protocol::transfer::MAX_TRANSFER_ENTRIES;
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
     RegisterClipboardFormatW, SetClipboardData,
 };
-use windows::Win32::System::Memory::{
-    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
-};
-use windows::Win32::System::Ole::CF_UNICODETEXT;
+use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+use windows::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT};
+use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 use windows::core::w;
 
 use super::access::{AccessError, ClipboardAccess};
 use super::encoding;
+use super::global::alloc_bytes;
 use super::rules::ClipboardContent;
-use super::window::ClipboardOwner;
+use super::virtual_files::RemoteFiles;
+use super::window::{ClipboardOwner, ClipboardWindow, FileOffers};
 
 /// The format programs that keep secrets (password managers) put on the
 /// clipboard to ask not to be monitored, clipboard history included.
@@ -25,12 +30,17 @@ const UNIT_BYTES: usize = size_of::<u16>();
 
 pub struct SystemClipboard {
     owner: ClipboardOwner,
+    offers: FileOffers,
 }
 
 impl SystemClipboard {
-    /// The clipboard, opened on behalf of `owner`'s window.
-    pub fn owned_by(owner: ClipboardOwner) -> Self {
-        Self { owner }
+    /// The clipboard, opened on behalf of `window`, which also puts the
+    /// other PC's files on it.
+    pub fn owned_by(window: &ClipboardWindow) -> Self {
+        Self {
+            owner: window.owner(),
+            offers: window.file_offers(),
+        }
     }
 
     /// Opens the clipboard; it closes when the result is dropped. Failing
@@ -59,12 +69,27 @@ impl ClipboardAccess for SystemClipboard {
     fn read(&self) -> Result<ClipboardContent, AccessError> {
         let _open = self.open()?;
         // SAFETY: querying formats needs the clipboard open, which it is.
-        let has_text = unsafe { IsClipboardFormatAvailable(u32::from(CF_UNICODETEXT.0)) }.is_ok();
-        if !has_text {
+        let (has_files, has_text) = unsafe {
+            (
+                IsClipboardFormatAvailable(u32::from(CF_HDROP.0)).is_ok(),
+                IsClipboardFormatAvailable(u32::from(CF_UNICODETEXT.0)).is_ok(),
+            )
+        };
+        if !has_files && !has_text {
             return Ok(ClipboardContent::NoText);
         }
         if excluded_from_monitoring() {
             return Ok(ClipboardContent::Private);
+        }
+        if has_files {
+            // SAFETY: the clipboard is open; the handle stays owned by it.
+            let handle = unsafe { GetClipboardData(u32::from(CF_HDROP.0)) }
+                .map_err(|e| failed("reading the copied files", &e))?;
+            // SAFETY: `handle` is the HDROP of CF_HDROP, valid until the
+            // clipboard closes, which is after this call.
+            return Ok(ClipboardContent::Files(unsafe {
+                dropped_files(HDROP(handle.0))
+            }));
         }
         // SAFETY: the clipboard is open; the handle stays owned by it.
         let handle = unsafe { GetClipboardData(u32::from(CF_UNICODETEXT.0)) }
@@ -79,7 +104,11 @@ impl ClipboardAccess for SystemClipboard {
         let _open = self.open()?;
         // SAFETY: the clipboard is open.
         unsafe { EmptyClipboard() }.map_err(|e| failed("emptying the clipboard", &e))?;
-        let memory = alloc_units(&units)?;
+        // SAFETY: the units, seen as their bytes.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(units.as_ptr().cast::<u8>(), units.len() * UNIT_BYTES)
+        };
+        let memory = alloc_bytes(bytes)?;
         // SAFETY: the clipboard is open and `memory` is a movable block
         // holding NUL-terminated UTF-16, as CF_UNICODETEXT requires.
         let stored =
@@ -94,6 +123,10 @@ impl ClipboardAccess for SystemClipboard {
                 Err(failed("writing the clipboard", &e))
             }
         }
+    }
+
+    fn offer_files(&self, files: RemoteFiles) -> Result<(), AccessError> {
+        self.offers.offer(files)
     }
 }
 
@@ -132,24 +165,26 @@ unsafe fn read_units(memory: HGLOBAL) -> Result<ClipboardContent, AccessError> {
     Ok(content)
 }
 
-/// A movable block of global memory holding `units`.
-fn alloc_units(units: &[u16]) -> Result<HGLOBAL, AccessError> {
-    let bytes = units.len() * UNIT_BYTES;
-    // SAFETY: allocating has no preconditions.
-    let memory = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) }
-        .map_err(|e| failed("allocating clipboard memory", &e))?;
-    // SAFETY: `memory` is a fresh block of `bytes` bytes, locked here for
-    // the copy and unlocked after it.
-    unsafe {
-        let pointer = GlobalLock(memory).cast::<u16>();
-        if pointer.is_null() {
-            let _ = GlobalFree(Some(memory));
-            return Err(AccessError::Failed("locking the clipboard memory".into()));
-        }
-        std::ptr::copy_nonoverlapping(units.as_ptr(), pointer, units.len());
-        let _ = GlobalUnlock(memory);
-    }
-    Ok(memory)
+/// The paths in `drop`: at most one more than a list may hold (so a list
+/// too long is still recognised as such), each as Windows gave it.
+///
+/// # Safety
+/// `drop` must be a valid HDROP that stays valid for the call.
+unsafe fn dropped_files(drop: HDROP) -> Vec<PathBuf> {
+    // SAFETY: per the contract; index 0xFFFFFFFF asks for the count.
+    let count = unsafe { DragQueryFileW(drop, u32::MAX, None) };
+    let wanted = count.min(u32::try_from(MAX_TRANSFER_ENTRIES + 1).unwrap_or(u32::MAX));
+    (0..wanted)
+        .filter_map(|index| {
+            // SAFETY: per the contract; `index` < count. The first call
+            // gives the length without the terminator.
+            let len = unsafe { DragQueryFileW(drop, index, None) } as usize;
+            let mut units = vec![0u16; len + 1];
+            // SAFETY: as above, into a buffer of `len + 1` units.
+            let copied = unsafe { DragQueryFileW(drop, index, Some(&mut units)) } as usize;
+            (copied > 0).then(|| PathBuf::from(String::from_utf16_lossy(&units[..copied])))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -169,7 +204,7 @@ mod tests {
     #[ignore = "replaces the contents of the real clipboard"]
     async fn text_written_is_read_back_and_announced() {
         let (window, mut changes) = ClipboardWindow::open().expect("listener");
-        let clipboard = SystemClipboard::owned_by(window.owner());
+        let clipboard = SystemClipboard::owned_by(&window);
         let text = "wshare è un test \u{1F5A5}\r\nseconda riga";
 
         clipboard.write(text).expect("write");

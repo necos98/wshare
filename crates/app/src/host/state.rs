@@ -1,6 +1,7 @@
 //! State shared between the control handle (any thread, e.g. the GUI) and
-//! the running service (its own runtime): PIN, input permission, the
-//! sessions in progress and the "please end" signals.
+//! the running service (its own runtime): PIN, input, clipboard and file
+//! permissions, the sessions in progress, the way to the viewer's file
+//! transfers and the "please end" signals.
 //!
 //! Everything here is read at the moment it matters (the PIN per connection
 //! attempt, the input flag per event) so changes take effect immediately
@@ -8,10 +9,12 @@
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
 
 use super::sessions::{SessionId, SessionLimits, Sessions};
 use crate::access_mode::AccessMode;
+use crate::transfer::TransferCommand;
 
 /// Fires a one-shot cancellation that async code can await.
 ///
@@ -65,6 +68,9 @@ pub(super) struct SharedState {
     access: Mutex<AccessMode>,
     input_allowed: watch::Sender<bool>,
     clipboard_shared: watch::Sender<bool>,
+    receive_files: watch::Sender<bool>,
+    /// The file transfers of the viewer connected now, if any.
+    transfers: Mutex<Option<UnboundedSender<TransferCommand>>>,
     stop: Cancel,
     stop_listener: Cancelled,
     /// Under one lock with the stop check, so "stop" and "a new session
@@ -77,6 +83,7 @@ impl SharedState {
         pin: String,
         input_allowed: bool,
         clipboard_shared: bool,
+        receive_files: bool,
         access: AccessMode,
         limits: SessionLimits,
     ) -> Self {
@@ -86,6 +93,8 @@ impl SharedState {
             access: Mutex::new(access),
             input_allowed: watch::channel(input_allowed).0,
             clipboard_shared: watch::channel(clipboard_shared).0,
+            receive_files: watch::channel(receive_files).0,
+            transfers: Mutex::new(None),
             stop,
             stop_listener,
             sessions: Mutex::new(Sessions::new(limits)),
@@ -140,6 +149,28 @@ impl SharedState {
     /// A receiver that wakes when the clipboard is turned on or off.
     pub(super) fn watch_clipboard(&self) -> watch::Receiver<bool> {
         self.clipboard_shared.subscribe()
+    }
+
+    /// Lets the viewer's files in, or not, from the next one on.
+    pub(super) fn set_receive_files(&self, receive: bool) {
+        self.receive_files.send_replace(receive);
+    }
+
+    pub(super) fn watch_receive_files(&self) -> watch::Receiver<bool> {
+        self.receive_files.subscribe()
+    }
+
+    /// The admitted viewer's transfers take commands on `commands` (`None`:
+    /// no viewer any more).
+    pub(super) fn set_transfers(&self, commands: Option<UnboundedSender<TransferCommand>>) {
+        *lock(&self.transfers) = commands;
+    }
+
+    /// Hands `command` to the viewer's transfers; `false` without a viewer.
+    pub(super) fn transfer_command(&self, command: TransferCommand) -> bool {
+        lock(&self.transfers)
+            .as_ref()
+            .is_some_and(|commands| commands.send(command).is_ok())
     }
 
     /// Registers a new connection to admit. The session lasts as long as
@@ -222,6 +253,7 @@ mod tests {
             "111111".into(),
             true,
             true,
+            true,
             AccessMode::PinOnly,
             SessionLimits::default(),
         ))
@@ -268,6 +300,30 @@ mod tests {
         assert!(watcher.has_changed().unwrap());
         assert!(!*watcher.borrow_and_update());
         assert!(!*state.watch_clipboard().borrow());
+    }
+
+    #[test]
+    fn file_commands_reach_the_session_that_takes_them_and_only_it() {
+        let state = state();
+        assert!(
+            !state.transfer_command(TransferCommand::CancelAll),
+            "no viewer"
+        );
+        let (commands, mut taken) = tokio::sync::mpsc::unbounded_channel();
+        state.set_transfers(Some(commands));
+        assert!(state.transfer_command(TransferCommand::CancelAll));
+        assert_eq!(taken.try_recv(), Ok(TransferCommand::CancelAll));
+        state.set_transfers(None);
+        assert!(!state.transfer_command(TransferCommand::CancelAll));
+    }
+
+    #[test]
+    fn the_reception_of_files_is_read_live() {
+        let state = state();
+        let watcher = state.watch_receive_files();
+        assert!(*watcher.borrow());
+        state.set_receive_files(false);
+        assert!(!*watcher.borrow());
     }
 
     #[test]

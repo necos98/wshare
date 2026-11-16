@@ -12,6 +12,9 @@ use crate::access_mode::AccessMode;
 use crate::host::{HostFailure, HostWarning, SessionFailure};
 use crate::viewer::report::FailureCause;
 
+mod transfer;
+pub use transfer::*;
+
 // --- Why a viewer ended -------------------------------------------------
 
 /// What a viewer that failed for `cause` means for the user.
@@ -158,6 +161,9 @@ pub fn host_warning(warning: &HostWarning) -> String {
         ),
         HostWarning::ClipboardFailed(detail) => {
             format!("Condivisione degli appunti non riuscita: {detail}")
+        }
+        HostWarning::FilesNotShared(detail) => {
+            format!("I file copiati non si possono incollare sull'altro computer: {detail}")
         }
         HostWarning::ScreenUnavailable(detail) => format!(
             "Impossibile condividere lo schermo scelto dal visualizzatore: resta quello di \

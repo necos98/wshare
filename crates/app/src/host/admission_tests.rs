@@ -74,7 +74,7 @@ async fn connected(access: AccessMode, pin: Option<&str>) -> Setup {
         )
         .await
         .unwrap();
-        let (mut tx, rx, _) = session.split();
+        let (mut tx, rx, _, _) = session.split();
         tx.send(&hello).await.unwrap();
         (tx, rx)
     };
@@ -93,7 +93,7 @@ async fn connected(access: AccessMode, pin: Option<&str>) -> Setup {
         server.peer_fingerprint(),
         server.handle(),
     );
-    let (tx, rx, video) = server.split();
+    let (tx, rx, video, _) = server.split();
     Setup {
         host,
         viewer,

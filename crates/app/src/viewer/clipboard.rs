@@ -1,14 +1,16 @@
-//! The viewer's side of the shared clipboard: the text copied here goes to
-//! the host when this viewer may control it, and the host's text goes to
-//! this clipboard.
+//! The viewer's side of the shared clipboard: the text and files copied
+//! here go to the host when this viewer may control it, and the host's go
+//! to this clipboard.
 //!
 //! Problems never end the session: each kind is said once on the terminal
 //! (`wshare view` prints its warnings there) and the session goes on.
 
 use protocol::control::{ControlMessage, MAX_CLIPBOARD_BYTES};
+use protocol::transfer::{FileEntry, OfferId};
 
 use crate::clipboard::{
-    AccessError, ClipboardAccess, ClipboardSync, Outgoing, Received, SystemClipboard, ViewerRules,
+    AccessError, ClipboardAccess, ClipboardSync, FileSharing, Outgoing, Received, SystemClipboard,
+    ViewerRules, share_copied_files,
 };
 
 pub struct ViewerClipboard<A = SystemClipboard> {
@@ -51,26 +53,53 @@ impl<A: ClipboardAccess> ViewerClipboard<A> {
         }
     }
 
-    /// What to send the host now that the local clipboard changed.
-    pub async fn local_change(&mut self) -> Option<ControlMessage> {
+    /// What to send the host now that the local clipboard changed. Copied
+    /// files are offered through `files`, which sends their list.
+    pub async fn local_change(&mut self, files: &dyn FileSharing) -> Option<ControlMessage> {
         if !self.rules.send_to_host() {
+            files.withdraw();
             return None;
         }
-        match self.link.as_mut()?.read_outgoing().await {
-            Ok(Outgoing::Send(text)) => Some(ControlMessage::Clipboard(text)),
-            Ok(Outgoing::Skip) => None,
-            Ok(Outgoing::TooLarge { first }) => {
-                if first {
-                    eprintln!(
-                        "warning: the copied text is too long to share (over {} KiB)",
-                        MAX_CLIPBOARD_BYTES / 1024
-                    );
-                }
-                None
-            }
+        let outgoing = match self.link.as_mut()?.read_outgoing().await {
+            Ok(outgoing) => outgoing,
             Err(e) => {
                 self.report_failure(&e);
+                return None;
+            }
+        };
+        let not_shared = Box::new(|detail: String| {
+            eprintln!("warning: the copied files cannot be shared: {detail}");
+        });
+        share_copied_files(&outgoing, files, not_shared);
+        match outgoing {
+            Outgoing::Send(text) => Some(ControlMessage::Clipboard(text)),
+            Outgoing::TooLarge { first: true } => {
+                eprintln!(
+                    "warning: the copied text is too long to share (over {} KiB)",
+                    MAX_CLIPBOARD_BYTES / 1024
+                );
                 None
+            }
+            _ => None,
+        }
+    }
+
+    /// The host copied the files `entries`: they become pasteable here,
+    /// fetched through `files` when pasted.
+    pub fn remote_files(
+        &mut self,
+        offer: OfferId,
+        entries: Vec<FileEntry>,
+        files: &dyn FileSharing,
+    ) -> Received {
+        let Some(link) = self.link.as_mut() else {
+            return Received::Ignored;
+        };
+        match link.receive_files(offer, entries, files) {
+            Ok(received) => received,
+            Err(e) => {
+                self.report_failure(&e);
+                Received::Ignored
             }
         }
     }
@@ -101,6 +130,7 @@ mod tests {
     use super::*;
     use crate::clipboard::ClipboardContent;
     use crate::clipboard::fake::{FakeClipboard, link};
+    use crate::clipboard::fake_sharing::FakeSharing;
 
     fn viewer(
         host_allows: bool,
@@ -124,8 +154,44 @@ mod tests {
         let (mut viewer, copied) = viewer(true, false);
         copy(&copied, "ciao");
         assert_eq!(
-            viewer.local_change().await,
+            viewer.local_change(&FakeSharing::default()).await,
             Some(ControlMessage::Clipboard("ciao".into()))
+        );
+    }
+
+    fn copy_files(clipboard: &FakeClipboard, path: &str) {
+        let files = vec![std::path::PathBuf::from(path)];
+        clipboard.0.borrow_mut().content = Some(ClipboardContent::Files(files));
+    }
+
+    #[tokio::test]
+    async fn files_copied_here_are_offered_to_a_host_that_allows_control() {
+        let (mut viewer, copied) = viewer(true, false);
+        let files = FakeSharing::default();
+        copy_files(&copied, "C:\\a.txt");
+        assert_eq!(viewer.local_change(&files).await, None);
+        assert_eq!(files.offered.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_view_only_viewer_offers_no_files() {
+        let (mut viewer, copied) = viewer(true, true);
+        let files = FakeSharing::default();
+        copy_files(&copied, "C:\\a.txt");
+        assert_eq!(viewer.local_change(&files).await, None);
+        assert!(files.offered.lock().unwrap().is_empty());
+        assert_eq!(*files.withdrawn.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_hosts_files_arrive_even_in_view_only() {
+        let (mut viewer, copied) = viewer(false, true);
+        let entries = vec![FileEntry::folder("D"), FileEntry::file("D/x", 1)];
+        let received = viewer.remote_files(OfferId(3), entries, &FakeSharing::default());
+        assert_eq!(received, Received::Applied);
+        assert_eq!(
+            copied.0.borrow().offered,
+            [vec!["D".to_string(), "D/x".to_string()]]
         );
     }
 
@@ -133,23 +199,23 @@ mod tests {
     async fn a_view_only_viewer_sends_nothing() {
         let (mut viewer, copied) = viewer(true, true);
         copy(&copied, "ciao");
-        assert_eq!(viewer.local_change().await, None);
+        assert_eq!(viewer.local_change(&FakeSharing::default()).await, None);
     }
 
     #[tokio::test]
     async fn nothing_is_sent_while_the_host_forbids_control() {
         let (mut viewer, copied) = viewer(false, false);
         copy(&copied, "ciao");
-        assert_eq!(viewer.local_change().await, None);
+        assert_eq!(viewer.local_change(&FakeSharing::default()).await, None);
 
         viewer.set_host_allows(true);
         assert_eq!(
-            viewer.local_change().await,
+            viewer.local_change(&FakeSharing::default()).await,
             Some(ControlMessage::Clipboard("ciao".into()))
         );
         viewer.set_host_allows(false);
         copy(&copied, "altro");
-        assert_eq!(viewer.local_change().await, None);
+        assert_eq!(viewer.local_change(&FakeSharing::default()).await, None);
     }
 
     #[tokio::test]
@@ -163,7 +229,7 @@ mod tests {
     async fn the_hosts_text_does_not_come_back() {
         let (mut viewer, _copied) = viewer(true, false);
         viewer.remote_text("dal host").await;
-        assert_eq!(viewer.local_change().await, None);
+        assert_eq!(viewer.local_change(&FakeSharing::default()).await, None);
     }
 
     #[tokio::test]
@@ -191,7 +257,7 @@ mod tests {
                 view_only: false,
             },
         );
-        assert_eq!(viewer.local_change().await, None);
+        assert_eq!(viewer.local_change(&FakeSharing::default()).await, None);
         assert_eq!(viewer.remote_text("a").await, Received::Ignored);
     }
 }

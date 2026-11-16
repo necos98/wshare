@@ -54,6 +54,8 @@ mod tests {
             allow_input: false,
             share_clipboard: false,
             access: AccessMode::PinOrConfirmation,
+            receive_files: false,
+            downloads: "D:/Ricevuti".into(),
             viewer_fullscreen: true,
             viewer_stats: true,
             viewer_view_only: true,

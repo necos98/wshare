@@ -6,6 +6,9 @@
 //!   peer once data has been written on it.
 //! - **Video channel**: unreliable QUIC DATAGRAMs, already packetized by the
 //!   caller to at most [`VideoChannel::max_datagram_size`] bytes.
+//! - **File channel**: one unidirectional stream per file transferred (at
+//!   most `protocol::transfer::MAX_FILE_STREAMS` at once), below the
+//!   control stream in priority.
 //!
 //! Security model: both sides hold a self-signed certificate ([`Identity`])
 //! and are identified by its SHA-256 [`Fingerprint`], never by a CA.
@@ -34,11 +37,12 @@
 //! - `transport`: QUIC transport parameters tuned for LAN video.
 //! - [`endpoint`]: host endpoint and viewer [`connect`].
 //! - [`session`]: a connected session and its handle.
-//! - [`control`] / [`video`]: channel wrappers.
+//! - [`control`] / [`video`] / [`files`]: channel wrappers.
 //! - [`stats`]: transport statistics (RTT, congestion window, losses).
 
 pub mod control;
 pub mod endpoint;
+pub mod files;
 pub mod identity;
 pub mod session;
 mod socket;
@@ -49,6 +53,7 @@ pub mod video;
 
 pub use control::{ControlReceiver, ControlSender};
 pub use endpoint::{ConnectError, HostEndpoint, IdentityMismatch, Incoming, connect};
+pub use files::{FileChannel, FileReceiver, FileSender, IncomingFile};
 pub use identity::{Fingerprint, Identity};
 pub use session::{Session, SessionHandle};
 pub use stats::TransportStats;

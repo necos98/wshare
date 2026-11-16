@@ -4,6 +4,8 @@
 //!
 //! Pure data and rules: no I/O here.
 
+use std::path::PathBuf;
+
 use codec::Codec;
 use serde::{Deserialize, Serialize};
 
@@ -62,6 +64,12 @@ pub struct Settings {
     pub share_clipboard: bool,
     /// How a viewer that is not authorized is let in (see `AccessMode`).
     pub access: AccessMode,
+    /// Whether the viewer may drop, send or paste files on this PC (they
+    /// also need `allow_input`).
+    pub receive_files: bool,
+    /// Where received files land, on this PC as host and as viewer; empty:
+    /// `Downloads\wshare`.
+    pub downloads: String,
     // Viewer windows opened from this PC.
     pub viewer_fullscreen: bool,
     pub viewer_stats: bool,
@@ -87,6 +95,8 @@ impl Default for Settings {
             allow_input: true,
             share_clipboard: true,
             access: AccessMode::PinOnly,
+            receive_files: true,
+            downloads: String::new(),
             viewer_fullscreen: false,
             viewer_stats: false,
             viewer_view_only: false,
@@ -132,6 +142,12 @@ impl Settings {
         self
     }
 
+    /// The folder chosen for received files; `None`: the default one.
+    pub fn downloads_folder(&self) -> Option<PathBuf> {
+        let folder = self.downloads.trim();
+        (!folder.is_empty()).then(|| PathBuf::from(folder))
+    }
+
     /// How the viewer windows opened from now on look.
     pub fn viewer_display(&self) -> ViewerDisplay {
         ViewerDisplay {
@@ -160,6 +176,8 @@ impl Settings {
             view_only: !self.allow_input,
             share_clipboard: self.share_clipboard,
             access: self.access,
+            receive_files: self.receive_files,
+            downloads: self.downloads_folder(),
         }
     }
 
@@ -180,6 +198,8 @@ mod tests {
         assert_eq!(settings.port, DEFAULT_PORT);
         assert!(settings.allow_input);
         assert!(settings.share_clipboard);
+        assert!(settings.receive_files, "files are accepted by default");
+        assert_eq!(settings.downloads_folder(), None);
         assert!(settings.notifications && settings.connection_indicator);
         assert_eq!(
             settings.access,
@@ -229,6 +249,22 @@ mod tests {
         assert!(options.view_only);
         assert!(!options.share_clipboard);
         assert_eq!(options.pin, None);
+        assert!(options.receive_files);
+        assert_eq!(options.downloads, None);
+    }
+
+    #[test]
+    fn the_download_folder_is_the_one_typed_or_the_default() {
+        let mut settings = Settings {
+            receive_files: false,
+            downloads: "  D:\\Ricevuti  ".into(),
+            ..Settings::default()
+        };
+        let options = settings.host_options();
+        assert!(!options.receive_files);
+        assert_eq!(options.downloads, Some(PathBuf::from("D:\\Ricevuti")));
+        settings.downloads = "   ".into();
+        assert_eq!(settings.downloads_folder(), None);
     }
 
     #[test]

@@ -12,13 +12,15 @@ pub enum Page {
 }
 
 impl GuiState {
-    /// The sharing runs with streaming settings other than the saved ones:
-    /// they apply after a restart.
+    /// The sharing runs with streaming settings (or a download folder)
+    /// other than the saved ones: they apply after a restart.
     pub fn restart_needed(&self) -> bool {
         self.sharing.enabled
             && self.applied.as_ref().is_some_and(|applied| {
                 let saved = self.settings.host_options();
-                applied.stream != saved.stream || applied.port != saved.port
+                applied.stream != saved.stream
+                    || applied.port != saved.port
+                    || applied.downloads != saved.downloads
             })
     }
 

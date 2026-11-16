@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pipeline::backlog::MAX_SEND_BACKLOG;
+use protocol::transfer::MAX_FILE_STREAMS;
 use quinn::{IdleTimeout, MtuDiscoveryConfig, TransportConfig, VarInt};
 
 /// Keep-alives keep NAT/firewall state warm and let a dead peer be noticed
@@ -67,8 +68,9 @@ pub(crate) fn transport_config() -> Arc<TransportConfig> {
         // Starts at the 1200-byte QUIC minimum and probes up (to ~1452 on
         // Ethernet), so `max_datagram_size` grows shortly after connecting.
         .mtu_discovery_config(Some(MtuDiscoveryConfig::default()))
-        // Video is the only bulk traffic; nothing else needs many streams.
-        .max_concurrent_uni_streams(VarInt::from_u32(0))
+        // One stream per file being transferred, up to a few at once;
+        // control needs a single bidirectional one.
+        .max_concurrent_uni_streams(VarInt::from_u32(MAX_FILE_STREAMS))
         .max_concurrent_bidi_streams(VarInt::from_u32(1));
     Arc::new(config)
 }

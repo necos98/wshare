@@ -6,12 +6,18 @@ use discovery::DiscoveredHost;
 use crate::text;
 
 use super::super::ports::{
-    KnownHostsStore, SettingsBackend, SharingService, ViewerLauncher, WakeOnLan,
+    Desktop, KnownHostsStore, SettingsBackend, SharingService, ViewerLauncher, WakeOnLan,
 };
 use super::Controller;
 
-impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBackend, W: WakeOnLan>
-    Controller<S, L, K, B, W>
+impl<
+    S: SharingService,
+    L: ViewerLauncher,
+    K: KnownHostsStore,
+    B: SettingsBackend,
+    W: WakeOnLan,
+    D: Desktop,
+> Controller<S, L, K, B, W, D>
 {
     /// A known host announced itself: stores the address and MAC it gave
     /// if they are not the ones kept, so it can be found and woken later.

@@ -2,6 +2,7 @@
 //! resizes and local input, and runs the viewer's hotkeys; all video work
 //! happens on the render thread.
 
+use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -9,6 +10,7 @@ use pipeline::ViewerStats;
 use protocol::control::{ControlMessage, StreamInfo};
 use protocol::input::CursorShape;
 use protocol::session::MonitorEntry;
+use tokio::sync::mpsc::UnboundedSender;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{MouseButton, WindowEvent};
@@ -29,6 +31,10 @@ use super::remote::RemoteControl;
 use super::render_thread::{RenderInput, RenderThread};
 use super::stats::LinkProbe;
 use super::toolbar::{BarAction, ControlBar, LEFT};
+use super::window_files::WindowFiles;
+use crate::desktop::{self, Choice};
+use crate::text;
+use crate::transfer::{TransferCommand, TransferEvent};
 
 /// The control bar with the renderer's geometry (the one it draws with).
 type Bar = ControlBar<fn((u32, u32), f32, usize, bool) -> render::ToolbarGeometry>;
@@ -56,6 +62,18 @@ pub enum UserEvent {
     /// The host started its stream over: the video is `StreamInfo` now.
     StreamChanged(StreamInfo),
     Hotkey(Hotkey),
+    /// A file transfer started, moved on or ended.
+    Transfer(TransferEvent),
+    /// The files chosen in the "Invia file…" dialog (none: cancelled).
+    FilesChosen(Vec<PathBuf>),
+}
+
+/// Where the window's requests to the host go.
+pub struct HostRequests {
+    /// Control messages (input, keyframes, the session menu).
+    pub control: Outgoing,
+    /// File commands (dropped or chosen files, cancellations).
+    pub files: UnboundedSender<TransferCommand>,
 }
 
 /// How the window starts.
@@ -82,6 +100,7 @@ pub struct ViewerWindow {
     remote: RemoteControl,
     cursors: CursorCache,
     bar: Bar,
+    files: WindowFiles,
     window: Option<Window>,
     /// Installed only in full screen (like Remote Desktop): then Alt+Tab,
     /// the Windows key etc. go to the host; in a window they stay local and
@@ -103,10 +122,14 @@ impl ViewerWindow {
         stream: StreamInfo,
         video: VideoIn,
         link: LinkProbe,
-        outgoing: Outgoing,
+        requests: HostRequests,
         policy: ControlPolicy,
         proxy: EventLoopProxy<UserEvent>,
     ) -> Self {
+        let HostRequests {
+            control: outgoing,
+            files,
+        } = requests;
         let remote = RemoteControl::new(
             outgoing.clone(),
             policy.enabled(),
@@ -122,6 +145,7 @@ impl ViewerWindow {
             remote,
             cursors: CursorCache::default(),
             bar: ControlBar::new(render::toolbar_geometry as _),
+            files: WindowFiles::new(files),
             window: None,
             hook: None,
             render: None,
@@ -151,8 +175,10 @@ impl ViewerWindow {
         let mut attributes = Window::default_attributes()
             .with_title(&self.options.title)
             .with_inner_size(LogicalSize::new(width, height))
-            // OLE drag-and-drop would force an STA on this thread; unneeded.
-            .with_drag_and_drop(false);
+            // Files dropped on the window go to the host. This makes the
+            // window's thread an OLE apartment (STA), which is fine: video
+            // and network work run elsewhere.
+            .with_drag_and_drop(true);
         if self.options.fullscreen {
             attributes = attributes.with_fullscreen(Some(Fullscreen::Borderless(None)));
         }
@@ -277,7 +303,46 @@ impl ViewerWindow {
             BarAction::Disconnect => self.close(event_loop),
             BarAction::SelectMonitor(index) => self.ask_host(ControlMessage::SelectMonitor(index)),
             BarAction::SetQuality(quality) => self.ask_host(ControlMessage::SetQuality(quality)),
+            BarAction::SendFiles => self.choose_files(),
+            BarAction::CancelTransfers => self.files.cancel_all(),
+            BarAction::OpenReceived => {
+                if let Some(folder) = self.files.received_folder()
+                    && let Err(e) = desktop::open_folder(folder)
+                {
+                    eprintln!("warning: {e:#}");
+                }
+            }
         }
+    }
+
+    /// Opens the dialog for the files to send. Full screen ends first: the
+    /// dialog would open behind it.
+    fn choose_files(&mut self) {
+        if self
+            .window
+            .as_ref()
+            .is_some_and(|w| w.fullscreen().is_some())
+        {
+            self.set_fullscreen(false);
+        }
+        let proxy = self.proxy.clone();
+        desktop::choose(Choice::Files, text::FILES_PICK_TITLE, move |chosen| {
+            let _ = proxy.send_event(UserEvent::FilesChosen(chosen));
+        });
+    }
+
+    /// Shows what a transfer event changed: the progress line, the end
+    /// message, the "File" menu.
+    fn show_transfer(&mut self, event: TransferEvent) {
+        let view = self.files.on_event(event);
+        if let Some(render) = &self.render {
+            render.set_transfers(view.progress);
+            if let Some(message) = view.message {
+                render.show_message(message);
+            }
+        }
+        self.bar.set_files(view.menu, Instant::now());
+        self.sync_bar();
     }
 
     /// Sends a request the user made to the host.
@@ -378,6 +443,7 @@ impl ApplicationHandler<UserEvent> for ViewerWindow {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => self.remote.wheel(delta),
+            WindowEvent::DroppedFile(path) => self.files.dropped(path),
             // A working hook (full screen) swallows every key it handles, so
             // those never reach winit; whatever does arrive here was not
             // handled by a hook and must be routed now. This also keeps the
@@ -426,6 +492,8 @@ impl ApplicationHandler<UserEvent> for ViewerWindow {
             UserEvent::Reconnecting => self.set_reconnecting(true),
             UserEvent::Reconnected => self.set_reconnecting(false),
             UserEvent::Hotkey(hotkey) => self.run_hotkey(hotkey),
+            UserEvent::Transfer(event) => self.show_transfer(event),
+            UserEvent::FilesChosen(chosen) => self.files.send_chosen(chosen),
             UserEvent::HostLeft(failure) => {
                 println!("{failure}");
                 self.host_left = Some(failure);
@@ -439,6 +507,7 @@ impl ApplicationHandler<UserEvent> for ViewerWindow {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.files.send_dropped();
         self.bar.tick(Instant::now());
         self.sync_bar();
         event_loop.set_control_flow(match self.bar.next_deadline() {

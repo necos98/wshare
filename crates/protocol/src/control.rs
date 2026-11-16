@@ -29,6 +29,8 @@
 //!   host -> viewer  StreamChanged(stream)   (capture and encoder started
 //!                                            over: another monitor, quality
 //!                                            or resolution; same connection)
+//!   either          Transfer(message)       (files pushed or pasted, see
+//!                                            [`crate::transfer`])
 //!   either          Bye
 //!
 //! Compatibility: peers of different protocol versions must still understand
@@ -49,6 +51,7 @@ use crate::feedback::ReceptionReport;
 use crate::input::{CursorShape, InputEvent};
 use crate::recovery::Nack;
 use crate::session::{MonitorEntry, Quality};
+use crate::transfer::TransferMessage;
 
 /// 2: remote control (Input, Cursor, CursorVisible; Welcome.input_allowed).
 /// 3: InputAllowed; StreamInfo.encoder.
@@ -67,7 +70,9 @@ use crate::session::{MonitorEntry, Quality};
 /// 9: AwaitingApproval (host): the person at the host is asked to accept or
 ///    refuse the viewer; `Welcome` or `Rejected` follows. Its refusals
 ///    (`Denied`, `Expired`, `TooManyRequests`) keep the text form.
-pub const PROTOCOL_VERSION: u16 = 9;
+/// 10: Transfer (either side): files cross between the two PCs, pushed or
+///    copied and pasted, each on a unidirectional stream of its own.
+pub const PROTOCOL_VERSION: u16 = 10;
 
 /// Upper bound for one control message; protects against garbage lengths.
 /// Sized for the largest cursor image (256x256 RGBA = 256 KiB) plus margin.
@@ -258,6 +263,8 @@ pub enum ControlMessage {
     /// accept or refuse it: sent once, after `Hello`, and followed by
     /// `Welcome` or `Rejected` (`Denied`, or `Expired` when nobody answered).
     AwaitingApproval,
+    /// A step of a file transfer (see [`crate::transfer`]).
+    Transfer(TransferMessage),
 }
 
 /// Serializes `msg` as one length-prefixed frame.
@@ -465,6 +472,13 @@ mod tests {
                 reason: RejectReason::TooManyRequests,
             },
             ControlMessage::AwaitingApproval,
+            ControlMessage::Transfer(TransferMessage::Offer {
+                id: crate::transfer::TransferId(3),
+                entries: vec![
+                    crate::transfer::FileEntry::folder("Foto"),
+                    crate::transfer::FileEntry::file("Foto/mare.jpg", 1 << 40),
+                ],
+            }),
             ControlMessage::RequestKeyframe,
             ControlMessage::Bye,
         ]
@@ -744,6 +758,12 @@ mod tests {
         assert_eq!(index(ControlMessage::SetQuality(Quality::Automatic)), 15);
         assert_eq!(index(ControlMessage::StreamChanged(sample_stream())), 16);
         assert_eq!(index(ControlMessage::AwaitingApproval), 17);
+        assert_eq!(
+            index(ControlMessage::Transfer(TransferMessage::Cancel {
+                id: crate::transfer::TransferId(0)
+            })),
+            18
+        );
     }
 
     fn sample_stream() -> StreamInfo {

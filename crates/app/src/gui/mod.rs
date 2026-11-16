@@ -7,6 +7,9 @@
 //!   (viewer child processes), `discovery_source`, `known_hosts_file` and
 //!   `system_settings` (settings file, `autostart` registry entry,
 //!   monitors).
+//! - `transfers` holds the file transfers of the sharing and of each viewer
+//!   window (`transfers_view` draws them); `shell` is the `Desktop` port
+//!   (file dialogs, Explorer).
 //! - `host_row` builds the list of computers (online ones and the known
 //!   ones that are not, favorites first); `wake_on_lan` sends the magic
 //!   packet that turns one on.
@@ -49,8 +52,11 @@ mod settings_file;
 mod settings_state;
 mod settings_view;
 mod sharing;
+mod shell;
 mod status_icon;
 mod system_settings;
+mod transfers;
+mod transfers_view;
 mod tray;
 mod view;
 mod viewer_processes;
@@ -105,10 +111,11 @@ pub fn run(gui: GuiOptions) -> Result<()> {
             let overlay = overlay::Overlay::new(inbox.clone()).ok();
             let mut controller = Controller::new(
                 sharing::HostService::new(inbox.clone()),
-                launcher::ProcessLauncher::new(inbox)?,
+                launcher::ProcessLauncher::new(inbox.clone())?,
                 known_hosts_file::KnownHostsFile,
                 system_settings::SystemSettings,
                 wake_on_lan::UdpWakeOnLan,
+                shell::WindowsShell::new(inbox),
             );
             controller.start_up();
             Ok(Box::new(WshareApp::new(

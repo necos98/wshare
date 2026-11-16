@@ -8,6 +8,7 @@
 //! Every outcome is reported as a [`HostEvent`]; nothing here prints.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -15,15 +16,16 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use capture::MonitorInfo;
 use input::RemoteInput;
-use net::{ControlReceiver, ControlSender, Session, SessionHandle, VideoChannel};
+use net::{ControlReceiver, ControlSender, FileChannel, Session, SessionHandle, VideoChannel};
 use pipeline::HostStats;
 use protocol::control::{ControlMessage, RejectReason, StreamInfo};
+use protocol::transfer::TransferMessage;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::sync::watch;
 
 use super::admission::{Admission, Applicant, admit, send_rejection, viewer_trust};
 use super::approvals::Approvals;
-use super::clipboard::SessionClipboard;
+use super::clipboard::{ClipboardSettings, SessionClipboard};
 use super::devices::Devices;
 use super::events::EventSink;
 use super::input_gate::InputGate;
@@ -34,6 +36,7 @@ use super::screen_choice::{ScreenChoice, start_monitor};
 use super::screen_switch::{InputTarget, SessionScreens};
 use super::state::{Cancelled, SessionTicket, SharedState};
 use super::streaming::{StreamEnd, StreamPlan, StreamUpdate, StreamingThread};
+use super::transfers::SessionTransfers;
 use super::{HostEvent, HostWarning, SessionFailure};
 use crate::options::StreamOptions;
 
@@ -48,6 +51,8 @@ const FAREWELL_GRACE: Duration = Duration::from_secs(1);
 pub(super) struct SessionContext {
     pub(super) host_name: String,
     pub(super) stream: StreamOptions,
+    /// Where the files the viewer sends land.
+    pub(super) downloads: PathBuf,
     /// The monitor sessions start on: the one in `stream` until a viewer
     /// picks another, which the next viewers then get too.
     pub(super) monitor: AtomicUsize,
@@ -74,7 +79,7 @@ pub(super) async fn serve_viewer(session: Session, ctx: &SessionContext, ticket:
     let handle = session.handle();
     // Proven by the TLS handshake; `None` if the viewer has no certificate.
     let certificate = session.peer_fingerprint();
-    let (mut tx, mut rx, video) = session.split();
+    let (mut tx, mut rx, video, files) = session.split();
     let applicant = Applicant {
         address,
         trust: viewer_trust(certificate.as_ref(), &ctx.devices),
@@ -93,7 +98,13 @@ pub(super) async fn serve_viewer(session: Session, ctx: &SessionContext, ticket:
                 name: viewer_name,
                 handle: handle.clone(),
             };
-            serve_admitted(viewer, Channels { tx, rx, video }, ctx, cancel).await;
+            let channels = Channels {
+                tx,
+                rx,
+                video,
+                files,
+            };
+            serve_admitted(viewer, channels, ctx, cancel).await;
         }
         Admission::Refused { reason } => {
             ctx.events
@@ -117,6 +128,7 @@ struct Channels {
     tx: ControlSender,
     rx: ControlReceiver,
     video: VideoChannel,
+    files: FileChannel,
 }
 
 /// Sets up streaming, sends Welcome, serves the viewer, then cleans up.
@@ -130,6 +142,7 @@ async fn serve_admitted(
         mut tx,
         mut rx,
         video,
+        files,
     } = channels;
     let address = viewer.address;
     let refuse = async |tx: &mut ControlSender, reason: RejectReason| {
@@ -198,7 +211,12 @@ async fn serve_admitted(
     streaming.go();
 
     let mut gate = InputGate::new(input);
-    let clipboard = SessionClipboard::open(ctx.state.watch_clipboard(), ctx.events.clone());
+    let settings = ClipboardSettings {
+        sharing: ctx.state.watch_clipboard(),
+        receive_files: ctx.state.watch_receive_files(),
+    };
+    let clipboard = SessionClipboard::open(settings, ctx.events.clone());
+    let transfers = SessionTransfers::start(files, ctx);
     let loop_state = ControlLoop {
         tx: &mut tx,
         rx: &mut rx,
@@ -208,6 +226,7 @@ async fn serve_admitted(
         allowed,
         switch: InputSwitch::new(told),
         clipboard,
+        transfers,
         screens,
         monitor: &ctx.monitor,
         cancel: &mut cancel,
@@ -275,8 +294,10 @@ struct ControlLoop<'a> {
     gate: &'a mut InputGate<RemoteInput>,
     allowed: watch::Receiver<bool>,
     switch: InputSwitch,
-    /// The text copied on either PC, while the session lasts.
+    /// The text and files copied on either PC, while the session lasts.
     clipboard: SessionClipboard,
+    /// The files sent, dropped or pasted, both ways.
+    transfers: SessionTransfers,
     /// The monitor and quality the viewer chose.
     screens: SessionScreens,
     /// Where the monitor chosen is kept for the next sessions.
@@ -306,6 +327,7 @@ impl ControlLoop<'_> {
                         let allowed = *self.allowed.borrow();
                         self.clipboard.remote_text(&text, allowed).await;
                     }
+                    Some(ControlMessage::Transfer(message)) => self.on_transfer(message),
                     // Watching is choosing too: allowed without remote control.
                     Some(ControlMessage::SelectMonitor(index)) => {
                         let monitors = self.monitors();
@@ -320,9 +342,11 @@ impl ControlLoop<'_> {
                     Some(_) => {} // ignore unexpected messages
                 },
                 Some(update) = self.updates.recv() => self.forward(update).await?,
+                message = self.transfers.next() => self.tx.send(&message).await?,
                 () = self.clipboard.changed() => {
                     let allowed = *self.allowed.borrow();
-                    if let Some(message) = self.clipboard.local_change(allowed).await {
+                    let files = &self.transfers.hub;
+                    if let Some(message) = self.clipboard.local_change(allowed, files).await {
                         self.tx.send(&message).await?;
                     }
                 }
@@ -353,6 +377,19 @@ impl ControlLoop<'_> {
                     });
                 }
             }
+        }
+    }
+
+    /// A step of a file transfer: the viewer's copied files go to the
+    /// clipboard, the rest to the transfers.
+    fn on_transfer(&mut self, message: TransferMessage) {
+        match message {
+            TransferMessage::ClipboardFiles { offer, entries } => {
+                let allowed = *self.allowed.borrow();
+                let files = &self.transfers.hub;
+                self.clipboard.remote_files(offer, entries, allowed, files);
+            }
+            other => self.transfers.hub.on_message(other),
         }
     }
 

@@ -1,6 +1,8 @@
-//! Pure rules of the shared clipboard: who may move text in which
+//! Pure rules of the shared clipboard: who may move text and files in which
 //! direction, which text is worth sending, and what keeps a text from
 //! bouncing between the two PCs forever.
+
+use std::path::PathBuf;
 
 use protocol::control::MAX_CLIPBOARD_BYTES;
 
@@ -8,7 +10,10 @@ use protocol::control::MAX_CLIPBOARD_BYTES;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClipboardContent {
     Text(String),
-    /// Something else (an image, files) or nothing: never shared.
+    /// Files and folders copied in Explorer (`CF_HDROP`).
+    Files(Vec<PathBuf>),
+    /// Something else (an image, the other PC's files) or nothing: never
+    /// shared.
     NoText,
     /// The program that copied it asked not to be monitored (password
     /// managers do): it stays on this PC.
@@ -21,6 +26,10 @@ pub enum ClipboardContent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outgoing {
     Send(String),
+    /// Offer these files: the other PC can paste them.
+    SendFiles(Vec<PathBuf>),
+    /// The files offered last are still what is copied: nothing new.
+    Unchanged,
     /// Nothing to send: not text, private, empty, or the text the other PC
     /// just gave us.
     Skip,
@@ -38,6 +47,8 @@ pub struct HostRules {
     pub sharing: bool,
     /// Whether the viewer may control this PC.
     pub input_allowed: bool,
+    /// The "Consenti ricezione file" setting.
+    pub receive_files: bool,
 }
 
 impl HostRules {
@@ -51,6 +62,26 @@ impl HostRules {
     /// control, and the setting that turns the clipboard off.
     pub fn accept_from_viewer(self) -> bool {
         self.sharing && self.input_allowed
+    }
+
+    /// The files the host copies can be pasted on the viewer: the same
+    /// rule as for text.
+    pub fn send_files_to_viewer(self) -> bool {
+        self.send_to_viewer()
+    }
+
+    /// The files the viewer copies can be pasted here: as for text, and
+    /// the host must accept files at all.
+    pub fn accept_files_from_viewer(self) -> bool {
+        self.accept_from_viewer() && self.receive_files
+    }
+
+    /// The viewer may drop files on its window or send them: they arrive
+    /// in this PC's download folder. It needs remote control (receiving
+    /// files is a way of acting on this PC) and the setting, not the
+    /// clipboard.
+    pub fn accept_pushed_files(self) -> bool {
+        self.input_allowed && self.receive_files
     }
 }
 
@@ -70,6 +101,12 @@ impl ViewerRules {
     pub fn send_to_host(self) -> bool {
         self.host_allows && !self.view_only
     }
+
+    /// The viewer's copied or dropped files go to the host (which may still
+    /// refuse them, see [`HostRules`]).
+    pub fn send_files_to_host(self) -> bool {
+        self.send_to_host()
+    }
 }
 
 /// Remembers the text last moved between the two clipboards, in either
@@ -77,17 +114,35 @@ impl ViewerRules {
 ///
 /// Writing the clipboard makes it "change" on the writer too: without this
 /// memory that echo would be sent back, written again, and so on forever.
-/// Copying the same text twice in a row sends it once.
+/// Copying the same text twice in a row sends it once; so are the same
+/// files, while nothing else was copied in between.
 #[derive(Debug, Default)]
 pub struct ClipboardGuard {
     last: Option<String>,
+    last_files: Option<Vec<PathBuf>>,
     warned_too_large: bool,
 }
 
 impl ClipboardGuard {
     /// Decides what to do with the clipboard as it was just read.
     pub fn outgoing(&mut self, content: ClipboardContent) -> Outgoing {
+        let ClipboardContent::Files(files) = content else {
+            self.last_files = None;
+            return self.outgoing_text(content);
+        };
+        if files.is_empty() {
+            return Outgoing::Skip;
+        }
+        if self.last_files.as_ref() == Some(&files) {
+            return Outgoing::Unchanged;
+        }
+        self.last_files = Some(files.clone());
+        Outgoing::SendFiles(files)
+    }
+
+    fn outgoing_text(&mut self, content: ClipboardContent) -> Outgoing {
         match content {
+            ClipboardContent::Files(_) => Outgoing::Skip,
             ClipboardContent::NoText | ClipboardContent::Private => Outgoing::Skip,
             ClipboardContent::TooLarge => self.too_large(),
             ClipboardContent::Text(text) if text.len() > MAX_CLIPBOARD_BYTES => self.too_large(),
@@ -235,12 +290,111 @@ mod tests {
         assert_eq!(guard.incoming(&"x".repeat(MAX_CLIPBOARD_BYTES + 1)), None);
     }
 
+    fn files(names: &[&str]) -> ClipboardContent {
+        ClipboardContent::Files(names.iter().map(PathBuf::from).collect())
+    }
+
+    #[test]
+    fn copied_files_are_offered_once_until_something_else_is_copied() {
+        let mut guard = ClipboardGuard::default();
+        let offered = Outgoing::SendFiles(vec![PathBuf::from("C:\\a.txt")]);
+        assert_eq!(guard.outgoing(files(&["C:\\a.txt"])), offered);
+        assert_eq!(guard.outgoing(files(&["C:\\a.txt"])), Outgoing::Unchanged);
+        assert_eq!(
+            guard.outgoing(files(&["C:\\b.txt"])),
+            Outgoing::SendFiles(vec![PathBuf::from("C:\\b.txt")])
+        );
+        // The other PC's files were put here meanwhile: copying the same
+        // files again offers them again.
+        assert_eq!(guard.outgoing(ClipboardContent::NoText), Outgoing::Skip);
+        assert_eq!(
+            guard.outgoing(files(&["C:\\b.txt"])),
+            Outgoing::SendFiles(vec![PathBuf::from("C:\\b.txt")])
+        );
+        assert_eq!(guard.outgoing(files(&[])), Outgoing::Skip);
+    }
+
+    #[test]
+    fn text_between_two_copies_of_files_counts_as_something_else() {
+        let mut guard = ClipboardGuard::default();
+        guard.outgoing(files(&["C:\\a"]));
+        assert_eq!(guard.outgoing(text("ciao")), Outgoing::Send("ciao".into()));
+        assert!(matches!(
+            guard.outgoing(files(&["C:\\a"])),
+            Outgoing::SendFiles(_)
+        ));
+        // And the text is still remembered against its own echo.
+        assert_eq!(guard.incoming("ciao"), None);
+    }
+
+    fn host(sharing: bool, input_allowed: bool, receive_files: bool) -> HostRules {
+        HostRules {
+            sharing,
+            input_allowed,
+            receive_files,
+        }
+    }
+
+    #[test]
+    fn the_hosts_copied_files_follow_the_clipboard_setting_only() {
+        for (input, receive) in [(true, true), (false, false), (true, false)] {
+            assert!(host(true, input, receive).send_files_to_viewer());
+            assert!(!host(false, input, receive).send_files_to_viewer());
+        }
+    }
+
+    #[test]
+    fn the_viewers_copied_files_need_clipboard_control_and_reception() {
+        assert!(host(true, true, true).accept_files_from_viewer());
+        assert!(
+            !host(false, true, true).accept_files_from_viewer(),
+            "clipboard off"
+        );
+        assert!(
+            !host(true, false, true).accept_files_from_viewer(),
+            "control off"
+        );
+        assert!(
+            !host(true, true, false).accept_files_from_viewer(),
+            "reception off"
+        );
+    }
+
+    #[test]
+    fn pushed_files_need_control_and_reception_but_not_the_clipboard() {
+        assert!(host(false, true, true).accept_pushed_files());
+        assert!(host(true, true, true).accept_pushed_files());
+        assert!(
+            !host(true, false, true).accept_pushed_files(),
+            "control off"
+        );
+        assert!(
+            !host(true, true, false).accept_pushed_files(),
+            "reception off"
+        );
+    }
+
+    #[test]
+    fn the_viewer_sends_files_only_when_it_may_control_the_host() {
+        let sends = |host_allows, view_only| {
+            ViewerRules {
+                host_allows,
+                view_only,
+            }
+            .send_files_to_host()
+        };
+        assert!(sends(true, false));
+        assert!(!sends(true, true), "view only");
+        assert!(!sends(false, false));
+    }
+
     #[test]
     fn the_host_sends_only_while_sharing() {
         for input_allowed in [true, false] {
             let rules = |sharing| HostRules {
                 sharing,
                 input_allowed,
+                receive_files: true,
             };
             assert!(rules(true).send_to_viewer());
             assert!(!rules(false).send_to_viewer());
@@ -253,6 +407,7 @@ mod tests {
             HostRules {
                 sharing,
                 input_allowed,
+                receive_files: true,
             }
             .accept_from_viewer()
         };

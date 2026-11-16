@@ -63,7 +63,7 @@ async fn connected() -> Connected {
                 .unwrap();
             let fp = viewer.peer_fingerprint();
             let remote = viewer.remote_addr();
-            let (mut tx, rx, video) = viewer.split();
+            let (mut tx, rx, video, _) = viewer.split();
             tx.send(&hello()).await.unwrap();
             ((tx, rx, video), fp, remote)
         });
@@ -73,7 +73,7 @@ async fn connected() -> Connected {
             "no client certificate"
         );
         let host_handle = host_session.handle();
-        let (host_tx, mut host_rx, host_video) = host_session.split();
+        let (host_tx, mut host_rx, host_video, _) = host_session.split();
         assert_eq!(host_rx.recv().await.unwrap(), Some(hello()));
         let (viewer, viewer_fingerprint, viewer_remote) = viewer_session;
         Connected {
@@ -262,7 +262,7 @@ async fn host_view_of(client: Option<&Identity>) -> Session {
             let viewer = connect(addr, Some(identity.fingerprint()), client)
                 .await
                 .unwrap();
-            let (mut tx, rx, video) = viewer.split();
+            let (mut tx, rx, video, _) = viewer.split();
             tx.send(&hello()).await.unwrap();
             (tx, rx, video)
         });
@@ -283,7 +283,7 @@ async fn host_sees_the_viewer_certificate_fingerprint() {
 async fn client_certificate_is_optional() {
     let session = host_view_of(None).await;
     assert_eq!(session.peer_fingerprint(), None);
-    let (_tx, mut rx, _video) = session.split();
+    let (_tx, mut rx, _video, _) = session.split();
     assert_eq!(
         timeout(TIMEOUT, rx.recv()).await.unwrap().unwrap(),
         Some(hello()),
@@ -304,11 +304,11 @@ async fn host_keeps_accepting_after_failed_handshake() {
             let viewer = connect(addr, Some(identity.fingerprint()), None)
                 .await
                 .unwrap();
-            let (mut tx, rx, video) = viewer.split();
+            let (mut tx, rx, video, _) = viewer.split();
             tx.send(&hello()).await.unwrap();
             (tx, rx, video)
         });
-        let (_tx, mut rx, _video) = accepted.unwrap().split();
+        let (_tx, mut rx, _video, _) = accepted.unwrap().split();
         assert_eq!(rx.recv().await.unwrap(), Some(hello()));
     })
     .await
@@ -339,7 +339,7 @@ async fn a_silent_viewer_does_not_delay_the_next_one() {
             async { host.incoming().await.unwrap().establish().await },
             async {
                 let viewer = connect(addr, pinned, None).await.unwrap();
-                let (mut tx, rx, video) = viewer.split();
+                let (mut tx, rx, video, _) = viewer.split();
                 tx.send(&hello()).await.unwrap();
                 (tx, rx, video)
             }
@@ -347,7 +347,7 @@ async fn a_silent_viewer_does_not_delay_the_next_one() {
     })
     .await
     .expect("the second viewer waited for the silent one");
-    let (_tx, mut rx, _video) = accepted.unwrap().split();
+    let (_tx, mut rx, _video, _) = accepted.unwrap().split();
     assert_eq!(rx.recv().await.unwrap(), Some(hello()));
     assert!(!waiting.is_finished(), "the silent one is still pending");
     waiting.abort();

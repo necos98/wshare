@@ -11,13 +11,20 @@ use super::launcher::ProcessLauncher;
 use super::overlay::Overlay;
 use super::ports::AppEvent;
 use super::sharing::HostService;
+use super::shell::WindowsShell;
 use super::system_settings::SystemSettings;
 use super::tray::Tray;
 use super::view::{self, Drafts};
 use super::wake_on_lan::UdpWakeOnLan;
 
-type AppController =
-    Controller<HostService, ProcessLauncher, KnownHostsFile, SystemSettings, UdpWakeOnLan>;
+type AppController = Controller<
+    HostService,
+    ProcessLauncher,
+    KnownHostsFile,
+    SystemSettings,
+    UdpWakeOnLan,
+    WindowsShell,
+>;
 
 /// What the app shows outside its window; each part is absent when Windows
 /// would not create it.

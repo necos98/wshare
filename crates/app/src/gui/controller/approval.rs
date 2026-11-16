@@ -3,12 +3,18 @@
 //! lets a viewer in.
 
 use super::super::ports::{
-    KnownHostsStore, SettingsBackend, SharingService, ViewerLauncher, WakeOnLan,
+    Desktop, KnownHostsStore, SettingsBackend, SharingService, ViewerLauncher, WakeOnLan,
 };
 use super::Controller;
 
-impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBackend, W: WakeOnLan>
-    Controller<S, L, K, B, W>
+impl<
+    S: SharingService,
+    L: ViewerLauncher,
+    K: KnownHostsStore,
+    B: SettingsBackend,
+    W: WakeOnLan,
+    D: Desktop,
+> Controller<S, L, K, B, W, D>
 {
     /// Passes the click to the service and takes the request down. The
     /// service ignores an answer to a request that ended meanwhile.

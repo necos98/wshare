@@ -7,14 +7,20 @@ use crate::text;
 
 use super::super::notifications;
 use super::super::ports::{
-    KnownHostsStore, SettingsBackend, SharingService, ViewerLauncher, WakeOnLan,
+    Desktop, KnownHostsStore, SettingsBackend, SharingService, ViewerLauncher, WakeOnLan,
 };
 use super::super::settings::Settings;
 use super::super::settings_state::Page;
 use super::Controller;
 
-impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBackend, W: WakeOnLan>
-    Controller<S, L, K, B, W>
+impl<
+    S: SharingService,
+    L: ViewerLauncher,
+    K: KnownHostsStore,
+    B: SettingsBackend,
+    W: WakeOnLan,
+    D: Desktop,
+> Controller<S, L, K, B, W, D>
 {
     /// Work to do once the window exists: keeps the Windows start-up entry
     /// pointing at this executable (only if the user turned it on) and
@@ -43,8 +49,9 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBacken
     }
 
     /// Applies and saves the settings as edited. Remote control, the
-    /// clipboard, the access mode and the feedback options act at once; the streaming ones
-    /// at the next start of the sharing (see `GuiState::restart_needed`).
+    /// clipboard, the reception of files, the access mode and the feedback
+    /// options act at once; the streaming ones and the download folder at
+    /// the next start of the sharing (see `GuiState::restart_needed`).
     pub(super) fn change_settings(&mut self, requested: Settings) {
         let new = requested.sanitized();
         let old = self.state.settings.clone();
@@ -66,6 +73,11 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBacken
             && let Some(sharing) = &self.sharing
         {
             sharing.set_clipboard_shared(self.state.settings.share_clipboard);
+        }
+        if old.receive_files != self.state.settings.receive_files
+            && let Some(sharing) = &self.sharing
+        {
+            sharing.set_receive_files(self.state.settings.receive_files);
         }
         if old.access != self.state.settings.access
             && let Some(sharing) = &self.sharing

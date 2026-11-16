@@ -7,7 +7,9 @@
 //! variable is removed, so the viewer never inherits a stale PIN.
 //! `WSHARE_REPORT` asks the viewer for its status lines on stdout and the
 //! exit code (see `viewer::report`): the interface decides only from those,
-//! never from the wording of messages.
+//! never from the wording of messages. The viewer's file transfers travel
+//! as typed lines too (see `viewer::channel`): their events on stdout, the
+//! interface's commands on stdin.
 
 use std::io::{BufRead, BufReader};
 use std::os::windows::process::CommandExt;
@@ -16,7 +18,9 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 
+use crate::transfer::TransferCommand;
 use crate::viewer::PIN_ENV;
+use crate::viewer::channel;
 use crate::viewer::report::{FailureCause, REPORT_ENABLED, REPORT_ENV, ViewerReport};
 
 use super::model::{ViewerId, ViewerUpdate};
@@ -51,13 +55,17 @@ impl ViewerLauncher for ProcessLauncher {
             command.arg("--host-id").arg(host_id);
         }
         command.args(request.display.flags());
+        if let Some(downloads) = &request.downloads {
+            command.arg("--downloads").arg(downloads);
+        }
         match &request.pin {
             Some(pin) => command.env(PIN_ENV, pin),
             None => command.env_remove(PIN_ENV),
         };
         let mut child = command
             .env(REPORT_ENV, REPORT_ENABLED)
-            .stdin(Stdio::null())
+            // Commands only: a viewer launched here never reads a PIN there.
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .creation_flags(CREATE_NO_WINDOW)
@@ -86,7 +94,14 @@ impl ViewerLauncher for ProcessLauncher {
                             update: ViewerUpdate::Connected,
                         }),
                         Some(ViewerReport::Failed(cause)) => failure = Some(cause),
-                        None => {}
+                        None => {
+                            if let Some(event) = channel::parse_event(&line) {
+                                inbox.send(AppEvent::Viewer {
+                                    id,
+                                    update: ViewerUpdate::Transfer(event),
+                                });
+                            }
+                        }
                     }
                 }
                 // Gone from the registry: it was cancelled, and the
@@ -104,6 +119,12 @@ impl ViewerLauncher for ProcessLauncher {
 
     fn cancel(&mut self, id: ViewerId) {
         self.processes.terminate(id);
+    }
+
+    fn command(&mut self, id: ViewerId, command: TransferCommand) -> Result<()> {
+        self.processes
+            .write_line(id, &channel::command_line(&command))
+            .context("telling the viewer")
     }
 }
 

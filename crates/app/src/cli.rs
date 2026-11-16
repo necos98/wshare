@@ -1,5 +1,7 @@
 //! Command-line parsing. Pure: no I/O, fully unit-tested.
 
+use std::path::PathBuf;
+
 use anyhow::{Context, Result, bail};
 use codec::Codec;
 use net::Fingerprint;
@@ -29,6 +31,9 @@ pub struct ViewOptions {
     pub fullscreen: bool,
     /// Show the statistics overlay from the start (toggle with Ctrl+Alt+I).
     pub stats: bool,
+    /// Where the files the host sends land; `None`: this user's
+    /// `Downloads\wshare`.
+    pub downloads: Option<PathBuf>,
 }
 
 /// What the desktop interface is started with.
@@ -61,7 +66,7 @@ wshare - LAN screen sharing (no arguments: open the window)
                open the window; --minimized starts hidden in the notification area
                (Windows start-up passes it when the option is on in the settings)
   wshare host  [--monitor N] [--fps F] [--mbps B] [--codec h264|hevc] [--port P] [--pin PIN]
-               [--view-only] [--no-clipboard]
+               [--view-only] [--no-clipboard] [--no-file-receive] [--downloads DIR]
                --mbps is the maximum bitrate (default 20): the host lowers it while the
                network is congested and raises it back gradually
                a viewer that gave the PIN once connects without it from then on
@@ -70,12 +75,18 @@ wshare - LAN screen sharing (no arguments: open the window)
                available here: wshare host always requires the PIN from a new viewer
                copied text is shared with the viewer, both ways (the viewer's only if remote
                control is allowed); --no-clipboard turns it off
+               copied files are shared the same way (pasted in Explorer on the other PC)
+               files the viewer drops or sends land in DIR (default Downloads\\wshare), if
+               remote control is allowed; --no-file-receive refuses them
   wshare view  [HOST | IP[:PORT]] [--pin PIN] [--host-id ID] [--view-only] [--fullscreen] [--stats]
+               [--downloads DIR]
                the PIN is needed only the first time: the host then remembers this PC,
                and this PC pins the host (HOST names, or the LAN id given with --host-id);
                without --pin, a remembered host is tried without one and the PIN asked
                only if the host requires it again
                in the viewer: Ctrl+Alt+Enter full screen, Ctrl+Alt+I statistics
+               files dropped on the window (or sent from its bar) go to the host; the
+               host's land in DIR (default Downloads\\wshare)
   wshare list                       hosts found on the LAN
   wshare monitors                   monitors of this PC
   wshare bench [--monitor N] [--fps F] [--mbps B] [--codec h264|hevc] [--seconds S] [--out FILE]";
@@ -166,6 +177,8 @@ fn parse_host(args: &[String]) -> Result<HostOptions> {
         view_only: false,
         share_clipboard: true,
         access: AccessMode::PinOnly,
+        receive_files: true,
+        downloads: None,
     };
     for_each_arg(args, |flag, value| {
         if stream_flag(&mut options.stream, flag, value)? {
@@ -176,6 +189,8 @@ fn parse_host(args: &[String]) -> Result<HostOptions> {
             "--pin" => options.pin = Some(value()?),
             "--view-only" => options.view_only = true,
             "--no-clipboard" => options.share_clipboard = false,
+            "--no-file-receive" => options.receive_files = false,
+            "--downloads" => options.downloads = Some(PathBuf::from(value()?)),
             _ => return Ok(false),
         }
         Ok(true)
@@ -191,6 +206,7 @@ fn parse_view(args: &[String]) -> Result<ViewOptions> {
         view_only: false,
         fullscreen: false,
         stats: false,
+        downloads: None,
     };
     for_each_arg(args, |arg, value| {
         match arg {
@@ -199,6 +215,7 @@ fn parse_view(args: &[String]) -> Result<ViewOptions> {
             "--view-only" => options.view_only = true,
             "--fullscreen" => options.fullscreen = true,
             "--stats" => options.stats = true,
+            "--downloads" => options.downloads = Some(PathBuf::from(value()?)),
             positional if !positional.starts_with("--") && options.target.is_none() => {
                 options.target = Some(positional.to_string())
             }
@@ -278,11 +295,13 @@ mod tests {
         );
         assert!(!h.view_only);
         assert!(h.share_clipboard);
+        assert!(h.receive_files, "files are accepted by default");
+        assert_eq!(h.downloads, None, "the user's Downloads folder");
     }
 
     #[test]
     fn host_with_every_option() {
-        let line = "host --monitor 1 --fps 30 --mbps 50 --codec HEVC --port 9000 --pin 123456 --view-only --no-clipboard";
+        let line = "host --monitor 1 --fps 30 --mbps 50 --codec HEVC --port 9000 --pin 123456 --view-only --no-clipboard --no-file-receive --downloads D:/ricevuti";
         let Command::Host(h) = parse(&args(line)).unwrap() else {
             panic!()
         };
@@ -299,6 +318,8 @@ mod tests {
         assert_eq!(h.pin.as_deref(), Some("123456"));
         assert!(h.view_only);
         assert!(!h.share_clipboard);
+        assert!(!h.receive_files);
+        assert_eq!(h.downloads, Some(PathBuf::from("D:/ricevuti")));
     }
 
     #[test]
@@ -310,6 +331,7 @@ mod tests {
             view_only: false,
             fullscreen: false,
             stats: false,
+            downloads: None,
         };
         let Command::View(a) = parse(&args("view 192.168.1.20:7420 --pin 42")).unwrap() else {
             panic!()
@@ -346,6 +368,15 @@ mod tests {
         };
         assert!(v.fullscreen);
         assert!(v.stats);
+    }
+
+    #[test]
+    fn viewer_with_its_own_download_folder() {
+        let Command::View(v) = parse(&args("view 10.0.0.2 --downloads C:/in")).unwrap() else {
+            panic!()
+        };
+        assert_eq!(v.downloads, Some(PathBuf::from("C:/in")));
+        assert!(parse(&args("view --downloads")).is_err());
     }
 
     #[test]

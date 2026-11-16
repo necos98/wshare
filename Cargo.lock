@@ -3365,6 +3365,7 @@ dependencies = [
  "toml",
  "tray-icon",
  "windows",
+ "windows-core",
  "winit",
  "winresource",
 ]

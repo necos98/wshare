@@ -1,5 +1,7 @@
 //! Settings shared by the command line, the window and the host service.
 
+use std::path::PathBuf;
+
 use codec::Codec;
 
 use crate::access_mode::AccessMode;
@@ -61,6 +63,12 @@ pub struct HostOptions {
     /// How an unknown viewer is let in. `wshare host` has nobody to ask,
     /// so it always uses [`AccessMode::PinOnly`].
     pub access: AccessMode,
+    /// Accept the files the viewer drops or sends (they also need remote
+    /// control).
+    pub receive_files: bool,
+    /// Where the viewer's files land; `None`: this user's
+    /// `Downloads\wshare` (see `paths::default_downloads`).
+    pub downloads: Option<PathBuf>,
 }
 
 #[cfg(test)]

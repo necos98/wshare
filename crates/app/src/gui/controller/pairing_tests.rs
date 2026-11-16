@@ -64,6 +64,7 @@ fn a_remembered_host_connects_without_a_pin() {
             host_id: Some(id),
             pin: None,
             display: ViewerDisplay::default(),
+            downloads: None,
         }
     );
     assert_eq!(c.state().connect_error, None);

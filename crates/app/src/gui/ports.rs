@@ -1,18 +1,21 @@
 //! Boundaries between the interface logic and the outside world. Real
 //! implementations live in `sharing`, `launcher`, `discovery_source`, `wake_on_lan`,
-//! `known_hosts_file` and `system_settings`; tests use fakes.
+//! `known_hosts_file`, `system_settings` and `shell`; tests use fakes.
 
 use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use anyhow::Result;
 use discovery::{DiscoveryEvent, MacAddress};
 use net::Fingerprint;
+use protocol::transfer::TransferId;
 
 use crate::access_mode::AccessMode;
 use crate::host::{ApprovalAnswer, ApprovalId, HostEvent};
 use crate::options::HostOptions;
+use crate::transfer::TransferCommand;
 use crate::trust::KnownHost;
 
 use super::model::{ViewerId, ViewerUpdate};
@@ -38,6 +41,23 @@ pub enum AppEvent {
         update: ViewerUpdate,
     },
     Tray(TrayAction),
+    /// What the user chose in a dialog opened for `purpose` (nothing: the
+    /// dialog was cancelled).
+    Chosen {
+        purpose: ChoicePurpose,
+        paths: Vec<PathBuf>,
+    },
+}
+
+/// Why a file or folder dialog was opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChoicePurpose {
+    /// Files to send to the viewer connected to this PC.
+    SendToViewer,
+    /// Files the viewer window `ViewerId` sends to its host.
+    SendFromViewer(ViewerId),
+    /// The folder where received files land.
+    Downloads,
 }
 
 /// What the user did on the tray icon or the connection indicator.
@@ -88,6 +108,12 @@ pub trait SharingControl {
     fn set_input_allowed(&self, allowed: bool);
     /// Turns the shared clipboard on or off, also for a viewer connected now.
     fn set_clipboard_shared(&self, shared: bool);
+    /// Lets the viewer's files in, or not, also for a viewer connected now.
+    fn set_receive_files(&self, receive: bool);
+    /// Sends files to the connected viewer; `false` without one.
+    fn send_files(&self, picked: Vec<PathBuf>) -> bool;
+    /// Cancels one transfer of the connected viewer (`None`: all).
+    fn cancel_transfer(&self, id: Option<TransferId>);
     /// Changes how a viewer that is not authorized is let in.
     fn set_access_mode(&self, access: AccessMode);
     /// Answers the request of a viewer waiting for a click.
@@ -122,6 +148,8 @@ pub struct LaunchRequest {
     pub pin: Option<String>,
     /// How the viewer window opens (from the settings).
     pub display: ViewerDisplay,
+    /// Where the host's files land; `None`: the default folder.
+    pub downloads: Option<PathBuf>,
 }
 
 /// Opens viewer windows.
@@ -132,6 +160,18 @@ pub trait ViewerLauncher {
     /// Ends the viewer `id` (still connecting). Its late events are ignored
     /// by the interface, which has already dropped the entry.
     fn cancel(&mut self, id: ViewerId);
+    /// Hands a file command to the viewer `id` (sending files, cancelling
+    /// transfers).
+    fn command(&mut self, id: ViewerId, command: TransferCommand) -> Result<()>;
+}
+
+/// The Windows shell: dialogs and Explorer.
+pub trait Desktop {
+    /// Opens the dialog for `purpose` without waiting for it; the choice
+    /// arrives as [`AppEvent::Chosen`].
+    fn choose(&self, purpose: ChoicePurpose);
+    /// Opens `folder` in Explorer.
+    fn open_folder(&self, folder: &Path) -> Result<()>;
 }
 
 /// The hosts this PC is remembered by (written by the viewers it launches).

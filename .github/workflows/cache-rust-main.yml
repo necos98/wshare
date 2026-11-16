@@ -1,0 +1,40 @@
+name: cache-rust-main
+
+# Scalda la cache Rust per le build di release (release.yml).
+# Le cache salvate da un run su tag v* non sono ripristinabili da altri tag,
+# mentre ogni run puo' ripristinare quelle del branch di default: per questo
+# la cache viene prodotta qui, su main, con la stessa shared-key.
+# Non crea Release ne' carica artifact.
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - '**/Cargo.toml'
+      - .github/workflows/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  warm-cache:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build release (solo cache)
+        run: cargo build --workspace --release

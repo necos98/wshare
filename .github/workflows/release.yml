@@ -1,0 +1,116 @@
+name: release
+
+# Build di rilascio di wshare (Windows x64):
+# - parte solo su tag v* o manualmente (workflow_dispatch), non su push/PR:
+#   i controlli di qualita' (fmt, clippy, test) stanno in ci.yml;
+# - compila wshare.exe e wshare-cli.exe in release, li carica come artifact
+#   CI e, su tag v*, crea la GitHub Release con:
+#     wshare.exe, wshare-cli.exe          (scaricati dall'aggiornamento automatico)
+#     wshare-<ver>-windows-x64.zip        (download manuale)
+#     latest.json + latest.json.sig       (manifest firmato letto dall'app)
+#     <asset>.sha256                      (checksum per chi scarica a mano)
+# latest.json elenca i file con SHA-256 e dimensione ed e' firmato Ed25519
+# con il secret WSHARE_UPDATE_KEY: senza secret, o con una chiave che non
+# corrisponde a crates/release/update-key.pub, il passo di firma fallisce
+# (una release firmata male romperebbe gli aggiornamenti). Vedi README,
+# «Rilasci e aggiornamenti».
+# La cache Rust viene salvata solo da cache-rust-main.yml su main: le cache
+# create su un tag non sono ripristinabili da altri tag.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write # serve per creare la Release su tag v*
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust (restore da main)
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Versione
+        # La versione vive in [workspace.package] di Cargo.toml; il tag deve
+        # essere v<versione>, altrimenti l'app installata non vedrebbe mai
+        # la release come piu' recente (o la vedrebbe sempre).
+        id: version
+        run: |
+          $version = (cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).packages |
+            Where-Object name -eq 'wshare' | Select-Object -ExpandProperty version
+          if (-not $version) { throw "Versione di wshare non trovata" }
+          if ("${{ github.ref_type }}" -eq "tag" -and "${{ github.ref_name }}" -ne "v$version") {
+            throw "Il tag ${{ github.ref_name }} non corrisponde alla versione v$version di Cargo.toml"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+          Write-Host "wshare $version"
+
+      - name: Build release
+        run: cargo build --workspace --release
+
+      - name: Prepara gli asset
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/wshare.exe, target/release/wshare-cli.exe dist/
+          Compress-Archive -Path dist/wshare.exe, dist/wshare-cli.exe `
+            -DestinationPath "dist/wshare-$version-windows-x64.zip" -Force
+
+      - name: Manifest firmato (latest.json)
+        # Gli URL puntano agli asset di questo tag (immutabili); l'app legge
+        # latest.json da releases/latest/download, cioe' dall'ultima release.
+        env:
+          WSHARE_UPDATE_KEY: ${{ secrets.WSHARE_UPDATE_KEY }}
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $tag = "${{ steps.version.outputs.tag }}"
+          $base = "https://github.com/${{ github.repository }}/releases/download/$tag"
+          $date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+          ./target/release/wshare-release.exe manifest --version $version --base-url $base `
+            --notes "wshare $tag" --date $date --out dist/latest.json `
+            dist/wshare.exe dist/wshare-cli.exe
+          if ($LASTEXITCODE -ne 0) { throw "manifest fallito" }
+          if (-not $env:WSHARE_UPDATE_KEY) { throw "Secret WSHARE_UPDATE_KEY mancante" }
+          ./target/release/wshare-release.exe sign --out dist/latest.json.sig dist/latest.json
+          if ($LASTEXITCODE -ne 0) { throw "firma fallita" }
+          ./target/release/wshare-release.exe verify dist/latest.json dist/latest.json.sig
+          if ($LASTEXITCODE -ne 0) { throw "verifica della firma fallita" }
+
+      - name: Checksum SHA-256
+        run: |
+          $files = Get-ChildItem dist -File | Where-Object { $_.Extension -in '.exe', '.zip' }
+          foreach ($f in $files) {
+            $hash = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
+            Set-Content -Path ($f.FullName + ".sha256") -Value "$hash  $($f.Name)" -NoNewline
+            Write-Host "$($f.Name): $hash ($($f.Length) bytes)"
+          }
+
+      - name: Upload artifact (CI)
+        uses: actions/upload-artifact@v7
+        with:
+          name: wshare-windows-x64
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Crea la GitHub Release (solo su tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $assets = Get-ChildItem dist -File | Select-Object -ExpandProperty FullName
+          gh release create "$tag" $assets --title "wshare $tag" --generate-notes

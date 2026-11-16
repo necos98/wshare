@@ -177,7 +177,7 @@ mod tests {
     use super::Output::{Stderr, Stdout};
     use super::*;
     use crate::host::{HostFailure, HostWarning, SessionFailure};
-    use crate::transfer::{Direction, Kind, Outcome, TransferEvent, TransferInfo};
+    use crate::transfer::{Direction, Failure, Kind, Outcome, TransferEvent, TransferInfo};
     use crate::trust::{AuthorizedDevice, Timestamp};
 
     fn address() -> SocketAddr {
@@ -325,7 +325,7 @@ mod tests {
             }),
             TransferEvent::Finished {
                 id,
-                outcome: Outcome::Failed(forged.into()),
+                outcome: Outcome::Failed(Failure::Detail(forged.into())),
             },
         ];
         for event in events {

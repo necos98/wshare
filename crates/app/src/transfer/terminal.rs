@@ -3,8 +3,9 @@
 //! Names and reasons may come from the other PC: they are kept on the line
 //! (see `crate::printable`).
 
-use super::events::{Direction, Kind, Outcome, TransferEvent, TransferInfo};
-use super::shared::describe as reason_text;
+use protocol::transfer::TransferError;
+
+use super::events::{Direction, Failure, Kind, Outcome, TransferEvent, TransferInfo};
 use crate::printable::single_line;
 
 /// Bytes in a megabyte, as the terminal counts them.
@@ -32,12 +33,39 @@ pub fn describe(event: &TransferEvent) -> Option<String> {
                     let reason = single_line(&reason_text(reason));
                     format!("Transfer {id}: refused ({reason})")
                 }
-                Outcome::Failed(detail) => {
-                    format!("Transfer {id}: failed ({})", single_line(detail))
+                Outcome::Failed(failure) => {
+                    format!(
+                        "Transfer {id}: failed ({})",
+                        single_line(&failure_text(failure))
+                    )
                 }
                 Outcome::Interrupted => format!("Transfer {id}: interrupted, the session ended"),
             })
         }
+    }
+}
+
+/// The English text of a reason of the other PC (or of this one).
+fn reason_text(reason: &TransferError) -> String {
+    match reason {
+        TransferError::NotAllowed => "not allowed by the other computer".into(),
+        TransferError::Invalid => "refused as invalid".into(),
+        TransferError::Unavailable => "the files are no longer available".into(),
+        TransferError::TooManyTransfers => "too many transfers at once".into(),
+        TransferError::NoFreeName => "no free name for the files".into(),
+        TransferError::CannotCreateFolders(detail) => {
+            format!("cannot create the folders: {detail}")
+        }
+        TransferError::PlanningFailed(detail) => format!("planning failed: {detail}"),
+        TransferError::Failed(detail) => detail.clone(),
+    }
+}
+
+fn failure_text(failure: &Failure) -> String {
+    match failure {
+        Failure::Cause(reason) => reason_text(reason),
+        Failure::NoLongerAllowed => "no longer allowed on this computer".into(),
+        Failure::Detail(detail) => detail.clone(),
     }
 }
 
@@ -110,7 +138,7 @@ mod tests {
         let ended = |outcome| describe(&TransferEvent::Finished { id, outcome }).unwrap();
         let lines = [
             describe(&TransferEvent::Started(info)).unwrap(),
-            ended(Outcome::Failed(forged.into())),
+            ended(Outcome::Failed(Failure::Detail(forged.into()))),
             ended(Outcome::Refused(TransferError::Failed(forged.into()))),
         ];
         for line in lines {

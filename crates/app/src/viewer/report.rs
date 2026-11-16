@@ -65,6 +65,9 @@ pub enum FailureCause {
     /// The host is shared with unattended access, which this PC may not
     /// use: it is not among the devices the host authorized.
     NotAuthorized,
+    /// The host refused because the first messages of the connection were
+    /// not the expected ones.
+    HandshakeFailed,
     /// The host refused because it cannot stream its screen; the text is
     /// the host's own explanation.
     HostCannotStream(String),
@@ -72,7 +75,7 @@ pub enum FailureCause {
 }
 
 /// The causes whose exit code identifies them (no detail needed).
-const CODED_CAUSES: [FailureCause; 17] = [
+const CODED_CAUSES: [FailureCause; 18] = [
     FailureCause::PinRequired,
     FailureCause::WrongPin,
     FailureCause::UnsupportedVersion,
@@ -90,6 +93,7 @@ const CODED_CAUSES: [FailureCause; 17] = [
     FailureCause::PasswordRequired,
     FailureCause::WrongPassword,
     FailureCause::NotAuthorized,
+    FailureCause::HandshakeFailed,
 ];
 
 impl FailureCause {
@@ -114,6 +118,7 @@ impl FailureCause {
             Self::PasswordRequired => 25,
             Self::WrongPassword => 26,
             Self::NotAuthorized => 27,
+            Self::HandshakeFailed => 28,
             Self::Other(_) => GENERIC_EXIT_CODE,
         }
     }
@@ -145,6 +150,7 @@ impl FailureCause {
             Self::PasswordRequired => "password-required",
             Self::WrongPassword => "wrong-password",
             Self::NotAuthorized => "not-authorized",
+            Self::HandshakeFailed => "handshake-failed",
             Self::HostCannotStream(_) => "host-cannot-stream",
             Self::Other(_) => "other",
         }

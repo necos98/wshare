@@ -9,7 +9,7 @@ use protocol::transfer::{FileEntry, TransferError, TransferId, TransferMessage};
 
 use super::test_support::*;
 use super::*;
-use crate::transfer::events::{Direction, Outcome};
+use crate::transfer::events::{Direction, Failure, Outcome};
 use crate::transfer::shared::MAX_PEER_REASON_CHARS;
 use crate::transfer::{Chunk, listing};
 
@@ -326,7 +326,7 @@ async fn a_failure_told_by_the_other_pc_is_kept_on_one_short_line() {
         reason: TransferError::Failed(forged),
     });
     pair.run_until(|_, viewer| viewer.outcome().is_some()).await;
-    let Some(Outcome::Failed(detail)) = pair.viewer.outcome() else {
+    let Some(Outcome::Failed(Failure::Detail(detail))) = pair.viewer.outcome() else {
         panic!("not a failure: {:?}", pair.viewer.outcome());
     };
     assert!(
@@ -335,4 +335,36 @@ async fn a_failure_told_by_the_other_pc_is_kept_on_one_short_line() {
     );
     assert_eq!(detail.chars().count(), MAX_PEER_REASON_CHARS);
     assert!(detail.starts_with("x@wshare:transfer-ended:8:done:"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_known_failure_told_by_the_other_pc_stays_typed_and_its_text_is_cleaned() {
+    let reasons = [
+        (
+            TransferError::TooManyTransfers,
+            Failure::Cause(TransferError::TooManyTransfers),
+        ),
+        (
+            TransferError::CannotCreateFolders("a\r\nb".into()),
+            Failure::Cause(TransferError::CannotCreateFolders("ab".into())),
+        ),
+        (
+            TransferError::PlanningFailed("x\u{1b}y".into()),
+            Failure::Cause(TransferError::PlanningFailed("xy".into())),
+        ),
+    ];
+    for (reason, expected) in reasons {
+        let mut pair = pair(ALL, ALL).await;
+        let id = TransferId(8);
+        pair.viewer.hub().on_message(TransferMessage::Offer {
+            id,
+            entries: vec![FileEntry::file("a.txt", 1)],
+        });
+        pair.run_until(|_, viewer| viewer.started().is_some()).await;
+        pair.viewer
+            .hub()
+            .on_message(TransferMessage::Failed { id, reason });
+        pair.run_until(|_, viewer| viewer.outcome().is_some()).await;
+        assert_eq!(pair.viewer.outcome(), Some(Outcome::Failed(expected)));
+    }
 }

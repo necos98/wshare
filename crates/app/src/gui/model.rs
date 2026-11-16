@@ -640,6 +640,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_host_that_failed_to_admit_a_viewer_leaves_an_italian_notice() {
+        let mut s = Sharing::default();
+        for (reason, text) in [
+            (
+                RejectReason::NoHello,
+                "il visualizzatore non si è presentato in tempo",
+            ),
+            (
+                RejectReason::UnexpectedMessage,
+                "il primo messaggio del visualizzatore non era valido",
+            ),
+            (
+                RejectReason::LeftBeforeHello,
+                "il visualizzatore si è disconnesso prima di presentarsi",
+            ),
+            (
+                RejectReason::LeftBeforeWelcome("reset".into()),
+                "il visualizzatore si è disconnesso prima di ricevere lo schermo (reset)",
+            ),
+        ] {
+            s.apply(HostEvent::ViewerRejected {
+                address: addr("1.2.3.4:1"),
+                reason,
+            });
+            assert_eq!(
+                s.notice.as_deref(),
+                Some(format!("Connessione rifiutata da 1.2.3.4: {text}").as_str())
+            );
+        }
+    }
+
+    #[test]
     fn stopped_resets_but_keeps_preference() {
         let mut s = Sharing {
             input_allowed: false,

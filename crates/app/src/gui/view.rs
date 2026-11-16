@@ -120,7 +120,7 @@ fn sharing_section(ui: &mut Ui, sharing: &Sharing, intents: &mut Vec<Intent>) {
     card(ui, |ui| {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.weak("PIN");
+                ui.weak(text::PIN_LABEL);
                 let pin = sharing
                     .pin
                     .as_deref()
@@ -400,7 +400,7 @@ fn pin_form(ui: &mut Ui, pin: &mut String, form: PinForm) -> bool {
         let (hint, limit) = if password {
             (text::PASSWORD_HINT, MAX_PASSWORD_CHARS)
         } else {
-            ("PIN", MAX_PIN_CHARS)
+            (text::PIN_LABEL, MAX_PIN_CHARS)
         };
         let field = ui.add(
             TextEdit::singleline(pin)

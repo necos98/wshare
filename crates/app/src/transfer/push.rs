@@ -8,12 +8,12 @@ use std::sync::Arc;
 use net::FileReceiver;
 use protocol::transfer::{FileEntry, StreamHeader, TransferError, TransferId, TransferMessage};
 
-use super::events::{Direction, Kind, Outcome, TransferInfo};
+use super::events::{Direction, Failure, Kind, Outcome, TransferInfo};
 use super::listing::{self, Listing};
 use super::part_file::{PartFile, blocking};
 use super::plan::{Placed, total_size};
 use super::receiving::Receiving;
-use super::registry::{Stage, TOO_MANY_TRANSFERS, Transfer};
+use super::registry::{Stage, Transfer};
 use super::shared::Shared;
 use super::streams::{StreamError, receive_file, send_file};
 
@@ -75,12 +75,15 @@ impl Shared {
             .await;
             let listing = match listing {
                 Ok(listing) => listing,
-                Err(e) => return shared.stillborn(unsent, Outcome::Failed(e.to_string())),
+                Err(e) => {
+                    return shared
+                        .stillborn(unsent, Outcome::Failed(Failure::Detail(e.to_string())));
+                }
             };
             let mut registry = shared.registry();
             if registry.is_full() {
                 drop(registry);
-                let outcome = Outcome::Failed(TOO_MANY_TRANSFERS.into());
+                let outcome = Outcome::Failed(Failure::Cause(TransferError::TooManyTransfers));
                 return shared.stillborn(unsent, outcome);
             }
             let entries = listing.entries.clone();

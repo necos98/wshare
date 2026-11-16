@@ -135,7 +135,7 @@ fn percent(done: u64, total: u64) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::events::Kind;
+    use super::super::events::{Failure, Kind};
     use super::*;
 
     fn info(id: u32, direction: Direction, total_bytes: u64) -> TransferInfo {
@@ -217,7 +217,7 @@ mod tests {
         assert_eq!(
             board.apply(TransferEvent::Finished {
                 id: TransferId(9),
-                outcome: Outcome::Failed("x".into()),
+                outcome: Outcome::Failed(Failure::Detail("x".into())),
             }),
             None
         );

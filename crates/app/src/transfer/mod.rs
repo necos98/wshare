@@ -38,7 +38,8 @@ pub mod terminal;
 
 pub use board::{ActiveTransfer, Ended, Summary, TransferBoard};
 pub use events::{
-    Direction, Kind, Outcome, TransferCommand, TransferEvent, TransferInfo, TransferObserver,
+    Direction, Failure, Kind, Outcome, TransferCommand, TransferEvent, TransferInfo,
+    TransferObserver,
 };
 pub use hub::{HubConfig, TransferHub};
 pub use paste::PasteLink;

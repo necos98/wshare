@@ -75,7 +75,7 @@ pub fn check_hello(message: &ControlMessage, context: &HelloContext) -> HelloVer
         pin,
     } = message
     else {
-        return reject(RejectReason::Other("expected Hello".into()));
+        return reject(RejectReason::UnexpectedMessage);
     };
     if *version != PROTOCOL_VERSION {
         return reject(unsupported_version());
@@ -391,7 +391,7 @@ mod tests {
     fn other_first_messages_are_rejected() {
         assert_eq!(
             check(&ControlMessage::RequestKeyframe, ViewerTrust::Authorized),
-            rejected(RejectReason::Other("expected Hello".into()))
+            rejected(RejectReason::UnexpectedMessage)
         );
     }
 

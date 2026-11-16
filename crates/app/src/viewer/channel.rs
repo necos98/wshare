@@ -24,11 +24,15 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use super::report::{LINE_PREFIX, SEPARATOR};
 use crate::printable::single_line;
-use crate::transfer::{Direction, Kind, Outcome, TransferCommand, TransferEvent, TransferInfo};
+use crate::transfer::{
+    Direction, Failure, Kind, Outcome, TransferCommand, TransferEvent, TransferInfo,
+};
 
 const STARTED: &str = "transfer-started";
 const PROGRESS: &str = "transfer-progress";
 const ENDED: &str = "transfer-ended";
+const REFUSED: &str = "refused";
+const FAILED: &str = "failed";
 const SEND_FILES: &str = "send-files";
 const CANCEL: &str = "cancel-transfer";
 const CANCEL_ALL: &str = "cancel-transfers";
@@ -115,17 +119,54 @@ pub fn parse_event(line: &str) -> Option<TransferEvent> {
     }
 }
 
-fn outcome_tag(outcome: &Outcome) -> (&'static str, Option<String>) {
+/// Tag and detail of `reason` in a line of `prefix` (`refused` or
+/// `failed`); a text reason is the bare prefix followed by its text.
+fn reason_tag(prefix: &str, reason: &TransferError) -> (String, Option<String>) {
+    let (suffix, detail) = match reason {
+        TransferError::NotAllowed => ("-not-allowed", None),
+        TransferError::Invalid => ("-invalid", None),
+        TransferError::Unavailable => ("-unavailable", None),
+        TransferError::TooManyTransfers => ("-too-many", None),
+        TransferError::NoFreeName => ("-no-name", None),
+        TransferError::CannotCreateFolders(detail) => ("-folders", Some(detail.clone())),
+        TransferError::PlanningFailed(detail) => ("-planning", Some(detail.clone())),
+        TransferError::Failed(detail) => ("", Some(detail.clone())),
+    };
+    (format!("{prefix}{suffix}"), detail)
+}
+
+/// The reason a line of `prefix` names; `None` if `tag` is not one of its.
+fn reason_of(prefix: &str, tag: &str, detail: &str) -> Option<TransferError> {
+    let detail = detail.to_string();
+    Some(match tag.strip_prefix(prefix)? {
+        "" => TransferError::Failed(detail),
+        "-not-allowed" => TransferError::NotAllowed,
+        "-invalid" => TransferError::Invalid,
+        "-unavailable" => TransferError::Unavailable,
+        "-too-many" => TransferError::TooManyTransfers,
+        "-no-name" => TransferError::NoFreeName,
+        "-folders" => TransferError::CannotCreateFolders(detail),
+        "-planning" => TransferError::PlanningFailed(detail),
+        _ => return None,
+    })
+}
+
+fn outcome_tag(outcome: &Outcome) -> (String, Option<String>) {
+    let plain = |tag: &str| (tag.to_string(), None);
     match outcome {
-        Outcome::Completed { folder } => ("done", folder.as_ref().map(|f| f.display().to_string())),
-        Outcome::Cancelled { by_peer: false } => ("cancelled", None),
-        Outcome::Cancelled { by_peer: true } => ("cancelled-there", None),
-        Outcome::Refused(TransferError::NotAllowed) => ("refused-not-allowed", None),
-        Outcome::Refused(TransferError::Invalid) => ("refused-invalid", None),
-        Outcome::Refused(TransferError::Unavailable) => ("refused-unavailable", None),
-        Outcome::Refused(TransferError::Failed(detail)) => ("refused", Some(detail.clone())),
-        Outcome::Failed(detail) => ("failed", Some(detail.clone())),
-        Outcome::Interrupted => ("interrupted", None),
+        Outcome::Completed { folder } => (
+            "done".to_string(),
+            folder.as_ref().map(|f| f.display().to_string()),
+        ),
+        Outcome::Cancelled { by_peer: false } => plain("cancelled"),
+        Outcome::Cancelled { by_peer: true } => plain("cancelled-there"),
+        Outcome::Refused(reason) => reason_tag(REFUSED, reason),
+        Outcome::Failed(Failure::Cause(reason)) => reason_tag(FAILED, reason),
+        Outcome::Failed(Failure::NoLongerAllowed) => plain("failed-no-longer-allowed"),
+        Outcome::Failed(Failure::Detail(detail)) => {
+            reason_tag(FAILED, &TransferError::Failed(detail.clone()))
+        }
+        Outcome::Interrupted => plain("interrupted"),
     }
 }
 
@@ -136,13 +177,15 @@ fn outcome_of(tag: &str, detail: &str) -> Option<Outcome> {
         },
         "cancelled" => Outcome::Cancelled { by_peer: false },
         "cancelled-there" => Outcome::Cancelled { by_peer: true },
-        "refused-not-allowed" => Outcome::Refused(TransferError::NotAllowed),
-        "refused-invalid" => Outcome::Refused(TransferError::Invalid),
-        "refused-unavailable" => Outcome::Refused(TransferError::Unavailable),
-        "refused" => Outcome::Refused(TransferError::Failed(detail.to_string())),
-        "failed" => Outcome::Failed(detail.to_string()),
+        "failed-no-longer-allowed" => Outcome::Failed(Failure::NoLongerAllowed),
         "interrupted" => Outcome::Interrupted,
-        _ => return None,
+        _ => {
+            if let Some(reason) = reason_of(REFUSED, tag, detail) {
+                Outcome::Refused(reason)
+            } else {
+                Outcome::Failed(Failure::from_error(reason_of(FAILED, tag, detail)?))
+            }
+        }
     })
 }
 
@@ -253,7 +296,16 @@ mod tests {
             Outcome::Refused(TransferError::Invalid),
             Outcome::Refused(TransferError::Unavailable),
             Outcome::Refused(TransferError::Failed("disco: pieno".into())),
-            Outcome::Failed("rete: persa".into()),
+            Outcome::Failed(Failure::Detail("rete: persa".into())),
+            Outcome::Failed(Failure::Cause(TransferError::TooManyTransfers)),
+            Outcome::Failed(Failure::Cause(TransferError::CannotCreateFolders(
+                "disco: pieno".into(),
+            ))),
+            Outcome::Failed(Failure::Cause(TransferError::PlanningFailed("x: y".into()))),
+            Outcome::Failed(Failure::Cause(TransferError::NoFreeName)),
+            Outcome::Failed(Failure::Cause(TransferError::NotAllowed)),
+            Outcome::Failed(Failure::NoLongerAllowed),
+            Outcome::Refused(TransferError::TooManyTransfers),
             Outcome::Interrupted,
         ] {
             events.push(TransferEvent::Finished { id, outcome });
@@ -285,7 +337,9 @@ mod tests {
             lines[3],
             "@wshare:transfer-ended:7:done:C:\\Users\\a\\Downloads\\wshare"
         );
-        assert_eq!(lines[12], "@wshare:transfer-ended:7:interrupted");
+        assert_eq!(lines[11], "@wshare:transfer-ended:7:failed:rete: persa");
+        assert_eq!(lines[12], "@wshare:transfer-ended:7:failed-too-many");
+        assert_eq!(lines[19], "@wshare:transfer-ended:7:interrupted");
     }
 
     #[test]

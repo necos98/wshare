@@ -271,10 +271,10 @@ fn codec_row(ui: &mut Ui, edited: &mut Settings) {
     ui.horizontal(|ui| {
         ui.label(text::SETTINGS_CODEC);
         ComboBox::from_id_salt("settings_codec")
-            .selected_text(edited.codec.label())
+            .selected_text(text::codec_label(edited.codec.codec()))
             .show_ui(ui, |ui| {
                 for codec in CodecChoice::ALL {
-                    ui.selectable_value(&mut edited.codec, codec, codec.label());
+                    ui.selectable_value(&mut edited.codec, codec, text::codec_label(codec.codec()));
                 }
             });
     });

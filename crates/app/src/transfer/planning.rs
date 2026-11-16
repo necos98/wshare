@@ -18,7 +18,7 @@ use super::part_file::part_path;
 use super::plan::ReceivePlan;
 use super::push::push_info;
 use super::receiving::Receiving;
-use super::registry::{Stage, TOO_MANY_TRANSFERS, Transfer};
+use super::registry::{Stage, Transfer};
 use super::shared::Shared;
 
 /// How many times the names of a push are chosen when, between looking at
@@ -34,7 +34,7 @@ impl Shared {
         }
         let info = push_info(id, Direction::Receiving, &entries);
         let Some(ticket) = self.registry().hold_planning(info.clone()) else {
-            let reason = TransferError::Failed(TOO_MANY_TRANSFERS.into());
+            let reason = TransferError::TooManyTransfers;
             return self.send(TransferMessage::Failed { id, reason });
         };
         let shared = self.clone();
@@ -43,7 +43,7 @@ impl Shared {
             let planned =
                 tokio::task::spawn_blocking(move || planner.plan_offer(info, ticket, &entries));
             if let Err(e) = planned.await {
-                let reason = TransferError::Failed(format!("planning failed: {e}"));
+                let reason = TransferError::PlanningFailed(e.to_string());
                 shared.refuse_offer(id, ticket, reason);
             }
         });
@@ -70,9 +70,7 @@ impl Shared {
             Ok(created) => Ok((plan, created)),
             Err(e) => {
                 self.registry().release(plan.roots());
-                Err(TransferError::Failed(format!(
-                    "cannot create the folders: {e}"
-                )))
+                Err(TransferError::CannotCreateFolders(e.to_string()))
             }
         }
     }
@@ -92,7 +90,7 @@ impl Shared {
                 Err(taken) => avoided.extend(taken),
             }
         }
-        Err(TransferError::Failed("no free name for the files".into()))
+        Err(TransferError::NoFreeName)
     }
 
     /// Reserves `roots` if none of them (nor its partial file) is reserved

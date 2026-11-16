@@ -71,6 +71,14 @@ impl ViewerFailure {
             Self::Rejected(RejectReason::PasswordRequired) => FailureCause::PasswordRequired,
             Self::Rejected(RejectReason::WrongPassword) => FailureCause::WrongPassword,
             Self::Rejected(RejectReason::NotAuthorized) => FailureCause::NotAuthorized,
+            Self::Rejected(RejectReason::HostStopped) => FailureCause::HostLeft,
+            Self::Rejected(
+                RejectReason::UnexpectedMessage
+                | RejectReason::NoHello
+                | RejectReason::LeftBeforeHello
+                | RejectReason::UnreadableHello(_)
+                | RejectReason::LeftBeforeWelcome(_),
+            ) => FailureCause::HandshakeFailed,
             Self::Rejected(RejectReason::Other(text)) => FailureCause::Other(text.clone()),
             Self::HostChanged(_) => FailureCause::HostChanged,
             Self::TimedOut(_) => FailureCause::TimedOut,
@@ -147,6 +155,21 @@ mod tests {
             ),
             (RejectReason::WrongPassword, FailureCause::WrongPassword),
             (RejectReason::NotAuthorized, FailureCause::NotAuthorized),
+            (RejectReason::HostStopped, FailureCause::HostLeft),
+            (
+                RejectReason::UnexpectedMessage,
+                FailureCause::HandshakeFailed,
+            ),
+            (RejectReason::NoHello, FailureCause::HandshakeFailed),
+            (RejectReason::LeftBeforeHello, FailureCause::HandshakeFailed),
+            (
+                RejectReason::UnreadableHello("x".into()),
+                FailureCause::HandshakeFailed,
+            ),
+            (
+                RejectReason::LeftBeforeWelcome("x".into()),
+                FailureCause::HandshakeFailed,
+            ),
             (
                 RejectReason::Other("busy".into()),
                 FailureCause::Other("busy".into()),

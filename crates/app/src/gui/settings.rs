@@ -35,13 +35,6 @@ impl CodecChoice {
             Self::Hevc => Codec::Hevc,
         }
     }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::H264 => "H.264",
-            Self::Hevc => "HEVC (H.265)",
-        }
-    }
 }
 
 /// Missing fields take their default and unknown ones are ignored, so a

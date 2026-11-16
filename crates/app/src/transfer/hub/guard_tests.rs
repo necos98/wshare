@@ -9,10 +9,8 @@ use protocol::transfer::{FileEntry, TransferError, TransferId, TransferMessage};
 
 use super::test_support::*;
 use super::*;
-use crate::transfer::events::Outcome;
-use crate::transfer::registry::{MAX_ACTIVE_TRANSFERS, TOO_MANY_TRANSFERS};
-use crate::transfer::revocation::NO_LONGER_ALLOWED;
-use crate::transfer::shared::describe;
+use crate::transfer::events::{Failure, Outcome};
+use crate::transfer::registry::MAX_ACTIVE_TRANSFERS;
 use crate::transfer::{Chunk, listing};
 
 const FLOOD: u32 = 100;
@@ -46,9 +44,9 @@ async fn a_flood_of_offers_stays_within_the_limit_and_leaves_no_folders() {
                 accepted.insert(format!("d{}", (id.0 - 1) / 2));
             }
             TransferMessage::Failed {
-                reason: TransferError::Failed(detail),
+                reason: TransferError::TooManyTransfers,
                 ..
-            } if detail == TOO_MANY_TRANSFERS => refused += 1,
+            } => refused += 1,
             other => panic!("unexpected answer: {other:?}"),
         }
     }
@@ -82,11 +80,11 @@ async fn turning_reception_off_stops_a_push_under_way() {
     pair.run_until(both_finished).await;
     assert_eq!(
         pair.host.outcome(),
-        Some(Outcome::Failed(NO_LONGER_ALLOWED.into()))
+        Some(Outcome::Failed(Failure::NoLongerAllowed))
     );
     assert_eq!(
         pair.viewer.outcome(),
-        Some(Outcome::Failed(describe(&TransferError::NotAllowed)))
+        Some(Outcome::Failed(Failure::Cause(TransferError::NotAllowed)))
     );
     wait_until_empty(&pair.host.destination()).await;
 }
@@ -111,7 +109,7 @@ async fn files_arriving_after_reception_was_turned_off_are_refused() {
     pair.run_until(both_finished).await;
     assert_eq!(
         pair.host.outcome(),
-        Some(Outcome::Failed(NO_LONGER_ALLOWED.into()))
+        Some(Outcome::Failed(Failure::NoLongerAllowed))
     );
     assert!(matches!(pair.viewer.outcome(), Some(Outcome::Failed(_))));
     wait_until_empty(&pair.host.destination()).await;
@@ -164,7 +162,7 @@ async fn the_peers_files_can_no_longer_be_pasted_once_not_allowed() {
     pair.run_until(both_finished).await;
     assert_eq!(
         pair.host.outcome(),
-        Some(Outcome::Failed(NO_LONGER_ALLOWED.into()))
+        Some(Outcome::Failed(Failure::NoLongerAllowed))
     );
     while let Some(chunk) = chunks.recv().await {
         assert_ne!(chunk, Chunk::End, "the paste must not complete");

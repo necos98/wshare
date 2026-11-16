@@ -189,11 +189,7 @@ async fn serve_admitted(
         }
     };
     if cancel.is_cancelled() {
-        refuse(
-            &mut tx,
-            RejectReason::Other("the host stopped sharing".into()),
-        )
-        .await;
+        refuse(&mut tx, RejectReason::HostStopped).await;
         let _ = streaming.stop().await;
         return;
     }
@@ -207,7 +203,7 @@ async fn serve_admitted(
         tx.send(&screens.list(&monitors)).await
     };
     if let Err(e) = sent.await {
-        let reason = RejectReason::Other(format!("viewer left before Welcome: {e:#}"));
+        let reason = RejectReason::LeftBeforeWelcome(format!("{e:#}"));
         ctx.events
             .emit(HostEvent::ViewerRejected { address, reason });
         let _ = streaming.stop().await;

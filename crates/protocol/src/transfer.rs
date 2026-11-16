@@ -106,8 +106,19 @@ pub enum TransferError {
     /// The files are no longer offered (the clipboard changed) or cannot be
     /// read.
     Unavailable,
-    /// Anything else (a full disk...), as text for people.
+    /// Anything else (a full disk...), as text for people. Its index (3)
+    /// is the one it has always had: the variants below came with
+    /// protocol 13.
     Failed(String),
+    /// The receiver already runs as many transfers as it admits.
+    TooManyTransfers,
+    /// The receiver could not create the folders of the files; the text is
+    /// why.
+    CannotCreateFolders(String),
+    /// The receiver found no free name for the files.
+    NoFreeName,
+    /// The receiver's planning of the files broke off; the text is why.
+    PlanningFailed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,12 +297,24 @@ mod tests {
         fn accept_failed_cancel_completed() {
             let id = TransferId(9);
             assert_eq!(payload(TransferMessage::Accept { id }), [18, 1, 9]);
-            // Reasons: 0 not allowed, 1 invalid, 2 unavailable, 3 text.
+            // Reasons: 0 not allowed, 1 invalid, 2 unavailable, 3 text,
+            // 4 too many transfers, 5 folders (text), 6 no free name,
+            // 7 planning (text).
             for (reason, bytes) in [
                 (TransferError::NotAllowed, vec![0]),
                 (TransferError::Invalid, vec![1]),
                 (TransferError::Unavailable, vec![2]),
                 (TransferError::Failed("no".into()), vec![3, 2, b'n', b'o']),
+                (TransferError::TooManyTransfers, vec![4]),
+                (
+                    TransferError::CannotCreateFolders("no".into()),
+                    vec![5, 2, b'n', b'o'],
+                ),
+                (TransferError::NoFreeName, vec![6]),
+                (
+                    TransferError::PlanningFailed("no".into()),
+                    vec![7, 2, b'n', b'o'],
+                ),
             ] {
                 let mut expected = vec![18, 2, 9];
                 expected.extend(bytes);

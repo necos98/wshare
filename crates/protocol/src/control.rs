@@ -81,7 +81,13 @@ use crate::transfer::TransferMessage;
 /// 12: SecureAttention (viewer): Ctrl+Alt+Del on a host shared with
 ///    unattended access. Its refusals (`PasswordRequired`, `WrongPassword`,
 ///    `NotAuthorized`) keep the text form.
-pub const PROTOCOL_VERSION: u16 = 12;
+/// 13: `TransferError` tells the known failures apart (too many transfers,
+///    folders that cannot be created, no free name, planning that failed)
+///    instead of sending them as English text. The refusals added to
+///    [`RejectReason`] (`HostStopped`, `UnexpectedMessage`, `NoHello`,
+///    `LeftBeforeHello`, `UnreadableHello`, `LeftBeforeWelcome`) keep the
+///    text form.
+pub const PROTOCOL_VERSION: u16 = 13;
 
 /// Upper bound for one control message; protects against garbage lengths.
 /// Sized for the largest cursor image (256x256 RGBA = 256 KiB) plus margin.
@@ -150,6 +156,19 @@ pub enum RejectReason {
     /// The host is shared with unattended access, which only devices
     /// authorized earlier may use.
     NotAuthorized,
+    /// The host stopped sharing while the viewer was being let in.
+    HostStopped,
+    /// The first message was not a `Hello`.
+    UnexpectedMessage,
+    /// The viewer sent no `Hello` in time.
+    NoHello,
+    /// The viewer closed the connection before its `Hello`.
+    LeftBeforeHello,
+    /// The viewer's `Hello` could not be read; the text is why.
+    UnreadableHello(String),
+    /// The viewer closed the connection before the host's `Welcome` got
+    /// to it; the text is why.
+    LeftBeforeWelcome(String),
     /// Anything else, as text for people.
     Other(String),
 }
@@ -164,7 +183,13 @@ const TOO_MANY_REQUESTS_TEXT: &str = "too many connection requests, try again la
 const PASSWORD_REQUIRED_TEXT: &str = "password required";
 const WRONG_PASSWORD_TEXT: &str = "wrong password";
 const NOT_AUTHORIZED_TEXT: &str = "this computer accepts only devices it already knows";
+const HOST_STOPPED_TEXT: &str = "the host stopped sharing";
+const UNEXPECTED_MESSAGE_TEXT: &str = "expected Hello";
+const NO_HELLO_TEXT: &str = "viewer sent no Hello";
+const LEFT_BEFORE_HELLO_TEXT: &str = "viewer left before Hello";
 const CANNOT_STREAM_TEXT_PREFIX: &str = "host cannot stream:";
+const UNREADABLE_HELLO_TEXT_PREFIX: &str = "unreadable Hello:";
+const LEFT_BEFORE_WELCOME_TEXT_PREFIX: &str = "viewer left before Welcome:";
 /// Protocol 3 hosts wrote "protocol version V not supported (host uses H)";
 /// both forms start and end the same way.
 const VERSION_TEXT_PREFIX: &str = "protocol version";
@@ -190,6 +215,14 @@ impl fmt::Display for RejectReason {
             Self::PasswordRequired => f.write_str(PASSWORD_REQUIRED_TEXT),
             Self::WrongPassword => f.write_str(WRONG_PASSWORD_TEXT),
             Self::NotAuthorized => f.write_str(NOT_AUTHORIZED_TEXT),
+            Self::HostStopped => f.write_str(HOST_STOPPED_TEXT),
+            Self::UnexpectedMessage => f.write_str(UNEXPECTED_MESSAGE_TEXT),
+            Self::NoHello => f.write_str(NO_HELLO_TEXT),
+            Self::LeftBeforeHello => f.write_str(LEFT_BEFORE_HELLO_TEXT),
+            Self::UnreadableHello(cause) => write!(f, "{UNREADABLE_HELLO_TEXT_PREFIX} {cause}"),
+            Self::LeftBeforeWelcome(cause) => {
+                write!(f, "{LEFT_BEFORE_WELCOME_TEXT_PREFIX} {cause}")
+            }
             Self::Other(text) => f.write_str(text),
         }
     }
@@ -214,14 +247,33 @@ impl From<String> for RejectReason {
             PASSWORD_REQUIRED_TEXT => Self::PasswordRequired,
             WRONG_PASSWORD_TEXT => Self::WrongPassword,
             NOT_AUTHORIZED_TEXT => Self::NotAuthorized,
-            _ => match unsupported_version_host(&text) {
-                Some(host) => Self::UnsupportedVersion { host },
-                None => match text.strip_prefix(CANNOT_STREAM_TEXT_PREFIX) {
-                    Some(cause) => Self::CannotStream(cause.trim().to_string()),
-                    None => Self::Other(text),
-                },
-            },
+            HOST_STOPPED_TEXT => Self::HostStopped,
+            UNEXPECTED_MESSAGE_TEXT => Self::UnexpectedMessage,
+            NO_HELLO_TEXT => Self::NoHello,
+            LEFT_BEFORE_HELLO_TEXT => Self::LeftBeforeHello,
+            _ => Self::from_text_with_cause(text),
         }
+    }
+}
+
+impl RejectReason {
+    /// The reasons whose text is a fixed prefix followed by a cause (or
+    /// the version text); anything else is [`Self::Other`].
+    fn from_text_with_cause(text: String) -> Self {
+        if let Some(host) = unsupported_version_host(&text) {
+            return Self::UnsupportedVersion { host };
+        }
+        let cause_after = |prefix: &str| text.strip_prefix(prefix).map(|c| c.trim().to_string());
+        if let Some(cause) = cause_after(CANNOT_STREAM_TEXT_PREFIX) {
+            return Self::CannotStream(cause);
+        }
+        if let Some(cause) = cause_after(UNREADABLE_HELLO_TEXT_PREFIX) {
+            return Self::UnreadableHello(cause);
+        }
+        if let Some(cause) = cause_after(LEFT_BEFORE_WELCOME_TEXT_PREFIX) {
+            return Self::LeftBeforeWelcome(cause);
+        }
+        Self::Other(text)
     }
 }
 
@@ -887,6 +939,27 @@ mod tests {
             encode_frame(&ControlMessage::SecureAttention),
             frame_of(&[20])
         );
+    }
+
+    #[test]
+    fn admission_refusals_are_encoded_as_text_and_read_back() {
+        for (reason, text) in [
+            (RejectReason::HostStopped, "the host stopped sharing"),
+            (RejectReason::UnexpectedMessage, "expected Hello"),
+            (RejectReason::NoHello, "viewer sent no Hello"),
+            (RejectReason::LeftBeforeHello, "viewer left before Hello"),
+            (
+                RejectReason::UnreadableHello("bad frame".into()),
+                "unreadable Hello: bad frame",
+            ),
+            (
+                RejectReason::LeftBeforeWelcome("reset".into()),
+                "viewer left before Welcome: reset",
+            ),
+        ] {
+            assert_eq!(reason.to_string(), text);
+            assert_eq!(RejectReason::from(text.to_string()), reason);
+        }
     }
 
     #[test]

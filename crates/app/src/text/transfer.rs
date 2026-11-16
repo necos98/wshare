@@ -6,7 +6,7 @@ use std::path::Path;
 
 use protocol::transfer::TransferError;
 
-use crate::transfer::{ActiveTransfer, Direction, Ended, Outcome, Summary};
+use crate::transfer::{ActiveTransfer, Direction, Ended, Failure, Outcome, Summary};
 
 const KILOBYTE: f64 = 1e3;
 const MEGABYTE: f64 = 1e6;
@@ -30,7 +30,8 @@ pub const OPEN_FOLDER: &str = "Apri cartella";
 pub const SETTINGS_FILES: &str = "File";
 pub const SETTING_RECEIVE_FILES: &str = "Consenti ricezione file";
 pub const SETTING_RECEIVE_FILES_HINT: &str = "File trascinati, inviati o incollati dal \
-     visualizzatore (serve anche il controllo remoto)";
+     visualizzatore (serve il controllo remoto; per i file incollati anche la \
+     condivisione degli appunti)";
 pub const SETTING_DOWNLOADS: &str = "Cartella dei file ricevuti";
 pub const SETTING_DOWNLOADS_HINT: &str = "Vuota: Download\\wshare";
 pub const SETTING_DOWNLOADS_PICK: &str = "Sfoglia…";
@@ -123,7 +124,12 @@ pub fn transfer_ended(ended: &Ended) -> String {
             format!("Trasferimento di «{name}» annullato dall'altro computer")
         }
         Outcome::Refused(reason) => refusal(reason),
-        Outcome::Failed(detail) => format!("Trasferimento di «{name}» non riuscito: {detail}"),
+        Outcome::Failed(reason) => {
+            format!(
+                "Trasferimento di «{name}» non riuscito: {}",
+                failure(reason)
+            )
+        }
         Outcome::Interrupted => {
             format!("Trasferimento di «{name}» interrotto: la connessione è terminata")
         }
@@ -137,7 +143,33 @@ fn refusal(reason: &TransferError) -> String {
         }
         TransferError::Invalid => "L'altro computer ha rifiutato i file".into(),
         TransferError::Unavailable => "I file non sono più disponibili".into(),
-        TransferError::Failed(detail) => format!("Trasferimento non riuscito: {detail}"),
+        known => format!("Trasferimento non riuscito: {}", cause(known)),
+    }
+}
+
+/// Why a transfer failed, as the end of a sentence.
+fn failure(failure: &Failure) -> String {
+    match failure {
+        Failure::Cause(reason) => cause(reason),
+        Failure::NoLongerAllowed => "non più consentito su questo computer".into(),
+        Failure::Detail(detail) => detail.clone(),
+    }
+}
+
+fn cause(reason: &TransferError) -> String {
+    match reason {
+        TransferError::NotAllowed => "non consentito dall'altro computer".into(),
+        TransferError::Invalid => "i file sono stati rifiutati perché non validi".into(),
+        TransferError::Unavailable => "i file non sono più disponibili".into(),
+        TransferError::TooManyTransfers => "troppi trasferimenti contemporanei".into(),
+        TransferError::NoFreeName => "nessun nome libero per i file".into(),
+        TransferError::CannotCreateFolders(detail) => {
+            format!("impossibile creare le cartelle ({detail})")
+        }
+        TransferError::PlanningFailed(detail) => {
+            format!("preparazione dei file interrotta ({detail})")
+        }
+        TransferError::Failed(detail) => detail.clone(),
     }
 }
 
@@ -207,7 +239,78 @@ mod tests {
         );
         assert!(ended(Outcome::Cancelled { by_peer: true }).contains("dall'altro computer"));
         assert!(ended(Outcome::Refused(TransferError::NotAllowed)).contains("non accetta"));
-        assert!(ended(Outcome::Failed("disco pieno".into())).ends_with("disco pieno"));
+        assert!(
+            ended(Outcome::Failed(Failure::Detail("disco pieno".into()))).ends_with("disco pieno")
+        );
         assert!(ended(Outcome::Interrupted).contains("interrotto"));
+    }
+
+    #[test]
+    fn a_transfer_that_failed_says_why_in_italian() {
+        let info = TransferInfo {
+            id: TransferId(1),
+            direction: Direction::Receiving,
+            kind: Kind::Push,
+            name: "Foto".into(),
+            files: 2,
+            total_bytes: 9,
+        };
+        let ended = |outcome| {
+            transfer_ended(&Ended {
+                info: info.clone(),
+                outcome,
+            })
+        };
+        let failed = |failure| ended(Outcome::Failed(failure));
+        let cause = |reason| failed(Failure::Cause(reason));
+        for (text, expected) in [
+            (
+                cause(TransferError::NotAllowed),
+                "Trasferimento di «Foto» non riuscito: non consentito dall'altro computer",
+            ),
+            (
+                cause(TransferError::Invalid),
+                "Trasferimento di «Foto» non riuscito: i file sono stati rifiutati perché non validi",
+            ),
+            (
+                cause(TransferError::Unavailable),
+                "Trasferimento di «Foto» non riuscito: i file non sono più disponibili",
+            ),
+            (
+                cause(TransferError::TooManyTransfers),
+                "Trasferimento di «Foto» non riuscito: troppi trasferimenti contemporanei",
+            ),
+            (
+                cause(TransferError::NoFreeName),
+                "Trasferimento di «Foto» non riuscito: nessun nome libero per i file",
+            ),
+            (
+                cause(TransferError::CannotCreateFolders("accesso negato".into())),
+                "Trasferimento di «Foto» non riuscito: impossibile creare le cartelle (accesso negato)",
+            ),
+            (
+                cause(TransferError::PlanningFailed("panic".into())),
+                "Trasferimento di «Foto» non riuscito: preparazione dei file interrotta (panic)",
+            ),
+            (
+                failed(Failure::NoLongerAllowed),
+                "Trasferimento di «Foto» non riuscito: non più consentito su questo computer",
+            ),
+        ] {
+            assert_eq!(text, expected);
+        }
+    }
+
+    #[test]
+    fn a_refusal_for_a_known_cause_is_italian_too() {
+        let refused = |reason| refusal(&reason);
+        assert_eq!(
+            refused(TransferError::TooManyTransfers),
+            "Trasferimento non riuscito: troppi trasferimenti contemporanei"
+        );
+        assert_eq!(
+            refused(TransferError::NoFreeName),
+            "Trasferimento non riuscito: nessun nome libero per i file"
+        );
     }
 }

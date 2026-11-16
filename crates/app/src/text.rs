@@ -5,6 +5,7 @@
 //! The terminal output of the CLI stays English and lives next to the code
 //! that prints it.
 
+use codec::Codec;
 use protocol::control::RejectReason;
 use protocol::session::{MonitorEntry, Quality};
 
@@ -64,6 +65,9 @@ pub fn viewer_failure(cause: &FailureCause) -> String {
             "Il computer ha rifiutato la connessione: {}.",
             cannot_stream(detail)
         ),
+        FailureCause::HandshakeFailed => {
+            "Il computer ha rifiutato la connessione: comunicazione non valida.".to_string()
+        }
         FailureCause::Other(detail) => format!("Errore: {detail}"),
     }
 }
@@ -103,6 +107,20 @@ pub fn reject_reason(reason: &RejectReason) -> String {
         RejectReason::PasswordRequired => "password non inserita".to_string(),
         RejectReason::WrongPassword => "password errata".to_string(),
         RejectReason::NotAuthorized => "dispositivo non autorizzato".to_string(),
+        RejectReason::HostStopped => "la condivisione è stata interrotta".to_string(),
+        RejectReason::UnexpectedMessage => {
+            "il primo messaggio del visualizzatore non era valido".to_string()
+        }
+        RejectReason::NoHello => "il visualizzatore non si è presentato in tempo".to_string(),
+        RejectReason::LeftBeforeHello => {
+            "il visualizzatore si è disconnesso prima di presentarsi".to_string()
+        }
+        RejectReason::UnreadableHello(detail) => {
+            format!("richiesta di connessione illeggibile ({detail})")
+        }
+        RejectReason::LeftBeforeWelcome(detail) => {
+            format!("il visualizzatore si è disconnesso prima di ricevere lo schermo ({detail})")
+        }
         RejectReason::Other(text) => text.clone(),
     }
 }
@@ -335,6 +353,8 @@ pub fn forget_failed(detail: &str) -> String {
 
 pub const SHARE_THIS_SCREEN: &str = "Condividi questo schermo";
 pub const NEW_PIN: &str = "Nuovo PIN";
+/// The label of the PIN field and of the PIN shown to share.
+pub const PIN_LABEL: &str = "PIN";
 pub const DISCONNECT: &str = "Disconnetti";
 pub const ALLOW_REMOTE_CONTROL: &str = "Consenti controllo remoto (mouse e tastiera)";
 pub const INPUT_BLOCKED: &str =
@@ -481,9 +501,17 @@ pub const SETTINGS_CODEC: &str = "Codec";
 pub const SETTINGS_PORT: &str = "Porta";
 pub const SETTINGS_ALLOW_INPUT: &str = "Consenti controllo remoto per impostazione predefinita";
 pub const SETTINGS_SHARE_CLIPBOARD: &str =
-    "Condividi appunti (il testo copiato passa da un computer all'altro)";
+    "Condividi appunti (testo e file copiati passano da un computer all'altro)";
 pub const SETTINGS_ACCESS: &str = "Accesso";
-pub const SETTINGS_ACCESS_HINT: &str = "Come entra un computer che non è ancora autorizzato. \n     I computer autorizzati entrano sempre senza PIN né conferma.";
+pub const SETTINGS_ACCESS_HINT: &str = "Come entra un computer che non è ancora autorizzato.\n\
+     I computer autorizzati entrano sempre senza PIN né conferma.";
+
+pub fn codec_label(codec: Codec) -> &'static str {
+    match codec {
+        Codec::H264 => "H.264",
+        Codec::Hevc => "HEVC (H.265)",
+    }
+}
 
 pub fn access_mode(mode: AccessMode) -> &'static str {
     match mode {
@@ -688,6 +716,67 @@ mod tests {
         );
     }
 
+    /// Every reason the host can name, with the English it is sent as.
+    fn admission_reasons() -> [RejectReason; 6] {
+        [
+            RejectReason::HostStopped,
+            RejectReason::UnexpectedMessage,
+            RejectReason::NoHello,
+            RejectReason::LeftBeforeHello,
+            RejectReason::UnreadableHello("frame".into()),
+            RejectReason::LeftBeforeWelcome("reset".into()),
+        ]
+    }
+
+    #[test]
+    fn admission_errors_of_the_host_are_in_italian() {
+        let expected = [
+            "la condivisione è stata interrotta",
+            "il primo messaggio del visualizzatore non era valido",
+            "il visualizzatore non si è presentato in tempo",
+            "il visualizzatore si è disconnesso prima di presentarsi",
+            "richiesta di connessione illeggibile (frame)",
+            "il visualizzatore si è disconnesso prima di ricevere lo schermo (reset)",
+        ];
+        for (reason, text) in admission_reasons().iter().zip(expected) {
+            assert_eq!(reject_reason(reason), text);
+            assert_eq!(
+                viewer_rejected("1.2.3.4", reason),
+                format!("Connessione rifiutata da 1.2.3.4: {text}")
+            );
+            assert_ne!(reject_reason(reason), reason.to_string(), "still English");
+        }
+    }
+
+    #[test]
+    fn a_handshake_the_host_refused_is_worded_for_the_viewer() {
+        assert_eq!(
+            viewer_failure(&FailureCause::HandshakeFailed),
+            "Il computer ha rifiutato la connessione: comunicazione non valida."
+        );
+    }
+
+    #[test]
+    fn labels_that_were_outside_this_module_live_here() {
+        assert_eq!(PIN_LABEL, "PIN");
+        assert_eq!(codec_label(Codec::H264), "H.264");
+        assert_eq!(codec_label(Codec::Hevc), "HEVC (H.265)");
+    }
+
+    #[test]
+    fn the_access_hint_has_two_clean_lines() {
+        let (first, second) = SETTINGS_ACCESS_HINT.split_once('\n').unwrap();
+        assert_eq!(first, first.trim_end());
+        assert_eq!(second, second.trim_start());
+        assert!(second.starts_with("I computer autorizzati"));
+    }
+
+    #[test]
+    fn the_clipboard_and_file_settings_tell_the_whole_rule() {
+        assert!(SETTINGS_SHARE_CLIPBOARD.contains("file"));
+        assert!(SETTING_RECEIVE_FILES_HINT.contains("appunti"));
+        assert!(SETTING_RECEIVE_FILES_HINT.contains("controllo remoto"));
+    }
     #[test]
     fn rejection_reasons_for_the_host() {
         assert_eq!(reject_reason(&RejectReason::WrongPin), "PIN errato");

@@ -132,6 +132,17 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_admission_is_worded_in_italian_in_the_bubble() {
+        let event = HostEvent::ViewerRejected {
+            address: address(),
+            reason: RejectReason::NoHello,
+        };
+        let body = for_host_event(&event, None).unwrap().body;
+        assert!(body.contains("non si è presentato in tempo"), "{body}");
+        assert!(!body.contains("Hello"), "{body}");
+    }
+
+    #[test]
     fn other_events_stay_quiet() {
         for event in [
             HostEvent::InputBlocked,

@@ -6,12 +6,9 @@
 
 use protocol::transfer::{TransferError, TransferId, TransferMessage};
 
-use super::events::Outcome;
+use super::events::{Failure, Outcome};
 use super::registry::Stage;
 use super::shared::Shared;
-
-/// The outcome here of a transfer stopped because it was no longer allowed.
-pub const NO_LONGER_ALLOWED: &str = "no longer allowed on this computer";
 
 impl Shared {
     /// The settings changed: the pushes arriving and the pastes from the
@@ -51,7 +48,7 @@ impl Shared {
 
     /// Stops `id`, which is no longer allowed, and tells the other PC.
     pub fn revoke(&self, id: TransferId) {
-        if self.finish(id, Outcome::Failed(NO_LONGER_ALLOWED.into())) {
+        if self.finish(id, Outcome::Failed(Failure::NoLongerAllowed)) {
             let reason = TransferError::NotAllowed;
             self.send(TransferMessage::Failed { id, reason });
         }

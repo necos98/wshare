@@ -13,7 +13,7 @@ use protocol::transfer::{TransferError, TransferId, TransferMessage};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::AbortHandle;
 
-use super::events::{Outcome, TransferEvent, TransferInfo, TransferObserver};
+use super::events::{Failure, Outcome, TransferEvent, TransferInfo, TransferObserver};
 use super::registry::{Registry, Stage, Transfer};
 use super::streams::StreamError;
 use crate::printable;
@@ -139,7 +139,7 @@ impl Shared {
         match error {
             StreamError::Cancelled => self.cancel_here(id),
             StreamError::Failed(detail) => {
-                if self.finish(id, Outcome::Failed(detail.clone())) {
+                if self.finish(id, Outcome::Failed(Failure::Detail(detail.clone()))) {
                     self.send(TransferMessage::Failed {
                         id,
                         reason: TransferError::Failed(detail),
@@ -159,7 +159,7 @@ impl Shared {
         let outcome = if offered {
             Outcome::Refused(reason)
         } else {
-            Outcome::Failed(describe(&reason))
+            Outcome::Failed(Failure::from_error(reason))
         };
         self.finish(id, outcome);
     }
@@ -187,20 +187,17 @@ impl Shared {
 /// A reason the other PC sent, made safe to keep, show and print: its text
 /// without control characters, at most [`MAX_PEER_REASON_CHARS`] long.
 fn clean_peer_reason(reason: TransferError) -> TransferError {
+    let clean = |detail: String| printable::clean(&detail, MAX_PEER_REASON_CHARS);
     match reason {
-        TransferError::Failed(detail) => {
-            TransferError::Failed(printable::clean(&detail, MAX_PEER_REASON_CHARS))
+        TransferError::Failed(detail) => TransferError::Failed(clean(detail)),
+        TransferError::CannotCreateFolders(detail) => {
+            TransferError::CannotCreateFolders(clean(detail))
         }
-        other => other,
-    }
-}
-
-/// The English text of a reason, for the outcome of a transfer under way.
-pub fn describe(reason: &TransferError) -> String {
-    match reason {
-        TransferError::NotAllowed => "not allowed by the other computer".into(),
-        TransferError::Invalid => "refused as invalid".into(),
-        TransferError::Unavailable => "the files are no longer available".into(),
-        TransferError::Failed(detail) => detail.clone(),
+        TransferError::PlanningFailed(detail) => TransferError::PlanningFailed(clean(detail)),
+        known @ (TransferError::NotAllowed
+        | TransferError::Invalid
+        | TransferError::Unavailable
+        | TransferError::TooManyTransfers
+        | TransferError::NoFreeName) => known,
     }
 }

@@ -169,7 +169,7 @@ mod tests {
     use protocol::transfer::{TransferError, TransferId};
 
     use super::*;
-    use crate::transfer::{Direction, Kind, Outcome, TransferInfo};
+    use crate::transfer::{Direction, Failure, Kind, Outcome, TransferInfo};
     use crate::viewer::report::ViewerReport;
 
     /// A host that tries to add a line of its own to the viewer's stdout.
@@ -188,7 +188,7 @@ mod tests {
                 files: 1,
                 total_bytes: 1,
             }),
-            finished(Outcome::Failed(FORGED.into())),
+            finished(Outcome::Failed(Failure::Detail(FORGED.into()))),
             finished(Outcome::Refused(TransferError::Failed(FORGED.into()))),
         ]
     }

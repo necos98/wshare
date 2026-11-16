@@ -12,7 +12,7 @@ use protocol::transfer::{
 use tokio::sync::mpsc;
 
 use super::events::{Direction, Kind, Outcome, TransferInfo};
-use super::registry::{Chunk, Stage, TOO_MANY_TRANSFERS, Transfer};
+use super::registry::{Chunk, Stage, Transfer};
 use super::shared::Shared;
 use super::streams::{StreamError, cancelled, forward_file, send_file};
 
@@ -181,7 +181,7 @@ impl Shared {
         let mut registry = self.registry();
         if !registry.admits_peer(id) {
             drop(registry);
-            let reason = TransferError::Failed(TOO_MANY_TRANSFERS.into());
+            let reason = TransferError::TooManyTransfers;
             return self.send(TransferMessage::Failed { id, reason });
         }
         if !self.permissions.serve_clipboard() {

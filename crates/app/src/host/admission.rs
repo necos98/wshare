@@ -74,16 +74,24 @@ pub(super) async fn admit(
         () = cancel.wait() => return Admission::Abandoned,
         hello = tokio::time::timeout(HELLO_TIMEOUT, rx.recv()) => hello,
     };
-    let refused = |reason: &str| Admission::Refused {
-        reason: RejectReason::Other(reason.to_string()),
-    };
     let decision = match hello {
-        Err(_) => return refused("viewer sent no Hello"),
+        Err(_) => {
+            return Admission::Refused {
+                reason: RejectReason::NoHello,
+            };
+        }
         // A Hello of another protocol version may not decode: tell the
         // viewer so (older viewers can read the answer).
         Ok(Err(e)) if is_incompatible_hello(&e) => Decision::Refuse(unsupported_version()),
-        Ok(Err(e)) => return refused(&format!("{e:#}")),
-        Ok(Ok(None)) => return refused("viewer left before Hello"),
+        Ok(Err(e)) => {
+            let reason = RejectReason::UnreadableHello(format!("{e:#}"));
+            return Admission::Refused { reason };
+        }
+        Ok(Ok(None)) => {
+            return Admission::Refused {
+                reason: RejectReason::LeftBeforeHello,
+            };
+        }
         Ok(Ok(Some(message))) => {
             let password = check_password(&message, ctx, applicant).await;
             match judge(&message, ctx, applicant, password) {

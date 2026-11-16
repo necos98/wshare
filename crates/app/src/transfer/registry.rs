@@ -19,9 +19,6 @@ use super::receiving::Receiving;
 /// Most transfers a session runs at once; more are refused.
 pub const MAX_ACTIVE_TRANSFERS: usize = 32;
 
-/// Why a transfer is refused when [`MAX_ACTIVE_TRANSFERS`] are running.
-pub const TOO_MANY_TRANSFERS: &str = "too many transfers at once";
-
 /// Which side of the session this PC is: it decides the ids it may pick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {

@@ -10,6 +10,8 @@
 //!   `@wshare:failed:<cause>[:<detail>]` when the viewer ends because of a
 //!   [`FailureCause`];
 //! - the file transfers' lines, in both directions (see `channel`);
+//! - nothing else on stdout: the terminal's lines go to stderr meanwhile
+//!   (see `console`);
 //! - the exit code: 0 for a normal end, [`FailureCause::exit_code`] after a
 //!   failure (101 is a panic). The code alone still names the causes that
 //!   carry no detail, e.g. when the process died before printing the line.

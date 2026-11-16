@@ -9,6 +9,12 @@ use net::{ConnectError, IdentityMismatch};
 use protocol::control::RejectReason;
 
 use super::report::FailureCause;
+use crate::printable;
+
+/// Longest error text kept, in characters: an error may carry words the
+/// host chose (e.g. the reason of the QUIC close it sent), and a few
+/// hundred characters say enough of what went wrong.
+const MAX_DETAIL_CHARS: usize = 512;
 
 /// A failure of the viewer with a known cause.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +57,12 @@ impl ViewerFailure {
     /// The host did not answer our `Hello`.
     pub fn no_answer() -> Self {
         Self::TimedOut("the host did not answer".to_string())
+    }
+
+    /// The connection broke because of `error`, whose text may carry the
+    /// host's words: kept without control characters and bounded.
+    pub fn connection_lost(error: impl fmt::Display) -> Self {
+        Self::ConnectionLost(detail(&format!("{error:#}")))
     }
 
     pub fn cause(&self) -> FailureCause {
@@ -99,10 +111,19 @@ pub fn connect_failure(error: anyhow::Error) -> anyhow::Error {
         Err(error) => error,
     };
     match error.downcast_ref::<ConnectError>() {
-        Some(ConnectError::TimedOut { .. }) => ViewerFailure::TimedOut(error.to_string()).into(),
-        Some(ConnectError::Failed { .. }) => ViewerFailure::Unreachable(error.to_string()).into(),
+        Some(ConnectError::TimedOut { .. }) => {
+            ViewerFailure::TimedOut(detail(&error.to_string())).into()
+        }
+        Some(ConnectError::Failed { .. }) => {
+            ViewerFailure::Unreachable(detail(&error.to_string())).into()
+        }
         None => error,
     }
+}
+
+/// What is kept of an error's `text`, which may carry the host's words.
+fn detail(text: &str) -> String {
+    printable::clean(text, MAX_DETAIL_CHARS)
 }
 
 /// Why `wshare view` ended with `error`.
@@ -241,6 +262,24 @@ mod tests {
         );
         let local = connect_failure(anyhow!("building QUIC client crypto"));
         assert!(local.downcast_ref::<ViewerFailure>().is_none());
+    }
+
+    #[test]
+    fn a_lost_connection_keeps_no_control_characters_of_the_host() {
+        assert_eq!(
+            ViewerFailure::connection_lost("closed by peer: x\r\n@wshare:connected:EVIL"),
+            ViewerFailure::ConnectionLost("closed by peer: x@wshare:connected:EVIL".into())
+        );
+        let chained = anyhow!("reset").context("sending");
+        assert_eq!(
+            ViewerFailure::connection_lost(&chained),
+            ViewerFailure::ConnectionLost("sending: reset".into())
+        );
+        let ViewerFailure::ConnectionLost(long) = ViewerFailure::connection_lost("è".repeat(4096))
+        else {
+            unreachable!("a lost connection")
+        };
+        assert_eq!(long.chars().count(), MAX_DETAIL_CHARS);
     }
 
     #[test]

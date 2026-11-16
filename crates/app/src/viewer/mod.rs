@@ -30,6 +30,7 @@ mod audio;
 mod bar_menu;
 pub mod channel;
 mod clipboard;
+mod console;
 mod control;
 mod control_policy;
 mod cursor;
@@ -78,6 +79,7 @@ use crate::target::{self, Resolved, parse_target};
 use crate::trust::clean_peer_name;
 use audio::{AudioIn, AudioPlayer};
 use clipboard::ViewerClipboard;
+use console::Console;
 use control::{ControlLink, ControlTask, Reconnection, VideoFeed};
 use control_policy::ControlPolicy;
 use failure::ViewerFailure;
@@ -116,9 +118,11 @@ struct Connected {
 }
 
 pub fn run(options: ViewOptions) -> Result<()> {
+    let reporting = report::reporting_enabled(std::env::var(REPORT_ENV).ok().as_deref());
+    let console = Console::new(reporting);
     let target = parse_target(options.target.as_deref(), DEFAULT_PORT);
     if !matches!(target, target::Target::Address(_)) {
-        println!("Searching the LAN for hosts...");
+        console.line("Searching the LAN for hosts...");
     }
     let Resolved {
         addr,
@@ -127,7 +131,6 @@ pub fn run(options: ViewOptions) -> Result<()> {
     } = target::resolve(&target, DISCOVERY_WAIT)?;
     let mut pairing = Pairing::load(options.host_id.as_deref().or(host_id.as_deref()));
     let given = given_pin(options.pin, std::env::var(PIN_ENV).ok());
-    let reporting = report::reporting_enabled(std::env::var(REPORT_ENV).ok().as_deref());
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -156,19 +159,19 @@ pub fn run(options: ViewOptions) -> Result<()> {
             .to_line()
         );
     }
-    println!(
+    console.line(format_args!(
         "Connected to \"{host_name}\" ({addr}) - {}x{} @ {} fps {:?}",
         stream.width, stream.height, stream.fps, stream.codec
-    );
-    println!("Host fingerprint: {fingerprint}");
+    ));
+    console.line(format_args!("Host fingerprint: {fingerprint}"));
     let policy = ControlPolicy {
         host_allows: input_allowed,
         view_only: options.view_only,
     };
     if !policy.enabled() {
-        println!("View only: mouse and keyboard stay local.");
+        console.line("View only: mouse and keyboard stay local.");
     }
-    println!("Ctrl+Alt+Enter: full screen - Ctrl+Alt+I: statistics");
+    console.line("Ctrl+Alt+Enter: full screen - Ctrl+Alt+I: statistics");
 
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     // No raw input: by default winit registers keyboard and mouse as raw
@@ -223,6 +226,7 @@ pub fn run(options: ViewOptions) -> Result<()> {
             restart: restart.clone(),
             handle: handle.clone(),
         },
+        console,
     }));
 
     let rtt_handle = handle.clone();
@@ -231,6 +235,7 @@ pub fn run(options: ViewOptions) -> Result<()> {
             title: format!("{host_name} - wshare"),
             fullscreen: options.fullscreen,
             stats: options.stats,
+            console,
         },
         stream,
         VideoIn {
@@ -256,7 +261,7 @@ pub fn run(options: ViewOptions) -> Result<()> {
         handle.close("viewer closed");
     });
     if let Some(stats) = window.stats() {
-        println!(
+        console.line(format_args!(
             "Session: {} frames shown, {} lost, {} recovered ({} resend requests), \
              {} skipped, {} passed over to catch up, {} keyframes requested",
             stats.frames_presented,
@@ -266,7 +271,7 @@ pub fn run(options: ViewOptions) -> Result<()> {
             stats.frames_skipped,
             stats.frames_superseded,
             stats.keyframes_requested
-        );
+        ));
     }
     if let Some(e) = window.error() {
         bail!("{e}");
@@ -390,7 +395,7 @@ async fn connect(
         pin,
     })
     .await
-    .map_err(|e| ViewerFailure::ConnectionLost(format!("{e:#}")))?;
+    .map_err(ViewerFailure::connection_lost)?;
     let mut answer = next_answer(&mut rx, WELCOME_TIMEOUT).await?;
     if answer == Some(ControlMessage::AwaitingApproval) {
         // The person at the host is asked; Welcome or Rejected follows.
@@ -428,7 +433,7 @@ async fn next_answer(
     tokio::time::timeout(within, rx.recv())
         .await
         .map_err(|_| ViewerFailure::no_answer())?
-        .map_err(|e| ViewerFailure::ConnectionLost(format!("{e:#}")))
+        .map_err(ViewerFailure::connection_lost)
 }
 
 /// Says the host asked the person at its PC about this one: in a line for
@@ -437,7 +442,7 @@ fn announce_waiting(reporting: bool) {
     if reporting {
         println!("{}", ViewerReport::AwaitingApproval.to_line());
     }
-    println!("Waiting for the host to accept this PC...");
+    Console::new(reporting).line("Waiting for the host to accept this PC...");
 }
 
 /// Asks for the PIN on the terminal; `None` without asking when the desktop

@@ -17,6 +17,7 @@ use render::{Renderer, ToolbarView};
 use windows::Win32::Foundation::HWND;
 
 use super::Outgoing;
+use super::console::Console;
 use super::feed::{Restart, discard_waiting, next_batch};
 use super::notice::{Notice, NoticeBoard, NoticeUpdate};
 use super::rate::ReceptionReporter;
@@ -45,6 +46,8 @@ pub struct RenderInput {
     pub link: LinkProbe,
     /// Raised by the control task when the stream starts over.
     pub restart: Restart,
+    /// Where the decoder in use is written.
+    pub console: Console,
 }
 
 pub struct RenderThread {
@@ -209,7 +212,11 @@ fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
     let decoder = HwDecoder::new(&gpu, codec, input.stream.width, input.stream.height)?;
     let mut applied = unpack(size.load(Ordering::Relaxed));
     let renderer = Renderer::new(&gpu, hwnd, applied.0, applied.1)?;
-    println!("Decoding with {} on {}", decoder.name(), gpu.adapter_name);
+    input.console.line(format_args!(
+        "Decoding with {} on {}",
+        decoder.name(),
+        gpu.adapter_name
+    ));
     let link = input.link;
     let restart = input.restart;
     let mut overlay = StatsOverlay::new(input.stream.clone(), decoder.name().to_string());

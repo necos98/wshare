@@ -46,7 +46,8 @@ fn main() {
         if is_gui {
             gui::platform::error_box(&text::window_failed(&format!("{e:#}")));
         } else {
-            eprintln!("error: {e:#}");
+            // The error may carry the other PC's words (e.g. a refusal's).
+            eprintln!("error: {}", printable::single_line(&format!("{e:#}")));
         }
         // The desktop interface reads why a viewer failed from its code.
         let code = if is_view {

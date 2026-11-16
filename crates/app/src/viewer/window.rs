@@ -20,6 +20,7 @@ use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{Fullscreen, Window, WindowId};
 
 use super::Outgoing;
+use super::console::Console;
 use super::control_policy::ControlPolicy;
 use super::cursor::CursorCache;
 use super::failure::ViewerFailure;
@@ -82,6 +83,8 @@ pub struct WindowOptions {
     pub fullscreen: bool,
     /// Statistics overlay visible from the start.
     pub stats: bool,
+    /// Where the window and its render thread write their terminal lines.
+    pub console: Console,
 }
 
 /// Inputs consumed when the window opens and the render thread starts.
@@ -201,6 +204,7 @@ impl ViewerWindow {
             outgoing: self.outgoing.clone(),
             link,
             restart,
+            console: self.options.console,
         };
         let proxy = self.proxy.clone();
         let render = RenderThread::start(input, width, height, move |result| {
@@ -497,7 +501,7 @@ impl ApplicationHandler<UserEvent> for ViewerWindow {
             UserEvent::Transfer(event) => self.show_transfer(event),
             UserEvent::FilesChosen(chosen) => self.files.send_chosen(chosen),
             UserEvent::HostLeft(failure) => {
-                println!("{failure}");
+                self.options.console.line(&failure);
                 self.host_left = Some(failure);
                 self.close(event_loop);
             }

@@ -28,6 +28,7 @@ use winit::event_loop::EventLoopProxy;
 
 use super::audio::AudioIn;
 use super::clipboard::ViewerClipboard;
+use super::console::Console;
 use super::failure::ViewerFailure;
 use super::feed::{self, Restart};
 use super::live_handle::LiveHandle;
@@ -108,6 +109,8 @@ pub struct ControlTask {
     pub transfers: TransferSetup,
     pub reconnection: Reconnection,
     pub feed: VideoFeed,
+    /// Where "reconnecting..." and "Reconnected." are written.
+    pub console: Console,
 }
 
 /// How a connection's turn ended.
@@ -139,6 +142,7 @@ pub async fn run(task: ControlTask) {
         transfers,
         mut reconnection,
         mut feed,
+        console,
     } = task;
     let mut asked = AskedChoices::default();
     let reason = loop {
@@ -160,7 +164,7 @@ pub async fn run(task: ControlTask) {
             break failure;
         }
         let _ = window.send_event(UserEvent::Reconnecting);
-        println!("{failure}; reconnecting...");
+        console.line(format_args!("{failure}; reconnecting..."));
         feed.handle.close("connection lost");
         let resumed = match reestablish(failure, &mut outgoing, &mut asked, &reconnection).await {
             Ok(connected) => resume(connected, &mut reconnection, &mut feed).await,
@@ -184,7 +188,7 @@ pub async fn run(task: ControlTask) {
                     let _ = link.tx.send(&request).await;
                 }
                 let _ = window.send_event(UserEvent::Reconnected);
-                println!("Reconnected.");
+                console.line("Reconnected.");
             }
             Err(Stop::Cancelled) => return,
             Err(Stop::Failed(failure)) => break failure,
@@ -230,7 +234,7 @@ async fn serve(link: &mut ControlLink, turn: Turn<'_>) -> Served {
         tokio::select! {
             Some(message) = for_host.recv() => {
                 if let Err(e) = tx.send(&message).await {
-                    return Served::Ended(ViewerFailure::ConnectionLost(format!("{e:#}")));
+                    return Served::Ended(ViewerFailure::connection_lost(e));
                 }
             }
             Some(command) = commands.recv() => hub.command(command),
@@ -238,7 +242,7 @@ async fn serve(link: &mut ControlLink, turn: Turn<'_>) -> Served {
                 let Some(first) = message else { return Served::Finished };
                 for message in outbox::next_batch(first, outgoing) {
                     if let Err(e) = tx.send(&message).await {
-                        return Served::Ended(ViewerFailure::ConnectionLost(format!("{e:#}")));
+                        return Served::Ended(ViewerFailure::connection_lost(e));
                     }
                     if message == ControlMessage::Bye {
                         return Served::Finished;
@@ -250,7 +254,7 @@ async fn serve(link: &mut ControlLink, turn: Turn<'_>) -> Served {
                 if let Some(message) = clipboard.local_change(&hub).await
                     && let Err(e) = tx.send(&message).await
                 {
-                    return Served::Ended(ViewerFailure::ConnectionLost(format!("{e:#}")));
+                    return Served::Ended(ViewerFailure::connection_lost(e));
                 }
             }
             incoming = rx.recv() => match incoming {
@@ -282,7 +286,7 @@ async fn serve(link: &mut ControlLink, turn: Turn<'_>) -> Served {
                     }
                 }
                 Err(e) => {
-                    return Served::Ended(ViewerFailure::ConnectionLost(format!("{e:#}")));
+                    return Served::Ended(ViewerFailure::connection_lost(e));
                 }
             }
         }
@@ -453,7 +457,7 @@ async fn until_cancelled(
 fn failure_of(error: anyhow::Error) -> ViewerFailure {
     error
         .downcast::<ViewerFailure>()
-        .unwrap_or_else(|error| ViewerFailure::ConnectionLost(format!("{error:#}")))
+        .unwrap_or_else(ViewerFailure::connection_lost)
 }
 
 /// What the viewer ends with when every attempt failed: a lost connection.

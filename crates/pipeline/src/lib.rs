@@ -22,5 +22,8 @@ pub use bitrate::{BitrateController, NetworkSample, video_ceiling};
 pub use host::{HostStats, HostStreamer, StreamContinuation};
 pub use pacer::FramePacer;
 pub use retransmit::RecentFrames;
-pub use traits::{DatagramSink, EncodedFrame, FrameSink, FrameSource, VideoDecoder, VideoEncoder};
+pub use traits::{
+    DatagramSink, DatagramTooLarge, EncodedFrame, FrameSink, FrameSource, VideoDecoder,
+    VideoEncoder,
+};
 pub use viewer::{ViewerAction, ViewerStats, ViewerStreamer};

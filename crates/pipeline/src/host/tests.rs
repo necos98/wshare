@@ -115,10 +115,21 @@ impl VideoEncoder for FakeEncoder {
     }
 }
 
+/// The datagram limit drops to `to` bytes once `after` datagrams were
+/// sent, like QUIC lowering it in the middle of a frame.
+#[derive(Clone, Copy)]
+struct Shrink {
+    after: usize,
+    to: usize,
+}
+
 /// Records every datagram and counts the bytes of each as queued until
-/// the test drains them, like a link that has not sent them yet.
+/// the test drains them, like a link that has not sent them yet. Refuses
+/// datagrams over `max_size`, and everything once `broken`, like QUIC.
 struct FakeSink {
     max_size: Rc<RefCell<usize>>,
+    shrink: Rc<Cell<Option<Shrink>>>,
+    broken: Rc<Cell<bool>>,
     sent: Rc<RefCell<Vec<Bytes>>>,
     backlog: Rc<Cell<usize>>,
     /// When each datagram of `sent` was sent.
@@ -131,6 +142,23 @@ impl DatagramSink for FakeSink {
     }
 
     fn send(&self, datagram: Bytes) -> Result<()> {
+        if self.broken.get() {
+            anyhow::bail!("connection lost");
+        }
+        if let Some(shrink) = self.shrink.get()
+            && self.sent.borrow().len() >= shrink.after
+        {
+            *self.max_size.borrow_mut() = shrink.to;
+            self.shrink.set(None);
+        }
+        let limit = *self.max_size.borrow();
+        if datagram.len() > limit {
+            return Err(DatagramTooLarge {
+                len: datagram.len(),
+                limit,
+            }
+            .into());
+        }
         self.backlog.set(self.backlog.get() + datagram.len());
         self.sent.borrow_mut().push(datagram);
         self.sent_at.borrow_mut().push(Instant::now());
@@ -146,6 +174,8 @@ struct Harness {
     source: Rc<RefCell<SourceState>>,
     encoder: Rc<RefCell<EncoderState>>,
     max_size: Rc<RefCell<usize>>,
+    shrink: Rc<Cell<Option<Shrink>>>,
+    broken: Rc<Cell<bool>>,
     sent: Rc<RefCell<Vec<Bytes>>>,
     backlog: Rc<Cell<usize>>,
     /// When each datagram of `sent` was sent.
@@ -175,6 +205,8 @@ fn harness(initial: &[u8], capacity: usize) -> Harness {
         refuse_bitrate: false,
     }));
     let max_size = Rc::new(RefCell::new(HEADER_LEN + 4));
+    let shrink = Rc::new(Cell::new(None));
+    let broken = Rc::new(Cell::new(false));
     let sent = Rc::new(RefCell::new(Vec::new()));
     let backlog = Rc::new(Cell::new(0));
     let sent_at = Rc::new(RefCell::new(Vec::new()));
@@ -184,6 +216,8 @@ fn harness(initial: &[u8], capacity: usize) -> Harness {
         FakeEncoder(encoder.clone()),
         FakeSink {
             max_size: max_size.clone(),
+            shrink: shrink.clone(),
+            broken: broken.clone(),
             sent: sent.clone(),
             backlog: backlog.clone(),
             sent_at: sent_at.clone(),
@@ -196,6 +230,8 @@ fn harness(initial: &[u8], capacity: usize) -> Harness {
         source,
         encoder,
         max_size,
+        shrink,
+        broken,
         sent,
         backlog,
         sent_at,
@@ -399,6 +435,49 @@ fn sent_frames_can_be_resent_from_the_shared_buffer() {
     r.push(sent[0].clone()).unwrap();
     let events = r.push(h.sent.borrow()[2].clone()).unwrap();
     assert!(matches!(&events[..], [ReassemblyEvent::Frame(f)] if f.data[..] == *b"12345678"));
+}
+
+#[test]
+fn a_limit_shrinking_mid_frame_drops_the_frame_and_forces_a_keyframe() {
+    let mut h = harness(b"12345678", 1);
+    h.step_until(|h| h.streamer.stats().frames_sent == 1);
+    let before = h.sent.borrow().len();
+    h.shrink.set(Some(Shrink {
+        after: before + 1,
+        to: HEADER_LEN + 2,
+    }));
+    // `step` must not fail: the session goes on.
+    h.change_and_submit(b"abcdefgh");
+    let stats = h.streamer.stats();
+    assert_eq!((stats.frames_sent, stats.frames_too_large), (1, 1));
+    assert_eq!(h.sent.borrow().len(), before + 1, "the rest is dropped");
+    // The viewer cannot decode on without that frame: a keyframe follows,
+    // packetized for the new limit.
+    h.step_until(|h| h.streamer.stats().frames_sent == 2);
+    assert_eq!(h.streamer.stats().keyframes_sent, 2);
+    assert!(
+        h.sent.borrow()[before + 1..]
+            .iter()
+            .all(|d| d.len() <= HEADER_LEN + 2)
+    );
+    // The dropped frame's datagrams were sized for the old limit: asked
+    // for again, they are dropped and counted, not fatal either.
+    let nack = Nack {
+        frame_id: 1,
+        missing: Missing::Whole,
+    };
+    let resent = h.recent.resend(&nack, &h.streamer.sink, Instant::now());
+    assert_eq!(resent.unwrap(), 0);
+    assert_eq!(h.streamer.stats().resends_too_large, 2);
+}
+
+#[test]
+fn other_send_errors_still_end_the_stream() {
+    let mut h = harness(b"12345678", 1);
+    h.broken.set(true);
+    let error = h.streamer.step().unwrap_err();
+    assert!(!error.is::<DatagramTooLarge>());
+    assert_eq!(h.streamer.stats().frames_too_large, 0);
 }
 
 #[test]

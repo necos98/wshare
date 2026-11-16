@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use net::{ConnectError, Fingerprint, HostEndpoint, Identity, IdentityMismatch, Session, connect};
-use pipeline::DatagramSink;
+use pipeline::{DatagramSink, DatagramTooLarge};
 use protocol::control::{ControlMessage, PROTOCOL_VERSION, StreamInfo, VideoCodec};
 use tokio::time::timeout;
 
@@ -206,11 +206,21 @@ async fn transport_stats_follow_the_traffic() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn oversized_datagram_errors() {
+async fn an_oversized_datagram_is_reported_as_too_large() {
     let c = connected().await;
     let max = DatagramSink::max_datagram_size(&c.host.2);
-    assert!(DatagramSink::send(&c.host.2, Bytes::from(vec![0; max + 1])).is_err());
-    assert!(DatagramSink::send(&c.host.2, Bytes::from(vec![0; 65_536])).is_err());
+    let error = DatagramSink::send(&c.host.2, Bytes::from(vec![0; max + 1])).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<DatagramTooLarge>(),
+        Some(&DatagramTooLarge {
+            len: max + 1,
+            limit: max
+        })
+    );
+    let error = DatagramSink::send(&c.host.2, Bytes::from(vec![0; 65_536])).unwrap_err();
+    assert!(error.is::<DatagramTooLarge>());
+    // The connection still carries datagrams that fit.
+    DatagramSink::send(&c.host.2, Bytes::from(vec![0; max])).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

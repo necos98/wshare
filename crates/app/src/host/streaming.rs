@@ -370,7 +370,7 @@ fn stream_loop(
             }
             Err(e) => {
                 return Ok(StreamEnd {
-                    stats: live.streamer.stats().clone(),
+                    stats: live.streamer.stats(),
                     error: Some(e),
                 });
             }
@@ -383,7 +383,7 @@ fn stream_loop(
         adapt_bitrate(&mut live, &transport, &control);
     }
     Ok(StreamEnd {
-        stats: live.streamer.stats().clone(),
+        stats: live.streamer.stats(),
         error: None,
     })
 }
@@ -436,7 +436,7 @@ fn ended(
     control: &StreamControl<'_>,
 ) -> StreamEnd {
     StreamEnd {
-        stats: continuation.stats().clone(),
+        stats: continuation.stats(),
         error: (!control.stopped()).then_some(error),
     }
 }

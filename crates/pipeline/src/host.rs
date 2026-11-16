@@ -6,7 +6,9 @@
 //!
 //! Under congestion frames are skipped *before* capture and encoding (see
 //! [`crate::backlog`]): every frame that is encoded is also sent whole, so
-//! the decoder's reference chain stays valid.
+//! the decoder's reference chain stays valid. The one exception is a frame
+//! the transport's datagram limit shrinks under while it leaves: it is
+//! given up and a keyframe starts the chain again.
 //!
 //! Every frame sent is kept for a moment in [`RecentFrames`], from which
 //! the datagrams a viewer missed are sent again ([`crate::retransmit`]).
@@ -31,7 +33,7 @@ use crate::burst::{BURST_GAP, burst_sizes};
 use crate::keyframe_gate::KeyframeGate;
 use crate::pacer::FramePacer;
 use crate::retransmit::RecentFrames;
-use crate::traits::{DatagramSink, EncodedFrame, FrameSource, VideoEncoder};
+use crate::traits::{DatagramSink, DatagramTooLarge, EncodedFrame, FrameSource, VideoEncoder};
 
 /// Upper bound on encoder events awaited after a submit (an async encoder
 /// typically emits "need input" then "have output").
@@ -49,6 +51,23 @@ pub struct HostStats {
     pub frames_skipped: u64,
     /// Keyframe requests ignored because a keyframe was already on its way.
     pub keyframe_requests_merged: u64,
+    /// Frames dropped part-sent because the datagram limit shrank under
+    /// them; a keyframe replaces each.
+    pub frames_too_large: u64,
+    /// Resent datagrams dropped because they no longer fit the datagram
+    /// limit (see [`RecentFrames::resend`]).
+    pub resends_too_large: u64,
+}
+
+impl HostStats {
+    /// These counts, with the resends answered from `recent` (by another
+    /// thread) counted in.
+    fn with_resends(&self, recent: &RecentFrames) -> Self {
+        Self {
+            resends_too_large: recent.resends_too_large(),
+            ..self.clone()
+        }
+    }
 }
 
 /// What one stream hands to the next when capture and encoder start over
@@ -66,8 +85,8 @@ pub struct StreamContinuation<D> {
 impl<D> StreamContinuation<D> {
     /// What the streams so far did, e.g. to report them when no new
     /// stream can be started.
-    pub fn stats(&self) -> &HostStats {
-        &self.stats
+    pub fn stats(&self) -> HostStats {
+        self.stats.with_resends(&self.recent)
     }
 }
 
@@ -209,9 +228,7 @@ where
             self.stats.keyframe_requests_merged += 1;
             return Ok(());
         }
-        self.encoder.request_keyframe()?;
-        self.pacer.mark_dirty();
-        Ok(())
+        self.force_keyframe()
     }
 
     /// Retargets the encoder (see [`crate::bitrate`]) and resizes the send
@@ -223,8 +240,9 @@ where
         Ok(())
     }
 
-    pub fn stats(&self) -> &HostStats {
-        &self.stats
+    /// What the stream did so far, resends included.
+    pub fn stats(&self) -> HostStats {
+        self.stats.with_resends(&self.recent)
     }
 
     /// The frame source, for source-specific side channels between
@@ -253,13 +271,43 @@ where
             self.packetizer
                 .packetize(&frame.data, frame.keyframe, frame.timestamp, max_size)?;
         self.recent.record(frame_id, &datagrams, Instant::now());
-        self.send_in_bursts(datagrams)?;
-        self.stats.frames_sent += 1;
         self.in_flight = self.in_flight.saturating_sub(1);
-        if frame.keyframe {
+        match self.send_in_bursts(datagrams) {
+            Ok(()) => {
+                self.on_frame_sent(frame.keyframe);
+                Ok(())
+            }
+            Err(error) if error.is::<DatagramTooLarge>() => self.on_frame_too_large(),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn on_frame_sent(&mut self, keyframe: bool) {
+        self.stats.frames_sent += 1;
+        if keyframe {
             self.stats.keyframes_sent += 1;
             self.keyframes.on_keyframe_sent(Instant::now());
         }
+    }
+
+    /// The datagram limit shrank while a frame was leaving (e.g. between
+    /// two bursts): its remaining datagrams no longer fit, and the frame
+    /// cannot be packetized again under the same id. It is given up, and
+    /// so is every frame that refers to it, until the keyframe forced here,
+    /// packetized for the new limit. The viewer cannot decode on without
+    /// it whatever the [`KeyframeGate`] says, so the gate is not asked; the
+    /// requests the viewer sends for it are merged into this keyframe.
+    fn on_frame_too_large(&mut self) -> Result<()> {
+        self.stats.frames_too_large += 1;
+        self.keyframes.on_keyframe_forced(Instant::now());
+        self.force_keyframe()
+    }
+
+    /// Makes the next encoded frame a keyframe and marks the pacer dirty,
+    /// so one is produced even if the screen is static.
+    fn force_keyframe(&mut self) -> Result<()> {
+        self.encoder.request_keyframe()?;
+        self.pacer.mark_dirty();
         Ok(())
     }
 

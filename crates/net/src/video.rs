@@ -17,9 +17,9 @@
 //! the last frame admitted, i.e. a few frame times at the stream rate, not
 //! seconds.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use bytes::Bytes;
-use pipeline::traits::DatagramSink;
+use pipeline::traits::{DatagramSink, DatagramTooLarge};
 use quinn::{Connection, SendDatagramError};
 
 use crate::stats::TransportStats;
@@ -70,17 +70,19 @@ impl DatagramSink for VideoChannel {
     }
 
     /// Never blocks: queues the datagram for the connection driver. Datagrams
-    /// dropped later under congestion are not reported. Errors when the
-    /// datagram exceeds the current limit, the peer does not accept
-    /// datagrams, or the connection is lost.
+    /// dropped later under congestion are not reported. Errors with a
+    /// [`DatagramTooLarge`] when the datagram exceeds the current limit
+    /// (quinn lowers it when it suspects the path's MTU), otherwise when
+    /// the peer does not accept datagrams or the connection is lost.
     fn send(&self, datagram: Bytes) -> Result<()> {
         let len = datagram.len();
         match self.conn.send_datagram(datagram) {
             Ok(()) => Ok(()),
-            Err(SendDatagramError::TooLarge) => bail!(
-                "video datagram of {len} bytes exceeds the current limit of {}",
-                self.max_datagram_size()
-            ),
+            Err(SendDatagramError::TooLarge) => Err(DatagramTooLarge {
+                len,
+                limit: self.max_datagram_size(),
+            }
+            .into()),
             Err(e) => Err(e).context("sending video datagram"),
         }
     }

@@ -51,6 +51,17 @@ impl KeyframeGate {
 
     /// A keyframe left at `now` (forced or the encoder's own).
     pub fn on_keyframe_sent(&mut self, now: Instant) {
+        self.note(now);
+    }
+
+    /// The host forced a keyframe at `now` on its own, without a request
+    /// (it knows the viewer cannot decode on): requests that follow are
+    /// merged into it like into a requested one.
+    pub fn on_keyframe_forced(&mut self, now: Instant) {
+        self.note(now);
+    }
+
+    fn note(&mut self, now: Instant) {
         self.last = Some(self.last.map_or(now, |last| last.max(now)));
     }
 }
@@ -81,6 +92,15 @@ mod tests {
         let base = Instant::now();
         let mut gate = KeyframeGate::new();
         gate.on_keyframe_sent(base);
+        assert!(!gate.accept(ms(base, 100)));
+        assert!(gate.accept(ms(base, 200)));
+    }
+
+    #[test]
+    fn a_keyframe_the_host_forced_on_its_own_also_closes_the_gate() {
+        let base = Instant::now();
+        let mut gate = KeyframeGate::new();
+        gate.on_keyframe_forced(base);
         assert!(!gate.accept(ms(base, 100)));
         assert!(gate.accept(ms(base, 200)));
     }

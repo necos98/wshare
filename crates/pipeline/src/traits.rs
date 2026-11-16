@@ -2,6 +2,7 @@
 //! change these signatures without updating every implementor.
 
 use std::collections::VecDeque;
+use std::fmt;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -60,6 +61,11 @@ pub trait DatagramSink {
 
     /// Sends one datagram. May silently drop it under congestion. Taking
     /// `Bytes` lets a frame's datagrams share one allocation.
+    ///
+    /// Fails with a [`DatagramTooLarge`] (found with `anyhow::Error::is`)
+    /// when the datagram exceeds the current limit, which may have shrunk
+    /// since the datagram was sized: that datagram is lost, but the
+    /// transport still works. Any other error means it cannot send anymore.
     fn send(&self, datagram: Bytes) -> Result<()>;
 
     /// Bytes handed to [`Self::send`] that are still waiting to leave. It
@@ -67,6 +73,31 @@ pub trait DatagramSink {
     /// stop producing instead of queueing stale video.
     fn backlog_bytes(&self) -> usize;
 }
+
+/// A datagram larger than the transport's current limit
+/// ([`DatagramSink::max_datagram_size`]). The limit can shrink while
+/// streaming (QUIC lowers it when it suspects the path's MTU after a burst
+/// of losses), so a datagram sized for the old limit may no longer fit;
+/// the transport itself is unaffected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DatagramTooLarge {
+    /// Size of the datagram refused, in bytes.
+    pub len: usize,
+    /// The limit at the time, in bytes.
+    pub limit: usize,
+}
+
+impl fmt::Display for DatagramTooLarge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "datagram of {} bytes exceeds the current limit of {}",
+            self.len, self.limit
+        )
+    }
+}
+
+impl std::error::Error for DatagramTooLarge {}
 
 /// Synchronous video decoder (viewer side).
 pub trait VideoDecoder {

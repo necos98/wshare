@@ -7,7 +7,8 @@ use protocol::session::{MAX_MONITORS, Quality};
 use crate::options::StreamOptions;
 
 /// Highest bitrate (Mbit/s) and frame rate of a quality level other than
-/// [`Quality::Automatic`], which keeps the host's own settings.
+/// [`Quality::Automatic`], which keeps the host's own settings. Never above
+/// the host's: a viewer may ask for less than the host allows, not more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Preset {
     mbps: u32,
@@ -36,9 +37,12 @@ pub(super) struct ScreenChoice {
 
 impl ScreenChoice {
     /// The host's settings, `base`, adapted to this choice: its monitor,
-    /// and the quality's bitrate ceiling and frame rate. The codec stays.
+    /// and the quality's bitrate ceiling and frame rate, each capped by the
+    /// host's own maximum. The codec stays.
     pub(super) fn options(&self, base: &StreamOptions) -> StreamOptions {
-        let (mbps, fps) = preset(self.quality).map_or((base.mbps, base.fps), |p| (p.mbps, p.fps));
+        let (mbps, fps) = preset(self.quality).map_or((base.mbps, base.fps), |p| {
+            (p.mbps.min(base.mbps), p.fps.min(base.fps))
+        });
         StreamOptions {
             monitor: self.monitor,
             fps,
@@ -156,6 +160,10 @@ mod tests {
 
     #[test]
     fn each_level_sets_the_bitrate_ceiling_and_the_frame_rate() {
+        let generous = StreamOptions {
+            mbps: 100,
+            ..base()
+        };
         for (quality, mbps, fps) in [
             (Quality::High, 40, 60),
             (Quality::Medium, 15, 30),
@@ -165,10 +173,32 @@ mod tests {
                 monitor: 1,
                 quality,
             }
-            .options(&base());
+            .options(&generous);
             assert_eq!((options.mbps, options.fps), (mbps, fps), "{quality:?}");
             assert_eq!(options.codec, Codec::Hevc, "the codec stays");
             assert_eq!(options.monitor, 1);
+        }
+    }
+
+    #[test]
+    fn no_level_goes_above_the_host_maximums() {
+        let host = StreamOptions {
+            mbps: 8,
+            fps: 30,
+            ..base()
+        };
+        for (quality, mbps, fps) in [
+            (Quality::Automatic, 8, 30),
+            (Quality::High, 8, 30),
+            (Quality::Medium, 8, 30),
+            (Quality::Low, 5, 30),
+        ] {
+            let options = ScreenChoice {
+                monitor: 0,
+                quality,
+            }
+            .options(&host);
+            assert_eq!((options.mbps, options.fps), (mbps, fps), "{quality:?}");
         }
     }
 

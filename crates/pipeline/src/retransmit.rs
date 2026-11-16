@@ -8,6 +8,7 @@
 //! transport also holds, so keeping them costs no copy.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -16,7 +17,7 @@ use bytes::Bytes;
 use protocol::recovery::{MAX_NACK_PACKETS, Missing, Nack};
 
 use crate::recovery::MAX_RECOVERY_WAIT;
-use crate::traits::DatagramSink;
+use crate::traits::{DatagramSink, DatagramTooLarge};
 
 /// How long sent frames are kept. Longer than the viewer ever waits for a
 /// resend ([`MAX_RECOVERY_WAIT`]) plus the time its request travels.
@@ -72,7 +73,8 @@ impl RetransmitBuffer {
     }
 
     /// The datagrams `nack` asks for that are still kept, in the order
-    /// asked (packet order for a whole frame).
+    /// asked (packet order for a whole frame), each at most once: never
+    /// more than the frame has, however the list repeats itself.
     /// Empty when the frame is gone or was resent
     /// [`MAX_RESENDS_PER_FRAME`] times already.
     pub fn take_resend(&mut self, nack: &Nack, now: Instant) -> Vec<Bytes> {
@@ -90,13 +92,21 @@ impl RetransmitBuffer {
         frame.resends += 1;
         match &nack.missing {
             Missing::Whole => frame.datagrams.clone(),
-            // Lists longer than the protocol allows come only from a
-            // misbehaving peer: their excess is not looked at.
-            Missing::Packets(indices) => indices
-                .iter()
-                .take(MAX_NACK_PACKETS)
-                .filter_map(|&index| frame.datagrams.get(usize::from(index)).cloned())
-                .collect(),
+            // Lists longer than the protocol allows, or repeating an
+            // index, come only from a misbehaving peer: their excess is not
+            // looked at, and repeats are not sent again.
+            Missing::Packets(indices) => {
+                let mut asked = vec![false; frame.datagrams.len()];
+                indices
+                    .iter()
+                    .take(MAX_NACK_PACKETS)
+                    .filter_map(|&index| {
+                        let index = usize::from(index);
+                        let first_ask = !std::mem::replace(asked.get_mut(index)?, true);
+                        first_ask.then(|| frame.datagrams[index].clone())
+                    })
+                    .collect()
+            }
         }
     }
 
@@ -126,7 +136,14 @@ impl RetransmitBuffer {
 /// and the task that reads the viewer's requests, so a request is answered
 /// at once instead of waiting for the next frame. Cheap to clone.
 #[derive(Clone, Default)]
-pub struct RecentFrames(Arc<Mutex<RetransmitBuffer>>);
+pub struct RecentFrames(Arc<Shared>);
+
+#[derive(Default)]
+struct Shared {
+    buffer: Mutex<RetransmitBuffer>,
+    /// Resent datagrams the transport refused as too large.
+    too_large: AtomicU64,
+}
 
 impl RecentFrames {
     pub fn new() -> Self {
@@ -140,19 +157,39 @@ impl RecentFrames {
 
     /// Sends again, through `sink`, the datagrams `nack` asks for that are
     /// still kept. Returns how many were sent.
+    ///
+    /// A datagram over the transport's current limit ([`DatagramTooLarge`])
+    /// is dropped and counted in [`Self::resends_too_large`]: it was sized
+    /// for the limit of its first send, which QUIC lowers precisely after
+    /// the losses that bring requests. Only other send errors, meaning the
+    /// connection can no longer send, fail the resend.
     pub fn resend(&self, nack: &Nack, sink: &impl DatagramSink, now: Instant) -> Result<usize> {
         // Taken out first: the lock is not held while sending.
         let datagrams = self.lock().take_resend(nack, now);
+        let mut too_large: usize = 0;
         for datagram in &datagrams {
-            sink.send(datagram.clone())?;
+            match sink.send(datagram.clone()) {
+                Ok(()) => {}
+                Err(error) if error.is::<DatagramTooLarge>() => too_large += 1,
+                Err(error) => return Err(error),
+            }
         }
-        Ok(datagrams.len())
+        self.0
+            .too_large
+            .fetch_add(too_large as u64, Ordering::Relaxed);
+        Ok(datagrams.len() - too_large)
+    }
+
+    /// Resent datagrams dropped so far because they no longer fit the
+    /// transport's datagram limit.
+    pub fn resends_too_large(&self) -> u64 {
+        self.0.too_large.load(Ordering::Relaxed)
     }
 
     /// A poisoned lock only means a sender panicked mid-update; the buffer
     /// is still consistent enough to answer (at worst, nothing is resent).
     fn lock(&self) -> std::sync::MutexGuard<'_, RetransmitBuffer> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.0.buffer.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -200,8 +237,22 @@ mod tests {
         let mut indices = vec![0; MAX_NACK_PACKETS];
         indices.push(1);
         let resent = buffer.take_resend(&nack(1, Missing::Packets(indices)), base);
-        assert_eq!(resent.len(), MAX_NACK_PACKETS);
-        assert!(resent.iter().all(|d| *d == sent[0]));
+        assert_eq!(resent, vec![sent[0].clone()], "index 1 is past the limit");
+    }
+
+    #[test]
+    fn a_repeated_index_is_resent_once() {
+        let base = Instant::now();
+        let mut buffer = RetransmitBuffer::default();
+        let sent = datagrams(1, 3, 10);
+        buffer.record(1, &sent, base);
+        let flood = buffer.take_resend(&nack(1, Missing::Packets(vec![0; MAX_NACK_PACKETS])), base);
+        assert_eq!(flood, vec![sent[0].clone()]);
+        let mixed = buffer.take_resend(&nack(1, Missing::Packets(vec![2, 0, 2, 1, 0])), base);
+        assert_eq!(
+            mixed,
+            vec![sent[2].clone(), sent[0].clone(), sent[1].clone()]
+        );
     }
 
     #[test]
@@ -300,15 +351,41 @@ mod tests {
         );
     }
 
-    struct RecordingSink(RefCell<Vec<Bytes>>);
+    /// Records what it is given; refuses datagrams over `limit` like a
+    /// transport whose limit shrank, and everything once `broken`.
+    struct RecordingSink {
+        sent: RefCell<Vec<Bytes>>,
+        limit: usize,
+        broken: bool,
+    }
+
+    impl RecordingSink {
+        fn with_limit(limit: usize) -> Self {
+            Self {
+                sent: RefCell::new(Vec::new()),
+                limit,
+                broken: false,
+            }
+        }
+    }
 
     impl DatagramSink for RecordingSink {
         fn max_datagram_size(&self) -> usize {
-            1200
+            self.limit
         }
 
         fn send(&self, datagram: Bytes) -> Result<()> {
-            self.0.borrow_mut().push(datagram);
+            if self.broken {
+                anyhow::bail!("connection lost");
+            }
+            if datagram.len() > self.limit {
+                return Err(DatagramTooLarge {
+                    len: datagram.len(),
+                    limit: self.limit,
+                }
+                .into());
+            }
+            self.sent.borrow_mut().push(datagram);
             Ok(())
         }
 
@@ -323,11 +400,45 @@ mod tests {
         let recent = RecentFrames::new();
         let sent = datagrams(3, 3, 10);
         recent.clone().record(3, &sent, base);
-        let sink = RecordingSink(RefCell::new(Vec::new()));
+        let sink = RecordingSink::with_limit(1200);
         let count = recent
             .resend(&nack(3, Missing::Packets(vec![2])), &sink, base)
             .unwrap();
         assert_eq!(count, 1);
-        assert_eq!(*sink.0.borrow(), vec![sent[2].clone()]);
+        assert_eq!(*sink.sent.borrow(), vec![sent[2].clone()]);
+        assert_eq!(recent.resends_too_large(), 0);
+    }
+
+    #[test]
+    fn resends_over_a_shrunk_limit_are_dropped_and_counted() {
+        let base = Instant::now();
+        let recent = RecentFrames::new();
+        let small = datagrams(1, 1, 10).remove(0);
+        let large = datagrams(1, 1, 30).remove(0);
+        let sent = vec![small.clone(), large, small.clone()];
+        recent.record(1, &sent, base);
+        let sink = RecordingSink::with_limit(20);
+        let count = recent
+            .resend(&nack(1, Missing::Whole), &sink, base)
+            .unwrap();
+        assert_eq!(count, 2, "the others still go");
+        assert_eq!(*sink.sent.borrow(), vec![small.clone(), small]);
+        assert_eq!(recent.resends_too_large(), 1);
+    }
+
+    #[test]
+    fn other_send_errors_still_fail_the_resend() {
+        let base = Instant::now();
+        let recent = RecentFrames::new();
+        recent.record(1, &datagrams(1, 2, 10), base);
+        let sink = RecordingSink {
+            broken: true,
+            ..RecordingSink::with_limit(1200)
+        };
+        let error = recent
+            .resend(&nack(1, Missing::Whole), &sink, base)
+            .unwrap_err();
+        assert!(!error.is::<DatagramTooLarge>());
+        assert_eq!(recent.resends_too_large(), 0);
     }
 }

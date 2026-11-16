@@ -2,11 +2,9 @@
 //! resizes and local input, and runs the viewer's hotkeys; all video work
 //! happens on the render thread.
 
-use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use bytes::Bytes;
 use pipeline::ViewerStats;
 use protocol::control::StreamInfo;
 use protocol::input::CursorShape;
@@ -21,6 +19,7 @@ use winit::window::{Fullscreen, Window, WindowId};
 use super::Outgoing;
 use super::cursor::CursorCache;
 use super::failure::ViewerFailure;
+use super::feed::VideoIn;
 use super::key_log;
 use super::key_router::Hotkey;
 use super::keyboard_hook::KeyboardHook;
@@ -38,6 +37,10 @@ const MAX_INITIAL: (f64, f64) = (1280.0, 800.0);
 
 #[derive(Debug)]
 pub enum UserEvent {
+    /// The connection dropped; the viewer is trying to get it back.
+    Reconnecting,
+    /// The connection is back: a new session follows the old one.
+    Reconnected,
     HostLeft(ViewerFailure),
     RenderFailed(String),
     Cursor(CursorShape),
@@ -84,7 +87,7 @@ pub struct WindowOptions {
 
 /// Inputs consumed when the window opens and the render thread starts.
 struct Pending {
-    datagrams: Receiver<Bytes>,
+    video: VideoIn,
     link: LinkProbe,
 }
 
@@ -107,6 +110,8 @@ pub struct ViewerWindow {
     render: Option<RenderThread>,
     stats: Option<ViewerStats>,
     error: Option<String>,
+    /// The connection dropped and is being re-established.
+    reconnecting: bool,
     /// The host went away on its own (see [`Self::host_left`]).
     host_left: Option<ViewerFailure>,
 }
@@ -115,7 +120,7 @@ impl ViewerWindow {
     pub fn new(
         options: WindowOptions,
         stream: StreamInfo,
-        datagrams: Receiver<Bytes>,
+        video: VideoIn,
         link: LinkProbe,
         outgoing: Outgoing,
         policy: ControlPolicy,
@@ -129,7 +134,7 @@ impl ViewerWindow {
         Self {
             options,
             stream,
-            pending: Some(Pending { datagrams, link }),
+            pending: Some(Pending { video, link }),
             outgoing,
             proxy,
             policy,
@@ -141,6 +146,7 @@ impl ViewerWindow {
             render: None,
             stats: None,
             error: None,
+            reconnecting: false,
             host_left: None,
         }
     }
@@ -177,13 +183,17 @@ impl ViewerWindow {
         self.capture_system_keys(self.options.fullscreen);
 
         let PhysicalSize { width, height } = window.inner_size();
-        let Pending { datagrams, link } = self.pending.take().context("window opened twice")?;
+        let Pending {
+            video: VideoIn { datagrams, restart },
+            link,
+        } = self.pending.take().context("window opened twice")?;
         let input = RenderInput {
             hwnd,
             stream: self.stream.clone(),
             datagrams,
             outgoing: self.outgoing.clone(),
             link,
+            restart,
         };
         let proxy = self.proxy.clone();
         let render = RenderThread::start(input, width, height, move |result| {
@@ -194,6 +204,7 @@ impl ViewerWindow {
         if self.options.stats {
             render.toggle_stats();
         }
+        render.set_reconnecting(self.reconnecting);
         let scale = window.scale_factor() as f32;
         self.bar.set_window((width, height), scale, Instant::now());
         self.bar.set_fullscreen(self.options.fullscreen);
@@ -297,6 +308,16 @@ impl ViewerWindow {
         }
     }
 
+    /// The session broke or came back. Keys held across the break are
+    /// forgotten: the host never saw them go down, or no longer sees them.
+    fn set_reconnecting(&mut self, reconnecting: bool) {
+        self.reconnecting = reconnecting;
+        self.remote.reset_keys();
+        if let Some(render) = &self.render {
+            render.set_reconnecting(reconnecting);
+        }
+    }
+
     fn set_host_allows(&mut self, allowed: bool) {
         let notice = self.policy.set_host_allows(allowed);
         let enabled = self.policy.enabled();
@@ -397,6 +418,8 @@ impl ApplicationHandler<UserEvent> for ViewerWindow {
                 }
             }
             UserEvent::InputAllowed(allowed) => self.set_host_allows(allowed),
+            UserEvent::Reconnecting => self.set_reconnecting(true),
+            UserEvent::Reconnected => self.set_reconnecting(false),
             UserEvent::Hotkey(hotkey) => self.run_hotkey(hotkey),
             UserEvent::HostLeft(failure) => {
                 println!("{failure}");

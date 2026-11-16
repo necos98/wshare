@@ -7,9 +7,20 @@ use pipeline::backlog::MAX_SEND_BACKLOG;
 use quinn::{IdleTimeout, MtuDiscoveryConfig, TransportConfig, VarInt};
 
 /// Keep-alives keep NAT/firewall state warm and let a dead peer be noticed
-/// quickly: with the idle timeout below a vanished viewer is dropped in ~5 s.
+/// quickly: with the idle timeout below a vanished peer is dropped in ~3 s.
+///
+/// The idle timeout is how long a network drop takes to be noticed: the
+/// viewer starts reconnecting then, and the host frees the place of a viewer
+/// that left without saying goodbye. 3 s is three keep-alive intervals, so a
+/// single lost packet never ends a session, and a real drop freezes the
+/// picture two seconds less than the previous 5 s. The price: a stall of
+/// over 3 s with no packets at all (a bad Wi-Fi roam) now ends the
+/// connection, which the viewer then reconnects by itself.
 const KEEP_ALIVE: Duration = Duration::from_secs(1);
-const IDLE_TIMEOUT_MS: u32 = 5_000;
+const IDLE_TIMEOUT_MS: u32 = 3_000;
+/// Keep-alive intervals the idle timeout must span: fewer and ordinary
+/// packet loss would end a healthy session.
+const MIN_KEEP_ALIVES_PER_TIMEOUT: u128 = 3;
 
 /// Largest keyframe the datagram buffers must hold whole. The largest
 /// picture supported is 4096x2304, the largest frame H.264 levels 5.1 and
@@ -40,6 +51,10 @@ pub(crate) const DATAGRAM_RECEIVE_BUFFER: usize = DATAGRAM_SEND_BUFFER;
 // the peer may send.
 const _: () = assert!(DATAGRAM_RECEIVE_BUFFER >= MAX_KEYFRAME_BYTES);
 const _: () = assert!(DATAGRAM_RECEIVE_BUFFER >= u16::MAX as usize);
+const _: () = assert!(
+    IDLE_TIMEOUT_MS as u128 >= MIN_KEEP_ALIVES_PER_TIMEOUT * KEEP_ALIVE.as_millis(),
+    "the idle timeout must span several keep-alives"
+);
 
 /// Shared by host and viewer so both advertise the same limits.
 pub(crate) fn transport_config() -> Arc<TransportConfig> {

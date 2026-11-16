@@ -7,6 +7,8 @@
 //! ([`next_batch`]), so it decodes a backlog in one go and shows only its
 //! newest picture instead of replaying it.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::time::Duration;
 
@@ -21,6 +23,58 @@ pub const QUEUE_DATAGRAMS: usize = 1024;
 /// The two ends of the hand-off queue.
 pub fn queue() -> (SyncSender<Bytes>, Receiver<Bytes>) {
     sync_channel(QUEUE_DATAGRAMS)
+}
+
+/// Asks the render thread to forget the stream it follows, because the
+/// connection was re-established and the host starts a new one.
+///
+/// The control task raises it, after the old datagrams stopped arriving
+/// and before the new ones are forwarded; the render thread clears the
+/// queue, resets the pipeline and then marks it done, so no datagram of the
+/// new stream is lost to the clearing and none of the old one survives it.
+#[derive(Debug, Clone, Default)]
+pub struct Restart(Arc<AtomicBool>);
+
+/// The video the window gets: the datagrams to show and the signal that the
+/// stream starts over.
+pub struct VideoIn {
+    pub datagrams: Receiver<Bytes>,
+    pub restart: Restart,
+}
+
+/// How often [`Restart::wait_done`] looks whether the render thread is done.
+const RESTART_POLL: Duration = Duration::from_millis(10);
+
+impl Restart {
+    pub fn request(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub fn is_requested(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    /// The render thread finished the restart.
+    pub fn complete(&self) {
+        self.0.store(false, Ordering::Release);
+    }
+
+    /// Waits up to `limit` for the restart to be done; `false`: it was not
+    /// (the render thread is gone or stuck).
+    pub async fn wait_done(&self, limit: Duration) -> bool {
+        tokio::time::timeout(limit, async {
+            while self.is_requested() {
+                tokio::time::sleep(RESTART_POLL).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+}
+
+/// Throws away the datagrams waiting in the queue.
+pub fn discard_waiting(datagrams: &Receiver<Bytes>) {
+    while datagrams.try_recv().is_ok() {}
 }
 
 /// Moves datagrams from the network to the render thread until either side
@@ -119,6 +173,35 @@ mod tests {
         let mut batch = Vec::new();
         next_batch(&rx, NO_WAIT, &mut batch).unwrap();
         assert_eq!(batch.len(), QUEUE_DATAGRAMS);
+    }
+
+    #[test]
+    fn discarding_empties_the_queue() {
+        let (tx, rx) = queue();
+        for n in 0..5 {
+            tx.send(datagram(n)).unwrap();
+        }
+        discard_waiting(&rx);
+        let mut batch = Vec::new();
+        assert_eq!(
+            next_batch(&rx, NO_WAIT, &mut batch),
+            Err(RecvTimeoutError::Timeout)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restart_is_done_when_the_render_thread_says_so() {
+        let restart = Restart::default();
+        assert!(!restart.is_requested());
+        assert!(restart.wait_done(NO_WAIT).await, "nothing asked: done");
+        restart.request();
+        assert!(restart.is_requested());
+        assert!(!restart.wait_done(NO_WAIT).await, "nobody completed it");
+        let renderer = restart.clone();
+        let thread = std::thread::spawn(move || renderer.complete());
+        assert!(restart.wait_done(Duration::from_secs(10)).await);
+        thread.join().unwrap();
+        assert!(!restart.is_requested());
     }
 
     #[tokio::test(flavor = "multi_thread")]

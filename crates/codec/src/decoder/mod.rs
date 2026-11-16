@@ -146,6 +146,20 @@ impl VideoDecoder for HwDecoder {
         }
         Ok(self.drain_output(timestamp)?.or(latest))
     }
+
+    fn reset(&mut self) -> Result<()> {
+        // Drops the queued units and pictures and the references of the old
+        // stream; the parsed output format stays, a new SPS renegotiates it.
+        unsafe {
+            self.transform
+                .ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0)
+                .context("flushing the decoder")?;
+            self.transform
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
+                .context("restarting the decoder stream")?;
+        }
+        Ok(())
+    }
 }
 
 impl Drop for HwDecoder {

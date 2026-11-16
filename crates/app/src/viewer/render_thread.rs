@@ -17,7 +17,7 @@ use render::{Renderer, ToolbarView};
 use windows::Win32::Foundation::HWND;
 
 use super::Outgoing;
-use super::feed::next_batch;
+use super::feed::{Restart, discard_waiting, next_batch};
 use super::notice::{Notice, NoticeBoard};
 use super::rate::ReceptionReporter;
 use super::sink::ViewSink;
@@ -43,12 +43,15 @@ pub struct RenderInput {
     pub datagrams: Receiver<Bytes>,
     pub outgoing: Outgoing,
     pub link: LinkProbe,
+    /// Raised by the control task when the stream starts over.
+    pub restart: Restart,
 }
 
 pub struct RenderThread {
     stop: Arc<AtomicBool>,
     size: Arc<AtomicU64>,
     stats_visible: Arc<AtomicBool>,
+    reconnecting: Arc<AtomicBool>,
     toolbar: Arc<ToolbarSlot>,
     notices: Sender<Notice>,
     thread: Option<JoinHandle<Result<ViewerStats>>>,
@@ -65,13 +68,15 @@ impl RenderThread {
         let stop = Arc::new(AtomicBool::new(false));
         let size = Arc::new(AtomicU64::new(pack(width, height)));
         let stats_visible = Arc::new(AtomicBool::new(false));
+        let reconnecting = Arc::new(AtomicBool::new(false));
         let toolbar = Arc::new(ToolbarSlot::default());
         let (notices, incoming_notices) = channel();
         let thread = {
-            let (stop, size, stats_visible, toolbar) = (
+            let (stop, size, stats_visible, reconnecting, toolbar) = (
                 stop.clone(),
                 size.clone(),
                 stats_visible.clone(),
+                reconnecting.clone(),
                 toolbar.clone(),
             );
             std::thread::Builder::new()
@@ -81,6 +86,7 @@ impl RenderThread {
                         stop: &stop,
                         size: &size,
                         stats_visible: &stats_visible,
+                        reconnecting: &reconnecting,
                         toolbar: &toolbar,
                         notices: &incoming_notices,
                     };
@@ -96,6 +102,7 @@ impl RenderThread {
             stop,
             size,
             stats_visible,
+            reconnecting,
             toolbar,
             notices,
             thread: Some(thread),
@@ -111,6 +118,12 @@ impl RenderThread {
     /// Shows or hides the statistics overlay; returns the new state.
     pub fn toggle_stats(&self) -> bool {
         !self.stats_visible.fetch_xor(true, Ordering::Relaxed)
+    }
+
+    /// Shows (`true`) or removes (`false`) the message that the connection
+    /// dropped and is being re-established.
+    pub fn set_reconnecting(&self, reconnecting: bool) {
+        self.reconnecting.store(reconnecting, Ordering::Relaxed);
     }
 
     /// Sets the control bar drawn over the video (`None`: no bar).
@@ -145,6 +158,7 @@ struct Shared<'a> {
     stop: &'a AtomicBool,
     size: &'a AtomicU64,
     stats_visible: &'a AtomicBool,
+    reconnecting: &'a AtomicBool,
     toolbar: &'a ToolbarSlot,
     notices: &'a Receiver<Notice>,
 }
@@ -154,6 +168,7 @@ fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
         stop,
         size,
         stats_visible,
+        reconnecting,
         toolbar,
         notices,
     } = shared;
@@ -169,6 +184,7 @@ fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
     let renderer = Renderer::new(&gpu, hwnd, applied.0, applied.1)?;
     println!("Decoding with {} on {}", decoder.name(), gpu.adapter_name);
     let link = input.link;
+    let restart = input.restart;
     let mut overlay = StatsOverlay::new(input.stream.clone(), decoder.name().to_string());
     let mut streamer = ViewerStreamer::new(decoder, ViewSink::new(renderer));
     let started = Instant::now();
@@ -179,6 +195,14 @@ fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
     let mut batch = Vec::new();
 
     while !stop.load(Ordering::Relaxed) {
+        if restart.is_requested() {
+            discard_waiting(&input.datagrams);
+            streamer.reset()?;
+            let now = Instant::now();
+            stall = StallWatch::new(now);
+            reporter = ReceptionReporter::new(now);
+            restart.complete();
+        }
         let tick = if toolbar.active() { TOOLBAR_TICK } else { TICK };
         let timeout = wait_for(tick, streamer.next_wakeup(), Instant::now());
         let actions = match next_batch(&input.datagrams, timeout, &mut batch) {
@@ -206,6 +230,7 @@ fn render_loop(input: RenderInput, shared: Shared<'_>) -> Result<ViewerStats> {
             let _ = input.outgoing.send(ControlMessage::ReceptionReport(report));
         }
         board.set_unstable(silence.unstable);
+        board.set_reconnecting(reconnecting.load(Ordering::Relaxed));
         while let Ok(notice) = notices.try_recv() {
             board.show(notice, now);
         }

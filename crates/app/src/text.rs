@@ -318,6 +318,8 @@ pub const NOTICE_SHORTCUTS: [&str; 2] =
     ["Ctrl+Alt+Invio: schermo intero", "Ctrl+Alt+I: statistiche"];
 /// Shown while the picture does not move on.
 pub const NOTICE_UNSTABLE: &str = "Connessione instabile…";
+/// Shown while the viewer re-establishes a connection that dropped.
+pub const NOTICE_RECONNECTING: &str = "Riconnessione in corso…";
 pub const NOTICE_CONTROL_OFF: &str = "Controllo remoto disattivato dall'altro computer";
 pub const NOTICE_CONTROL_ON: &str = "Controllo remoto riattivato dall'altro computer";
 
@@ -493,6 +495,7 @@ mod tests {
     #[test]
     fn the_viewer_window_notices_and_hints() {
         assert_eq!(NOTICE_UNSTABLE, "Connessione instabile…");
+        assert_eq!(NOTICE_RECONNECTING, "Riconnessione in corso…");
         assert_eq!(
             NOTICE_CONTROL_OFF,
             "Controllo remoto disattivato dall'altro computer"

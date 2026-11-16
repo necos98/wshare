@@ -8,13 +8,16 @@
 //!
 //! Threads:
 //! - main thread: the window (winit requires it);
-//! - tokio runtime: control channel and datagram reception;
+//! - tokio runtime: control channel and datagram reception; when the
+//!   connection breaks by itself it also reconnects to the same host (see
+//!   `control` and `reconnect`) while the window stays open;
 //! - render thread: owns the GPU objects, runs `ViewerStreamer`
 //!   (reassemble -> decode -> present), fed through a bounded queue
 //!   (see `feed`); it also reports to the host how the video arrives, for
 //!   the host's bitrate adaptation (see `rate`).
 
 mod clipboard;
+mod control;
 mod cursor;
 pub mod failure;
 mod feed;
@@ -22,10 +25,12 @@ mod input_map;
 mod key_log;
 mod key_router;
 mod keyboard_hook;
+mod live_handle;
 mod notice;
 mod outbox;
 mod pairing;
 mod rate;
+mod reconnect;
 mod remote;
 mod render_thread;
 pub mod report;
@@ -42,18 +47,21 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use discovery::computer_name;
-use net::{ControlReceiver, ControlSender, Fingerprint, SessionHandle, VideoChannel};
+use net::{ControlReceiver, ControlSender, Fingerprint, Identity, SessionHandle, VideoChannel};
 use protocol::control::{ControlMessage, PROTOCOL_VERSION, RejectReason, StreamInfo};
 use tokio::runtime::Runtime;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-use winit::event_loop::{DeviceEvents, EventLoop, EventLoopProxy};
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use winit::event_loop::{DeviceEvents, EventLoop};
 
 use crate::cli::ViewOptions;
 use crate::clipboard::ViewerRules;
 use crate::options::DEFAULT_PORT;
 use crate::target::{self, Resolved, parse_target};
 use clipboard::ViewerClipboard;
+use control::{ControlLink, ControlTask, Reconnection, VideoFeed};
 use failure::ViewerFailure;
+use feed::VideoIn;
+use live_handle::LiveHandle;
 use pairing::Pairing;
 use rate::TargetRate;
 use report::{REPORT_ENV, ViewerReport};
@@ -98,7 +106,7 @@ pub fn run(options: ViewOptions) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let connected = authenticate(&runtime, addr, &label, &pairing, given)?;
+    let connected = authenticate(&runtime, addr, &label, &pairing, given.clone())?;
     let Connected {
         host_name,
         stream,
@@ -144,21 +152,35 @@ pub fn run(options: ViewOptions) -> Result<()> {
     event_loop.listen_device_events(DeviceEvents::Never);
     let (datagram_tx, datagram_rx) = feed::queue();
     let (outgoing_tx, outgoing_rx) = unbounded_channel::<ControlMessage>();
-    runtime.spawn(feed::forward(video, datagram_tx));
+    let handle = LiveHandle::new(handle);
+    let restart = feed::Restart::default();
+    let forward = runtime.spawn(feed::forward(video, datagram_tx.clone()));
     let target = TargetRate::default();
     // Opened only now, with the session: nothing is shared before or after it.
     let clipboard = ViewerClipboard::open(ViewerRules {
         host_allows: input_allowed,
         view_only: options.view_only,
     });
-    let control = runtime.spawn(run_control(
-        tx,
-        rx,
-        outgoing_rx,
-        event_loop.create_proxy(),
-        target.clone(),
+    let control = runtime.spawn(control::run(ControlTask {
+        link: ControlLink { tx, rx },
+        outgoing: outgoing_rx,
+        window: event_loop.create_proxy(),
+        target: target.clone(),
         clipboard,
-    ));
+        reconnection: Reconnection {
+            addr,
+            host: fingerprint,
+            stream: stream.clone(),
+            identity: pairing.into_identity(),
+            pin: given,
+        },
+        feed: VideoFeed {
+            forward,
+            datagrams: datagram_tx,
+            restart: restart.clone(),
+            handle: handle.clone(),
+        },
+    }));
 
     let rtt_handle = handle.clone();
     let mut window = ViewerWindow::new(
@@ -168,7 +190,10 @@ pub fn run(options: ViewOptions) -> Result<()> {
             stats: options.stats,
         },
         stream,
-        datagram_rx,
+        VideoIn {
+            datagrams: datagram_rx,
+            restart,
+        },
         LinkProbe {
             rtt: Box::new(move || rtt_handle.rtt()),
             target,
@@ -251,7 +276,12 @@ fn authenticate(
         FirstAttempt::AskPin => ask_pin(&format!("PIN shown on {label}: "))?,
     };
     loop {
-        match runtime.block_on(connect(addr, pairing, pin.clone())) {
+        match runtime.block_on(connect(
+            addr,
+            pairing.expected(),
+            pairing.identity(),
+            pin.clone(),
+        )) {
             Err(e) if pin.is_none() && is_pin_required(&e) => {
                 pin = ask_pin(&format!("{label} requires the PIN: "))?;
                 if pin.is_none() {
@@ -270,8 +300,13 @@ fn is_pin_required(error: &anyhow::Error) -> bool {
 
 /// One connection attempt: TLS (pinned for a remembered host, presenting
 /// our certificate), then Hello and the host's answer.
-async fn connect(addr: SocketAddr, pairing: &Pairing, pin: Option<String>) -> Result<Connected> {
-    let session = net::connect(addr, pairing.expected(), pairing.identity())
+async fn connect(
+    addr: SocketAddr,
+    expected: Option<Fingerprint>,
+    identity: Option<&Identity>,
+    pin: Option<String>,
+) -> Result<Connected> {
+    let session = net::connect(addr, expected, identity)
         .await
         .map_err(failure::connect_failure)?;
     let fingerprint = session
@@ -284,7 +319,8 @@ async fn connect(addr: SocketAddr, pairing: &Pairing, pin: Option<String>) -> Re
         viewer_name: computer_name(),
         pin,
     })
-    .await?;
+    .await
+    .map_err(|e| ViewerFailure::ConnectionLost(format!("{e:#}")))?;
     let answer = tokio::time::timeout(WELCOME_TIMEOUT, rx.recv())
         .await
         .map_err(|_| ViewerFailure::no_answer())?
@@ -308,62 +344,6 @@ async fn connect(addr: SocketAddr, pairing: &Pairing, pin: Option<String>) -> Re
         Some(other) => bail!("unexpected answer from the host: {other:?}"),
         None => Err(ViewerFailure::HostLeft.into()),
     }
-}
-
-/// Sends our requests and watches for the host leaving. The host's target
-/// bitrate goes to `target`, for the statistics. Copied text travels both
-/// ways through `clipboard`.
-async fn run_control(
-    mut tx: ControlSender,
-    mut rx: ControlReceiver,
-    mut outgoing: UnboundedReceiver<ControlMessage>,
-    window: EventLoopProxy<UserEvent>,
-    target: TargetRate,
-    mut clipboard: ViewerClipboard,
-) {
-    let reason = 'control: loop {
-        tokio::select! {
-            message = outgoing.recv() => {
-                let Some(first) = message else { return };
-                for message in outbox::next_batch(first, &mut outgoing) {
-                    if let Err(e) = tx.send(&message).await {
-                        break 'control ViewerFailure::ConnectionLost(format!("{e:#}"));
-                    }
-                    if message == ControlMessage::Bye {
-                        return;
-                    }
-                }
-            }
-            () = clipboard.changed() => {
-                if let Some(message) = clipboard.local_change().await
-                    && let Err(e) = tx.send(&message).await
-                {
-                    break ViewerFailure::ConnectionLost(format!("{e:#}"));
-                }
-            }
-            incoming = rx.recv() => match incoming {
-                Ok(Some(ControlMessage::Bye)) => break ViewerFailure::HostDisconnected,
-                Ok(None) => break ViewerFailure::HostLeft,
-                Ok(Some(ControlMessage::Cursor(shape))) => {
-                    let _ = window.send_event(UserEvent::Cursor(shape));
-                }
-                Ok(Some(ControlMessage::CursorVisible(visible))) => {
-                    let _ = window.send_event(UserEvent::CursorVisible(visible));
-                }
-                Ok(Some(ControlMessage::InputAllowed(allowed))) => {
-                    clipboard.set_host_allows(allowed);
-                    let _ = window.send_event(UserEvent::InputAllowed(allowed));
-                }
-                Ok(Some(ControlMessage::TargetBitrate { bps })) => target.set(bps),
-                Ok(Some(ControlMessage::Clipboard(text))) => {
-                    clipboard.remote_text(&text).await;
-                }
-                Ok(Some(_)) => {}
-                Err(e) => break ViewerFailure::ConnectionLost(format!("{e:#}")),
-            }
-        }
-    };
-    let _ = window.send_event(UserEvent::HostLeft(reason));
 }
 
 /// Asks for the PIN on the terminal; `None` if nothing was typed (or there

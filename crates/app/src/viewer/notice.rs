@@ -39,12 +39,13 @@ impl Notice {
     }
 }
 
-/// The lines to show now: the warning that the picture stopped while it
-/// lasts, else the latest timed notice until it expires.
+/// The lines to show now: that the session is being re-established while it lasts, else the
+/// warning that the picture stopped while it lasts, else the latest timed notice until it expires.
 #[derive(Debug, Default)]
 pub struct NoticeBoard {
     timed: Option<(Notice, Instant)>,
     unstable: bool,
+    reconnecting: bool,
     /// What the renderer was last told (`None` before the first time).
     sent: Option<Option<Vec<String>>>,
 }
@@ -53,6 +54,12 @@ impl NoticeBoard {
     /// Shows `notice` for its time, replacing the one on screen.
     pub fn show(&mut self, notice: Notice, now: Instant) {
         self.timed = Some((notice, now + notice.lasts()));
+    }
+
+    /// The connection broke and is being re-established (`true`), or is
+    /// back (`false`).
+    pub fn set_reconnecting(&mut self, reconnecting: bool) {
+        self.reconnecting = reconnecting;
     }
 
     /// The picture stopped (`true`) or came back (`false`).
@@ -80,6 +87,9 @@ impl NoticeBoard {
     }
 
     fn lines(&self) -> Option<Vec<String>> {
+        if self.reconnecting {
+            return Some(vec![text::NOTICE_RECONNECTING.to_string()]);
+        }
         if self.unstable {
             return Some(vec![text::NOTICE_UNSTABLE.to_string()]);
         }
@@ -163,6 +173,22 @@ mod tests {
             "the shortcuts are still due"
         );
         assert_eq!(board.take_changed(at(base, 4000)), Some(None));
+    }
+
+    #[test]
+    fn reconnecting_wins_over_every_other_message_until_the_session_is_back() {
+        let base = Instant::now();
+        let mut board = NoticeBoard::default();
+        board.show(Notice::Shortcuts, base);
+        board.set_unstable(true);
+        board.set_reconnecting(true);
+        assert_eq!(board.take_changed(base), one("Riconnessione in corso…"));
+        // Not even the expiry of the timed notice takes it off the screen.
+        assert_eq!(board.take_changed(at(base, 10_000)), None);
+
+        board.set_reconnecting(false);
+        board.set_unstable(false);
+        assert_eq!(board.take_changed(at(base, 10_001)), Some(None));
     }
 
     #[test]

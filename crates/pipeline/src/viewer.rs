@@ -139,6 +139,18 @@ where
         self.recovery.set_rtt(rtt);
     }
 
+    /// Forgets the stream followed so far, to follow a new one (the
+    /// connection to the host was re-established): pending frames, loss
+    /// recovery, the keyframe rate limit and the decoder start over, and a
+    /// keyframe is awaited. The statistics keep counting across the break.
+    pub fn reset(&mut self) -> Result<()> {
+        self.reassembler = Reassembler::new(MAX_PENDING_FRAMES);
+        self.recovery = LossRecovery::new(ASSUMED_RTT);
+        self.keyframes = KeyframeRequester::new(KEYFRAME_REQUEST_INTERVAL);
+        self.last_datagram = None;
+        self.decoder.reset()
+    }
+
     /// Access to the sink for presentation concerns outside the stream
     /// (e.g. the window was resized and the last picture must be redrawn).
     pub fn sink_mut(&mut self) -> &mut Sink {

@@ -75,6 +75,14 @@ pub trait VideoDecoder {
     /// Decodes one complete access unit. Returns `None` while the decoder
     /// needs more data before producing a picture.
     fn decode(&mut self, unit: &[u8], timestamp: i64) -> Result<Option<Self::Frame>>;
+
+    /// Forgets the stream followed so far, e.g. before a new connection to
+    /// the host starts a new one: pictures and references of the old stream
+    /// must not leak into it. The next unit must be a keyframe. Decoders
+    /// without state to drop keep this default.
+    fn reset(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Shows decoded frames (viewer side).

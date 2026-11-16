@@ -60,6 +60,12 @@ impl Pairing {
         self.identity.as_ref()
     }
 
+    /// This PC's viewer certificate, to present again when the session
+    /// has to be re-established.
+    pub(super) fn into_identity(self) -> Option<Identity> {
+        self.identity
+    }
+
     /// The fingerprint to pin, for a host that admitted us before.
     pub(super) fn expected(&self) -> Option<Fingerprint> {
         self.expected.as_ref().map(|host| host.fingerprint)

@@ -1,6 +1,6 @@
 //! Tests of [`super::ViewerStreamer`] with a fake decoder and renderer.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use anyhow::bail;
@@ -12,7 +12,10 @@ use crate::recovery::{TAIL_GRACE, recovery_wait};
 
 /// Decoder producing `(data, timestamp)`; returns `None` for empty units
 /// (decoder needs more data) and fails on the unit `b"boom"`.
-struct FakeDecoder(Rc<RefCell<Vec<Vec<u8>>>>);
+struct FakeDecoder {
+    decoded: Rc<RefCell<Vec<Vec<u8>>>>,
+    resets: Rc<Cell<u32>>,
+}
 
 impl VideoDecoder for FakeDecoder {
     type Frame = (Vec<u8>, i64);
@@ -21,8 +24,13 @@ impl VideoDecoder for FakeDecoder {
         if unit == b"boom" {
             bail!("decoder failure");
         }
-        self.0.borrow_mut().push(unit.to_vec());
+        self.decoded.borrow_mut().push(unit.to_vec());
         Ok((!unit.is_empty()).then(|| (unit.to_vec(), timestamp)))
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        self.resets.set(self.resets.get() + 1);
+        Ok(())
     }
 }
 
@@ -41,6 +49,7 @@ impl FrameSink for FakeRenderer {
 
 struct Harness {
     decoded: Rc<RefCell<Vec<Vec<u8>>>>,
+    resets: Rc<Cell<u32>>,
     presented: Presented,
     viewer: ViewerStreamer<FakeDecoder, FakeRenderer>,
     packetizer: Packetizer,
@@ -57,12 +66,17 @@ const LATER: u64 = 300;
 fn harness() -> Harness {
     let decoded = Rc::new(RefCell::new(Vec::new()));
     let presented = Rc::new(RefCell::new(Vec::new()));
+    let resets = Rc::new(Cell::new(0));
     let viewer = ViewerStreamer::new(
-        FakeDecoder(decoded.clone()),
+        FakeDecoder {
+            decoded: decoded.clone(),
+            resets: resets.clone(),
+        },
         FakeRenderer(presented.clone()),
     );
     Harness {
         decoded,
+        resets,
         presented,
         viewer,
         packetizer: Packetizer::new(),
@@ -348,4 +362,49 @@ fn loss_inside_a_batch_is_asked_for_at_once() {
     assert_eq!(actions, vec![nack(1, Missing::Packets(vec![1, 2]))]);
     assert_eq!(h.viewer.stats().frames_lost, 0);
     assert_eq!(h.presented.borrow().len(), 1, "nothing decodable arrived");
+}
+
+#[test]
+fn reset_makes_the_viewer_follow_a_new_stream_from_its_next_keyframe() {
+    let mut h = Harness::started();
+    h.send(b"delta", false, 10);
+    // Half a frame of the old stream is pending when the connection breaks.
+    let partial = h.packets(b"half a frame", false, 20);
+    h.feed(&partial[..1], 20);
+    let before = h.viewer.stats().clone();
+
+    h.viewer.reset().unwrap();
+
+    assert_eq!(h.resets.get(), 1, "the decoder starts over");
+    assert_eq!(
+        h.viewer.next_wakeup(),
+        None,
+        "no recovery of the old stream"
+    );
+    // The host's new session numbers its frames from the start again.
+    h.packetizer = Packetizer::new();
+    let actions = h.send(b"delta of the old picture", false, 400);
+    assert_eq!(
+        Harness::requests(&actions),
+        1,
+        "a keyframe is asked for, the delta is not decodable"
+    );
+    h.send(b"new keyframe", true, 800);
+    h.send(b"new delta", false, 810);
+    assert_eq!(h.last_presented(), b"new delta");
+    let stats = h.viewer.stats();
+    assert!(stats.frames_presented > before.frames_presented);
+    assert_eq!(
+        stats.frames_lost, before.frames_lost,
+        "the abandoned half frame is not counted as lost"
+    );
+}
+
+#[test]
+fn reset_keeps_the_statistics_counting() {
+    let mut h = Harness::started();
+    h.send(b"delta", false, 10);
+    let presented = h.viewer.stats().frames_presented;
+    h.viewer.reset().unwrap();
+    assert_eq!(h.viewer.stats().frames_presented, presented);
 }

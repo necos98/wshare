@@ -16,11 +16,12 @@ use super::host_row::HostRow;
 use super::model::{GuiState, ViewerId, ViewerSession, ViewerStatus, ViewerUpdate};
 use super::ports::{
     AppEvent, ChoicePurpose, Desktop, KnownHostsStore, LaunchRequest, PendingStop, SettingsBackend,
-    SharingControl, SharingService, TrayAction, ViewerLauncher, WakeOnLan,
+    SharingControl, SharingService, TrayAction, UnattendedAccess, ViewerLauncher, WakeOnLan,
 };
 use super::settings::Settings;
 use super::settings_state::Page;
 use super::transfers::FileTransfers;
+use super::unattended_state::UnattendedState;
 
 /// What the user asked for (from the window or the tray).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +92,12 @@ pub enum Intent {
     },
     /// Opens a folder of received files.
     OpenFolder(PathBuf),
+    /// Turns unattended access on, or updates it, with this password
+    /// (empty: none).
+    EnableUnattended {
+        password: String,
+    },
+    DisableUnattended,
     /// "Sfoglia…" of the folder of received files.
     ChooseDownloads,
     /// The window's close button.
@@ -119,6 +126,17 @@ pub fn close_decision(sharing_enabled: bool) -> WindowCommand {
     }
 }
 
+/// What the controller drives the outside world through (see `ports`).
+pub struct Ports<S, L, K, B, W, D, U> {
+    pub service: S,
+    pub launcher: L,
+    pub known_hosts: K,
+    pub backend: B,
+    pub wake: W,
+    pub desktop: D,
+    pub unattended: U,
+}
+
 pub struct Controller<
     S: SharingService,
     L: ViewerLauncher,
@@ -126,6 +144,7 @@ pub struct Controller<
     B: SettingsBackend,
     W: WakeOnLan,
     D: Desktop,
+    U: UnattendedAccess,
 > {
     state: GuiState,
     service: S,
@@ -134,6 +153,7 @@ pub struct Controller<
     backend: B,
     wake: W,
     desktop: D,
+    unattended: U,
     sharing: Option<Box<dyn SharingControl>>,
     /// A service switched off and still stopping in the background.
     stopping: Option<Box<dyn PendingStop>>,
@@ -151,14 +171,27 @@ impl<
     B: SettingsBackend,
     W: WakeOnLan,
     D: Desktop,
-> Controller<S, L, K, B, W, D>
+    U: UnattendedAccess,
+> Controller<S, L, K, B, W, D, U>
 {
-    pub fn new(service: S, launcher: L, known_hosts: K, backend: B, wake: W, desktop: D) -> Self {
+    pub fn new(ports: Ports<S, L, K, B, W, D, U>) -> Self {
+        let Ports {
+            service,
+            launcher,
+            known_hosts,
+            backend,
+            wake,
+            desktop,
+            unattended,
+        } = ports;
         let (settings, warning) = backend.load();
-        let mut state = GuiState::default();
+        let mut state = GuiState {
+            unattended: UnattendedState::read(unattended.installed()),
+            settings_notice: warning.map(|detail| text::settings_unreadable(&detail)),
+            ..GuiState::default()
+        };
         state.sharing.input_allowed = settings.allow_input;
         state.settings = settings;
-        state.settings_notice = warning.map(|detail| text::settings_unreadable(&detail));
         let mut controller = Self {
             state,
             service,
@@ -167,6 +200,7 @@ impl<
             backend,
             wake,
             desktop,
+            unattended,
             sharing: None,
             stopping: None,
             generation: 0,
@@ -230,6 +264,8 @@ impl<
             }
             Intent::OpenFolder(folder) => self.open_folder(&folder),
             Intent::ChooseDownloads => self.choose(ChoicePurpose::Downloads),
+            Intent::EnableUnattended { password } => self.enable_unattended(password),
+            Intent::DisableUnattended => self.disable_unattended(),
             Intent::ShowWindow => return Some(WindowCommand::Show),
             Intent::CloseWindow => {
                 let decision = close_decision(self.state.sharing.enabled);
@@ -309,6 +345,7 @@ impl<
                 }
             }
             AppEvent::Chosen { purpose, paths } => self.chosen(purpose, paths),
+            AppEvent::Unattended(outcome) => self.unattended_finished(&outcome),
             AppEvent::Tray(action) => {
                 let intent = match action {
                     TrayAction::Open => Intent::ShowWindow,
@@ -351,6 +388,12 @@ impl<
         match (on, self.sharing.is_some()) {
             // The previous run is still stopping: it must finish first.
             (true, false) if self.stopping.is_some() => {}
+            // The unattended-access service shares this PC, on the same port.
+            (true, false) if self.state.unattended.shares_this_pc() => {
+                self.state
+                    .sharing
+                    .stopped(Some(text::SHARING_BY_SERVICE.to_string()));
+            }
             (true, false) => {
                 self.generation += 1;
                 let options = self.state.settings.host_options();
@@ -539,3 +582,6 @@ mod preferences;
 mod preferences_tests;
 #[cfg(test)]
 mod tests;
+mod unattended;
+#[cfg(test)]
+mod unattended_tests;

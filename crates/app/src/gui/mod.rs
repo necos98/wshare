@@ -18,7 +18,12 @@
 //!   the request of a viewer to be accepted, whose state is `approval`); `app` is the
 //!   eframe glue; `tray` the notification-area icon (`status_icon` its
 //!   variants, `balloon` its notifications, `notifications` which events
-//!   deserve one) and `overlay` the always-visible "who is connected" bar.
+//!   deserve one) and `overlay` the always-visible "who is connected" bar
+//!   (also shown by the unattended-access agent).
+//! - `unattended_access` is the port to the unattended-access service
+//!   (installed and removed as an administrator), `unattended_state` what
+//!   the settings page shows of it and `unattended_view` its section. While
+//!   the service is installed it shares this PC: the window does not.
 //!
 //! The sharing service runs in this process; every viewer window is a
 //! separate `wshare view` process (one winit event loop per process).
@@ -42,10 +47,10 @@ mod known_hosts_file;
 mod launcher;
 mod model;
 mod notifications;
-mod overlay;
+pub(crate) mod overlay;
 mod pairing_view;
 pub mod platform;
-mod ports;
+pub(crate) mod ports;
 mod remembered;
 mod settings;
 mod settings_file;
@@ -58,6 +63,9 @@ mod system_settings;
 mod transfers;
 mod transfers_view;
 mod tray;
+mod unattended_access;
+mod unattended_state;
+mod unattended_view;
 mod view;
 mod viewer_processes;
 mod wake_on_lan;
@@ -70,7 +78,7 @@ use eframe::egui;
 
 use crate::cli::GuiOptions;
 use app::WshareApp;
-use controller::Controller;
+use controller::{Controller, Ports};
 use ports::{Inbox, SettingsBackend, Waker};
 
 const WINDOW_SIZE: [f32; 2] = [380.0, 520.0];
@@ -109,14 +117,15 @@ pub fn run(gui: GuiOptions) -> Result<()> {
             let tray = tray::Tray::new(&inbox).ok();
             // Without a notification area the indicator is the only sign.
             let overlay = overlay::Overlay::new(inbox.clone()).ok();
-            let mut controller = Controller::new(
-                sharing::HostService::new(inbox.clone()),
-                launcher::ProcessLauncher::new(inbox.clone())?,
-                known_hosts_file::KnownHostsFile,
-                system_settings::SystemSettings,
-                wake_on_lan::UdpWakeOnLan,
-                shell::WindowsShell::new(inbox),
-            );
+            let mut controller = Controller::new(Ports {
+                service: sharing::HostService::new(inbox.clone()),
+                launcher: launcher::ProcessLauncher::new(inbox.clone())?,
+                known_hosts: known_hosts_file::KnownHostsFile,
+                backend: system_settings::SystemSettings,
+                wake: wake_on_lan::UdpWakeOnLan,
+                desktop: shell::WindowsShell::new(inbox.clone()),
+                unattended: unattended_access::WindowsUnattended::new(inbox),
+            });
             controller.start_up();
             Ok(Box::new(WshareApp::new(
                 controller,

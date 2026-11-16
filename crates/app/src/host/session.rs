@@ -40,6 +40,7 @@ use super::streaming::{StreamEnd, StreamPlan, StreamUpdate, StreamingThread};
 use super::transfers::SessionTransfers;
 use super::{HostEvent, HostWarning, SessionFailure};
 use crate::options::StreamOptions;
+use crate::unattended::UnattendedPolicy;
 
 /// Grace period to tell "viewer left" from "our stream failed" when the
 /// streaming thread stops first.
@@ -62,6 +63,8 @@ pub(super) struct SessionContext {
     pub(super) approvals: Arc<Approvals>,
     pub(super) pin_guard: PinGuard,
     pub(super) events: EventSink,
+    /// Set when shared with unattended access (see `HostOptions`).
+    pub(super) unattended: Option<UnattendedPolicy>,
 }
 
 /// Who ended the session.
@@ -240,6 +243,7 @@ async fn serve_admitted(
         cancel: &mut cancel,
         handle: &viewer.handle,
         events: &ctx.events,
+        unattended: ctx.unattended.is_some(),
     };
     let ended = loop_state.run().await;
     // Nothing the viewer pressed may stay pressed on the host.
@@ -338,6 +342,8 @@ struct ControlLoop<'a> {
     cancel: &'a mut Cancelled,
     handle: &'a SessionHandle,
     events: &'a EventSink,
+    /// Shared with unattended access: Ctrl+Alt+Del can be honoured.
+    unattended: bool,
 }
 
 impl ControlLoop<'_> {
@@ -374,6 +380,11 @@ impl ControlLoop<'_> {
                     Some(ControlMessage::SetAudio(on)) => {
                         if let Some(audio) = self.audio {
                             audio.set_viewer_wants(on);
+                        }
+                    }
+                    Some(ControlMessage::SecureAttention) => {
+                        if self.unattended && *self.allowed.borrow() {
+                            self.events.emit(HostEvent::SecureAttentionRequested);
                         }
                     }
                     Some(ControlMessage::Bye) | None => return Ok(SessionEnd::ViewerLeft),

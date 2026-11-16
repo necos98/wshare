@@ -16,6 +16,9 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
 const CERT_FILE: &str = "cert.der";
 const KEY_FILE: &str = "key.der";
+/// The files an identity is kept in (see [`Identity::load_or_create`]):
+/// copying them to another folder moves the identity there.
+pub const IDENTITY_FILES: [&str; 2] = [CERT_FILE, KEY_FILE];
 
 /// Length of the host id announced on the LAN (see [`Fingerprint::host_id`]).
 pub const HOST_ID_LEN: usize = 16;

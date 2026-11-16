@@ -53,6 +53,10 @@ pub(super) struct Log {
     /// The file commands handed to viewer windows.
     pub(super) commands: Vec<(ViewerId, TransferCommand)>,
     pub(super) fail_command: bool,
+    /// Whether the unattended-access service is installed, and whether
+    /// its state cannot be read.
+    pub(super) unattended_installed: bool,
+    pub(super) unattended_unreadable: bool,
 }
 
 pub(super) type Shared = Rc<RefCell<Log>>;
@@ -65,6 +69,7 @@ pub(super) struct FakeKnownHosts(Shared);
 pub(super) struct FakeSettings(Shared);
 pub(super) struct FakeWake(Shared);
 pub(super) struct FakeDesktop(Shared);
+pub(super) struct FakeUnattended(Shared);
 
 impl SharingService for FakeService {
     fn start(&mut self, options: HostOptions, generation: u64) -> Result<Box<dyn SharingControl>> {
@@ -244,21 +249,44 @@ pub(super) fn short(fingerprint: &Fingerprint) -> String {
     format!("{:02x}", fingerprint.0[0])
 }
 
-pub(super) type TestController =
-    Controller<FakeService, FakeLauncher, FakeKnownHosts, FakeSettings, FakeWake, FakeDesktop>;
+pub(super) type TestController = Controller<
+    FakeService,
+    FakeLauncher,
+    FakeKnownHosts,
+    FakeSettings,
+    FakeWake,
+    FakeDesktop,
+    FakeUnattended,
+>;
+
+/// Every port, on the fakes of `log`.
+fn ports(
+    log: &Shared,
+) -> Ports<
+    FakeService,
+    FakeLauncher,
+    FakeKnownHosts,
+    FakeSettings,
+    FakeWake,
+    FakeDesktop,
+    FakeUnattended,
+> {
+    Ports {
+        service: FakeService(log.clone()),
+        launcher: FakeLauncher(log.clone()),
+        known_hosts: FakeKnownHosts(log.clone()),
+        backend: FakeSettings(log.clone()),
+        wake: FakeWake(log.clone()),
+        desktop: FakeDesktop(log.clone()),
+        unattended: FakeUnattended(log.clone()),
+    }
+}
 
 /// A controller whose known-hosts store holds `known`.
 pub(super) fn controller_knowing(known: Vec<KnownHost>) -> (TestController, Shared) {
     let log = Shared::default();
     log.borrow_mut().known = known;
-    let controller = Controller::new(
-        FakeService(log.clone()),
-        FakeLauncher(log.clone()),
-        FakeKnownHosts(log.clone()),
-        FakeSettings(log.clone()),
-        FakeWake(log.clone()),
-        FakeDesktop(log.clone()),
-    );
+    let controller = Controller::new(ports(&log));
     (controller, log)
 }
 
@@ -310,14 +338,7 @@ impl SettingsBackend for FakeSettings {
 
 /// A controller on the fakes of `log`, as the test prepared it.
 pub(super) fn controller_from(log: &Shared) -> TestController {
-    Controller::new(
-        FakeService(log.clone()),
-        FakeLauncher(log.clone()),
-        FakeKnownHosts(log.clone()),
-        FakeSettings(log.clone()),
-        FakeWake(log.clone()),
-        FakeDesktop(log.clone()),
-    )
+    Controller::new(ports(log))
 }
 
 impl WakeOnLan for FakeWake {
@@ -328,5 +349,28 @@ impl WakeOnLan for FakeWake {
         }
         log.woken.push((mac, last_address));
         Ok(())
+    }
+}
+
+impl UnattendedAccess for FakeUnattended {
+    fn installed(&self) -> Result<bool> {
+        let log = self.0.borrow();
+        if log.unattended_unreadable {
+            bail!("no access to the service manager");
+        }
+        Ok(log.unattended_installed)
+    }
+
+    fn install(&self, port: u16, password: Option<String>) {
+        let mut log = self.0.borrow_mut();
+        log.calls
+            .push(format!("unattended install {port} {password:?}"));
+    }
+
+    fn uninstall(&self) {
+        self.0
+            .borrow_mut()
+            .calls
+            .push("unattended uninstall".to_string());
     }
 }

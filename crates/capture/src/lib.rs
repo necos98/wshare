@@ -17,6 +17,7 @@ pub use gpu::Gpu;
 use gpu::wide_to_string;
 pub use pointer::{MAX_POINTER_SIDE, PointerChanges, PointerImage};
 use pointer::{PointerTracker, RawPointerShape, ShapeKind};
+use windows::Win32::Foundation::E_ACCESSDENIED;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC,
     D3D11_USAGE_DEFAULT, ID3D11Device, ID3D11Texture2D,
@@ -91,6 +92,13 @@ fn enumerate_outputs() -> Result<Vec<OutputHandle>> {
     Ok(found)
 }
 
+/// Wait between two attempts to duplicate the output again.
+const REOPEN_PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
+/// While the input desktop switches (lock screen, UAC prompt) duplicating
+/// it is denied for a moment: this many attempts (about 5 s) before giving
+/// up. Only in a process that follows the input desktop.
+const DESKTOP_SWITCH_RETRIES: u32 = 100;
+
 /// Prefix of the GDI device names DXGI reports (`\\.\DISPLAY1`).
 const DEVICE_PREFIX: &str = r"\\.\";
 
@@ -135,6 +143,7 @@ impl DesktopDuplication {
             .nth(monitor_index)
             .with_context(|| format!("monitor {monitor_index} not found"))?;
         let gpu = Gpu::on_adapter(&handle.adapter)?;
+        input_desktop::attach_to_input_desktop()?;
         let dup = unsafe { handle.output.DuplicateOutput(&gpu.device) }
             .context("DuplicateOutput (already in use by another app?)")?;
         let mode = unsafe { dup.GetDesc() }.ModeDesc;
@@ -264,15 +273,35 @@ impl DesktopDuplication {
     /// Recreates the duplication after DXGI_ERROR_ACCESS_LOST. The pointer
     /// tracker is kept: DXGI re-sends the current shape on the new
     /// duplication, and the tracker drops it if it is unchanged.
+    ///
+    /// A process that follows the input desktop (see `input_desktop`) moves
+    /// to the desktop shown now (lock screen, UAC prompt...) first, and
+    /// waits a little for one that is still switching.
     fn reopen(&mut self) -> Result<()> {
+        let mut denied = 0;
         let dup = loop {
+            let attached = input_desktop::attach_to_input_desktop();
             match unsafe { self.output.DuplicateOutput(&self.gpu.device) } {
                 Ok(d) => break d,
-                Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
-                    std::thread::sleep(std::time::Duration::from_millis(50))
+                Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {}
+                Err(e)
+                    if e.code() == E_ACCESSDENIED
+                        && input_desktop::is_following()
+                        && denied < DESKTOP_SWITCH_RETRIES =>
+                {
+                    denied += 1;
                 }
-                Err(e) => return Err(e).context("DuplicateOutput after access lost"),
+                Err(e) => {
+                    let error = anyhow::Error::from(e);
+                    return Err(match attached {
+                        Err(attach) => {
+                            error.context(format!("cannot follow the input desktop: {attach:#}"))
+                        }
+                        Ok(_) => error.context("DuplicateOutput after access lost"),
+                    });
+                }
             }
+            std::thread::sleep(REOPEN_PAUSE);
         };
         let mode = unsafe { dup.GetDesc() }.ModeDesc;
         if mode.Width != self.width || mode.Height != self.height || mode.Format != self.format {

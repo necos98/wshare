@@ -8,6 +8,7 @@ edition.workspace = true
 # two small traits (`InputBackend`, `DesktopMetrics`).
 [dependencies]
 anyhow.workspace = true
+input_desktop.workspace = true
 protocol.workspace = true
 windows = { workspace = true, features = [
     "Win32_UI_Input_KeyboardAndMouse",

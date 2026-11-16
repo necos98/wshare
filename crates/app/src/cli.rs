@@ -8,6 +8,7 @@ use net::Fingerprint;
 
 use crate::access_mode::AccessMode;
 use crate::options::{DEFAULT_PORT, HostOptions, StreamOptions};
+use crate::unattended::{self, ServiceCommand};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BenchOptions {
@@ -57,6 +58,8 @@ pub enum Command {
     Help,
     /// No arguments (e.g. double-click): the desktop interface.
     Gui(GuiOptions),
+    /// Unattended access (see `unattended`).
+    Service(ServiceCommand),
 }
 
 pub const USAGE: &str = "\
@@ -90,6 +93,15 @@ wshare - LAN screen sharing (no arguments: open the window)
                files dropped on the window (or sent from its bar) go to the host; the
                host's land in DIR (default Downloads\\wshare)
                the host's sound plays here; the Audio button of the bar mutes it
+  wshare service install [--port P] [--password] [--from DIR]
+               unattended access (as an administrator): this PC can be used with nobody in
+               front of it, also at the lock screen, the sign-in screen and UAC prompts, and
+               the viewer can send Ctrl+Alt+Del. Only devices already authorized (that
+               connected once with the PIN) are admitted; --password also asks them for a
+               password. While it is on, this PC is shared by the service, not the window.
+               Run it again to copy newly authorized devices or change the password.
+  wshare service uninstall          turn unattended access off and remove everything it installed
+  wshare service status             whether unattended access is installed and running
   wshare list                       hosts found on the LAN
   wshare monitors                   monitors of this PC
   wshare bench [--monitor N] [--fps F] [--mbps B] [--codec h264|hevc] [--seconds S] [--out FILE]";
@@ -104,6 +116,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
         "bench" => parse_bench(rest).map(Command::Bench),
         "host" => parse_host(rest).map(Command::Host),
         "view" => parse_view(rest).map(Command::View),
+        "service" => unattended::parse(rest).map(Command::Service),
         MINIMIZED_FLAG if rest.is_empty() => Ok(Command::Gui(GuiOptions { minimized: true })),
         "help" | "--help" | "-h" => Ok(Command::Help),
         other => bail!("unknown command '{other}'"),
@@ -118,7 +131,7 @@ fn no_args(rest: &[String], command: Command) -> Result<Command> {
 }
 
 /// Walks `--flag value` pairs and bare positionals, delegating each to `on`.
-fn for_each_arg(
+pub(crate) fn for_each_arg(
     args: &[String],
     mut on: impl FnMut(&str, &mut dyn FnMut() -> Result<String>) -> Result<bool>,
 ) -> Result<()> {
@@ -183,6 +196,7 @@ fn parse_host(args: &[String]) -> Result<HostOptions> {
         receive_files: true,
         share_audio: true,
         downloads: None,
+        unattended: None,
     };
     for_each_arg(args, |flag, value| {
         if stream_flag(&mut options.stream, flag, value)? {

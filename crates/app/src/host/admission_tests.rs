@@ -18,7 +18,8 @@ use crate::host::HostEvent;
 use crate::host::approvals::ApprovalAnswer;
 use crate::host::session::SessionContext;
 use crate::host::state::SessionTicket;
-use crate::host::test_context::{PIN, TestContext, test_context};
+use crate::host::test_context::{PIN, TestContext, test_context, unattended_context};
+use crate::unattended::{PasswordHash, UnattendedPolicy};
 
 const WAIT: Duration = Duration::from_secs(10);
 /// Long enough for the answer to come first.
@@ -56,7 +57,11 @@ struct Setup {
 }
 
 async fn connected(access: AccessMode, pin: Option<&str>) -> Setup {
-    let host = test_context(access, LONG_APPROVAL);
+    connected_to(test_context(access, LONG_APPROVAL), pin).await
+}
+
+/// A viewer connected to `host`, having sent `pin` in its Hello.
+async fn connected_to(host: TestContext, pin: Option<&str>) -> Setup {
     let host_identity = Identity::generate("host").unwrap();
     let endpoint = HostEndpoint::bind((Ipv4Addr::LOCALHOST, 0).into(), &host_identity).unwrap();
     let viewer = Identity::generate("viewer").unwrap();
@@ -252,4 +257,69 @@ async fn a_place_taken_while_the_person_decided_is_not_given_twice() {
             reason: RejectReason::Busy
         }
     ));
+}
+
+/// Connected to the unattended-access agent, with `password` set; the
+/// viewer sends `sent` and is authorized if `authorized`.
+async fn unattended(password: Option<&str>, sent: Option<&str>, authorized: bool) -> Setup {
+    let policy = UnattendedPolicy {
+        password: password.map(PasswordHash::quick),
+    };
+    let setup = connected_to(unattended_context(policy), sent).await;
+    if authorized {
+        setup
+            .host
+            .ctx
+            .devices
+            .record_access(setup.viewer.fingerprint(), "laptop");
+    }
+    setup
+}
+
+fn refused(admission: &Admission) -> Option<&RejectReason> {
+    match admission {
+        Admission::Refused { reason } => Some(reason),
+        _ => None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unattended_access_refuses_a_device_that_is_not_authorized_even_with_the_pin() {
+    let mut setup = unattended(None, Some(PIN), false).await;
+    let admission = setup.admission(None).await;
+    assert_eq!(refused(&admission), Some(&RejectReason::NotAuthorized));
+    assert_eq!(setup.requests_made(), 0, "nobody is asked");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unattended_access_admits_an_authorized_device_without_a_password_set() {
+    let mut setup = unattended(None, None, true).await;
+    assert!(matches!(
+        setup.admission(None).await,
+        Admission::Admitted { .. }
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unattended_access_with_a_password_wants_the_right_one() {
+    let mut setup = unattended(Some("segreto"), None, true).await;
+    let admission = setup.admission(None).await;
+    assert_eq!(refused(&admission), Some(&RejectReason::PasswordRequired));
+
+    let mut setup = unattended(Some("segreto"), Some("sbagliato"), true).await;
+    let admission = setup.admission(None).await;
+    assert_eq!(refused(&admission), Some(&RejectReason::WrongPassword));
+
+    let mut setup = unattended(Some("segreto"), Some(" segreto "), true).await;
+    assert!(matches!(
+        setup.admission(None).await,
+        Admission::Admitted { .. }
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unattended_access_never_tells_an_unknown_device_that_a_password_is_set() {
+    let mut setup = unattended(Some("segreto"), Some("segreto"), false).await;
+    let admission = setup.admission(None).await;
+    assert_eq!(refused(&admission), Some(&RejectReason::NotAuthorized));
 }

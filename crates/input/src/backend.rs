@@ -41,6 +41,15 @@ impl InputBackend for SendInputBackend {
         // the real struct size. SendInput only reads the buffer.
         // UIPI blocking yields a short count with no reliable last-error
         // (documented by Microsoft), so the count is the whole answer.
-        Ok(unsafe { SendInput(&self.buffer, size) })
+        let injected = unsafe { SendInput(&self.buffer, size) };
+        if injected as usize == inputs.len() || !input_desktop::is_following() {
+            return Ok(injected);
+        }
+        // The input desktop changed (lock screen, UAC prompt...) since this
+        // thread last injected: once on it, the rest goes through.
+        input_desktop::attach_to_input_desktop()?;
+        let rest = &self.buffer[injected as usize..];
+        // SAFETY: as above, on a sub-slice of the same buffer.
+        Ok(injected + unsafe { SendInput(rest, size) })
     }
 }

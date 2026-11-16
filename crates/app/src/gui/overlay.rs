@@ -4,7 +4,8 @@
 //! It is a plain Win32 window rather than an egui one: egui draws nothing
 //! while its window is hidden in the tray, which is exactly when the
 //! indicator matters. It lives on the UI thread, whose message loop
-//! (eframe's) delivers its messages, and never takes the focus.
+//! (eframe's, or the unattended-access agent's) delivers its messages,
+//! and never takes the focus.
 
 use std::cell::{Cell, RefCell};
 

@@ -47,6 +47,9 @@ pub enum AppEvent {
         purpose: ChoicePurpose,
         paths: Vec<PathBuf>,
     },
+    /// Turning unattended access on or off (see [`UnattendedAccess`])
+    /// is over.
+    Unattended(UnattendedOutcome),
 }
 
 /// Why a file or folder dialog was opened.
@@ -222,4 +225,26 @@ pub trait WakeOnLan {
     /// Sends the wake-up signal for `mac`. `last_address` is where the
     /// computer was last seen: its network is also reached directly.
     fn wake(&self, mac: MacAddress, last_address: Option<IpAddr>) -> Result<()>;
+}
+
+/// How turning unattended access on or off ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnattendedOutcome {
+    Done,
+    /// The user said no to Windows' request for administrator rights.
+    Cancelled,
+    Failed(String),
+}
+
+/// The unattended-access service (see `unattended`).
+pub trait UnattendedAccess {
+    /// Whether the service is installed now.
+    fn installed(&self) -> Result<bool>;
+    /// Installs the service (or updates it: authorized devices copied again,
+    /// password replaced) without waiting: Windows asks the user for
+    /// administrator rights, and [`AppEvent::Unattended`] tells how it
+    /// ended. `password`: the one viewers must give; `None` for none.
+    fn install(&self, port: u16, password: Option<String>);
+    /// Removes the service and its files, like [`Self::install`].
+    fn uninstall(&self);
 }

@@ -18,6 +18,7 @@ use super::state::{Permissions, SharedState};
 use crate::access_mode::AccessMode;
 use crate::options::StreamOptions;
 use crate::trust::AuthorizedDevices;
+use crate::unattended::UnattendedPolicy;
 
 pub(super) const PIN: &str = "123456";
 
@@ -30,6 +31,19 @@ pub(super) struct TestContext {
 /// A service in `access` mode whose requests to its person expire after
 /// `approval_timeout`.
 pub(super) fn test_context(access: AccessMode, approval_timeout: Duration) -> TestContext {
+    context_with(access, approval_timeout, None)
+}
+
+/// The service of the unattended-access agent, with `policy`.
+pub(super) fn unattended_context(policy: UnattendedPolicy) -> TestContext {
+    context_with(AccessMode::PinOnly, Duration::from_secs(30), Some(policy))
+}
+
+fn context_with(
+    access: AccessMode,
+    approval_timeout: Duration,
+    unattended: Option<UnattendedPolicy>,
+) -> TestContext {
     let dir = tempfile::tempdir().unwrap();
     let (store, _) = AuthorizedDevices::load(dir.path().join("authorized.toml"));
     let (observer, events) = recorder();
@@ -50,6 +64,7 @@ pub(super) fn test_context(access: AccessMode, approval_timeout: Duration) -> Te
         approvals: Arc::new(Approvals::new(sink.clone(), approval_timeout)),
         pin_guard: PinGuard::new(state, sink.clone()),
         events: sink,
+        unattended,
     });
     TestContext {
         ctx,

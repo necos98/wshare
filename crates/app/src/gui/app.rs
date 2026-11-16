@@ -14,6 +14,7 @@ use super::sharing::HostService;
 use super::shell::WindowsShell;
 use super::system_settings::SystemSettings;
 use super::tray::Tray;
+use super::unattended_access::WindowsUnattended;
 use super::view::{self, Drafts};
 use super::wake_on_lan::UdpWakeOnLan;
 
@@ -24,6 +25,7 @@ type AppController = Controller<
     SystemSettings,
     UdpWakeOnLan,
     WindowsShell,
+    WindowsUnattended,
 >;
 
 /// What the app shows outside its window; each part is absent when Windows

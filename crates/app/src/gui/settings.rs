@@ -182,6 +182,7 @@ impl Settings {
             receive_files: self.receive_files,
             share_audio: self.share_audio,
             downloads: self.downloads_folder(),
+            unattended: None,
         }
     }
 

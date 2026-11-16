@@ -34,6 +34,7 @@
 //!   viewer -> host  SetAudio(on)            (also from view-only viewers;
 //!                                            the sound itself travels as
 //!                                            datagrams, see [`crate::audio`])
+//!   viewer -> host  SecureAttention         (Ctrl+Alt+Del; unattended hosts)
 //!   either          Bye
 //!
 //! Compatibility: peers of different protocol versions must still understand
@@ -77,7 +78,10 @@ use crate::transfer::TransferMessage;
 ///    copied and pasted, each on a unidirectional stream of its own.
 /// 11: Audio datagrams (host, see [`crate::audio`]) and SetAudio (viewer):
 ///    the viewer hears the host and can mute it.
-pub const PROTOCOL_VERSION: u16 = 11;
+/// 12: SecureAttention (viewer): Ctrl+Alt+Del on a host shared with
+///    unattended access. Its refusals (`PasswordRequired`, `WrongPassword`,
+///    `NotAuthorized`) keep the text form.
+pub const PROTOCOL_VERSION: u16 = 12;
 
 /// Upper bound for one control message; protects against garbage lengths.
 /// Sized for the largest cursor image (256x256 RGBA = 256 KiB) plus margin.
@@ -139,6 +143,13 @@ pub enum RejectReason {
     /// The viewer's address asked for approval too often lately: the host
     /// refuses without asking the person at the host.
     TooManyRequests,
+    /// The host is shared with unattended access and protected by a
+    /// password, which the viewer did not send (in `Hello.pin`).
+    PasswordRequired,
+    WrongPassword,
+    /// The host is shared with unattended access, which only devices
+    /// authorized earlier may use.
+    NotAuthorized,
     /// Anything else, as text for people.
     Other(String),
 }
@@ -150,6 +161,9 @@ const TOO_MANY_ATTEMPTS_TEXT: &str = "too many wrong PINs, try again later";
 const DENIED_TEXT: &str = "the host refused the connection";
 const EXPIRED_TEXT: &str = "nobody at the host answered in time";
 const TOO_MANY_REQUESTS_TEXT: &str = "too many connection requests, try again later";
+const PASSWORD_REQUIRED_TEXT: &str = "password required";
+const WRONG_PASSWORD_TEXT: &str = "wrong password";
+const NOT_AUTHORIZED_TEXT: &str = "this computer accepts only devices it already knows";
 const CANNOT_STREAM_TEXT_PREFIX: &str = "host cannot stream:";
 /// Protocol 3 hosts wrote "protocol version V not supported (host uses H)";
 /// both forms start and end the same way.
@@ -173,6 +187,9 @@ impl fmt::Display for RejectReason {
             Self::Denied => f.write_str(DENIED_TEXT),
             Self::Expired => f.write_str(EXPIRED_TEXT),
             Self::TooManyRequests => f.write_str(TOO_MANY_REQUESTS_TEXT),
+            Self::PasswordRequired => f.write_str(PASSWORD_REQUIRED_TEXT),
+            Self::WrongPassword => f.write_str(WRONG_PASSWORD_TEXT),
+            Self::NotAuthorized => f.write_str(NOT_AUTHORIZED_TEXT),
             Self::Other(text) => f.write_str(text),
         }
     }
@@ -194,6 +211,9 @@ impl From<String> for RejectReason {
             DENIED_TEXT => Self::Denied,
             EXPIRED_TEXT => Self::Expired,
             TOO_MANY_REQUESTS_TEXT => Self::TooManyRequests,
+            PASSWORD_REQUIRED_TEXT => Self::PasswordRequired,
+            WRONG_PASSWORD_TEXT => Self::WrongPassword,
+            NOT_AUTHORIZED_TEXT => Self::NotAuthorized,
             _ => match unsupported_version_host(&text) {
                 Some(host) => Self::UnsupportedVersion { host },
                 None => match text.strip_prefix(CANNOT_STREAM_TEXT_PREFIX) {
@@ -218,7 +238,8 @@ pub enum ControlMessage {
         version: u16,
         viewer_name: String,
         /// `None` for a viewer that expects to be recognised by its client
-        /// certificate.
+        /// certificate. A host shared with unattended access reads the
+        /// password of that access here instead of a PIN.
         pin: Option<String>,
     },
     Welcome {
@@ -274,6 +295,10 @@ pub enum ControlMessage {
     /// starts with) or mutes it (`false`): the host then stops capturing
     /// and sending it.
     SetAudio(bool),
+    /// Ctrl+Alt+Del on the host (the secure attention sequence, which
+    /// injected keys never trigger). Only a host shared with unattended
+    /// access can honour it, and only while remote control is allowed.
+    SecureAttention,
 }
 
 /// Serializes `msg` as one length-prefixed frame.
@@ -490,6 +515,13 @@ mod tests {
             }),
             ControlMessage::SetAudio(false),
             ControlMessage::SetAudio(true),
+            ControlMessage::SecureAttention,
+            ControlMessage::Rejected {
+                reason: RejectReason::PasswordRequired,
+            },
+            ControlMessage::Rejected {
+                reason: RejectReason::NotAuthorized,
+            },
             ControlMessage::RequestKeyframe,
             ControlMessage::Bye,
         ]
@@ -532,6 +564,9 @@ mod tests {
             RejectReason::Denied,
             RejectReason::Expired,
             RejectReason::TooManyRequests,
+            RejectReason::PasswordRequired,
+            RejectReason::WrongPassword,
+            RejectReason::NotAuthorized,
             RejectReason::Other("busy".into()),
         ] {
             assert_eq!(RejectReason::from(reason.to_string()), reason);
@@ -843,6 +878,31 @@ mod tests {
             encode_frame(&ControlMessage::AwaitingApproval),
             frame_of(&[17])
         );
+    }
+
+    #[test]
+    fn secure_attention_layout_is_stable() {
+        // Variant 20, no fields.
+        assert_eq!(
+            encode_frame(&ControlMessage::SecureAttention),
+            frame_of(&[20])
+        );
+    }
+
+    #[test]
+    fn unattended_refusals_are_encoded_as_text() {
+        for (reason, text) in [
+            (RejectReason::PasswordRequired, PASSWORD_REQUIRED_TEXT),
+            (RejectReason::WrongPassword, WRONG_PASSWORD_TEXT),
+            (RejectReason::NotAuthorized, NOT_AUTHORIZED_TEXT),
+        ] {
+            let mut expected = vec![2, u8::try_from(text.len()).unwrap()];
+            expected.extend_from_slice(text.as_bytes());
+            assert_eq!(
+                encode_frame(&ControlMessage::Rejected { reason }),
+                frame_of(&expected)
+            );
+        }
     }
 
     #[test]

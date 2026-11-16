@@ -22,6 +22,7 @@ use super::state::{Cancelled, SessionTicket};
 use crate::handshake::{
     AdmittedBy, HelloContext, HelloVerdict, ViewerTrust, check_hello, unsupported_version,
 };
+use crate::unattended::{self, MAX_PASSWORD_CHARS, PasswordCheck};
 
 /// How long a connected viewer has to send Hello.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -83,19 +84,22 @@ pub(super) async fn admit(
         Ok(Err(e)) if is_incompatible_hello(&e) => Decision::Refuse(unsupported_version()),
         Ok(Err(e)) => return refused(&format!("{e:#}")),
         Ok(Ok(None)) => return refused("viewer left before Hello"),
-        Ok(Ok(Some(message))) => match judge(&message, ctx, applicant) {
-            HelloVerdict::Accept { viewer_name, .. } => Decision::Admit {
-                viewer_name,
-                remember: true,
-            },
-            HelloVerdict::Reject { reason } => Decision::Refuse(reason),
-            HelloVerdict::AskHost { viewer_name } => {
-                match ask_host(tx, ctx, applicant, viewer_name, cancel).await {
-                    Some(decision) => decision,
-                    None => return Admission::Abandoned,
+        Ok(Ok(Some(message))) => {
+            let password = check_password(&message, ctx, applicant).await;
+            match judge(&message, ctx, applicant, password) {
+                HelloVerdict::Accept { viewer_name, .. } => Decision::Admit {
+                    viewer_name,
+                    remember: true,
+                },
+                HelloVerdict::Reject { reason } => Decision::Refuse(reason),
+                HelloVerdict::AskHost { viewer_name } => {
+                    match ask_host(tx, ctx, applicant, viewer_name, cancel).await {
+                        Some(decision) => decision,
+                        None => return Admission::Abandoned,
+                    }
                 }
             }
-        },
+        }
     };
     match claim_place(decision, ticket) {
         Decision::Admit {
@@ -151,22 +155,70 @@ async fn ask_host(
     })
 }
 
+/// With unattended access, what became of the password in `message` (see
+/// `unattended::rules`); `None` otherwise. The check is slow on purpose,
+/// so it runs on a blocking thread, and only when the verdict depends on
+/// it.
+async fn check_password(
+    message: &ControlMessage,
+    ctx: &SessionContext,
+    applicant: Applicant<'_>,
+) -> Option<PasswordCheck> {
+    let policy = ctx.unattended.as_ref()?;
+    let Some(hash) = policy.password.clone() else {
+        return Some(PasswordCheck::NotSet);
+    };
+    let ControlMessage::Hello { pin, .. } = message else {
+        return Some(PasswordCheck::Skipped);
+    };
+    let paused = ctx.pin_guard.is_paused(applicant.address.ip());
+    if !unattended::needs_password_check(applicant.trust, paused) || ctx.state.viewers_full() {
+        return Some(PasswordCheck::Skipped);
+    }
+    let Some(given) = pin.as_deref().map(str::trim).filter(|p| !p.is_empty()) else {
+        return Some(PasswordCheck::Missing);
+    };
+    if given.chars().count() > MAX_PASSWORD_CHARS {
+        return Some(PasswordCheck::Wrong);
+    }
+    let given = given.to_string();
+    // A check that could not run counts as a wrong password: never admit
+    // on a failure.
+    let right = tokio::task::spawn_blocking(move || hash.verify(&given))
+        .await
+        .unwrap_or(false);
+    Some(if right {
+        PasswordCheck::Right
+    } else {
+        PasswordCheck::Wrong
+    })
+}
+
 /// Checks `message` against the host's state right now and counts the
-/// PIN it carried, if that PIN was checked.
-fn judge(message: &ControlMessage, ctx: &SessionContext, applicant: Applicant<'_>) -> HelloVerdict {
+/// PIN (or password) it carried, if that was checked.
+fn judge(
+    message: &ControlMessage,
+    ctx: &SessionContext,
+    applicant: Applicant<'_>,
+    password: Option<PasswordCheck>,
+) -> HelloVerdict {
     let ip = applicant.address.ip();
     let expected_pin = ctx.state.pin();
+    // With unattended access only authorized devices get as far as a
+    // password: their guesses are counted and paused too.
+    let counted = applicant.trust == ViewerTrust::Unknown || password.is_some();
     let context = HelloContext {
         expected_pin: &expected_pin,
         trust: applicant.trust,
         access: ctx.state.access(),
         host_busy: ctx.state.viewers_full(),
-        pin_paused: applicant.trust == ViewerTrust::Unknown && ctx.pin_guard.is_paused(ip),
+        pin_paused: counted && ctx.pin_guard.is_paused(ip),
+        unattended: password,
     };
     let verdict = check_hello(message, &context);
     match &verdict {
         HelloVerdict::Reject {
-            reason: RejectReason::WrongPin,
+            reason: RejectReason::WrongPin | RejectReason::WrongPassword,
         } => ctx.pin_guard.wrong_pin(ip),
         HelloVerdict::Accept {
             by: AdmittedBy::Pin,

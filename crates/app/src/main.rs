@@ -22,6 +22,7 @@ mod target;
 mod text;
 mod transfer;
 mod trust;
+mod unattended;
 mod viewer;
 mod wire;
 
@@ -64,6 +65,7 @@ fn run(command: Command) -> Result<()> {
         Command::Host(options) => host::run(options),
         Command::View(options) => viewer::run(options),
         Command::Gui(options) => gui::run(options),
+        Command::Service(command) => unattended::run(command),
         Command::Help => {
             println!("{}", cli::USAGE);
             Ok(())

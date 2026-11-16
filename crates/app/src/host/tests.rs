@@ -25,6 +25,7 @@ fn options(monitor: usize) -> HostOptions {
         receive_files: true,
         share_audio: true,
         downloads: None,
+        unattended: None,
     }
 }
 

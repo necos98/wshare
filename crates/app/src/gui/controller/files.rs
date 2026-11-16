@@ -10,8 +10,8 @@ use protocol::transfer::TransferId;
 use super::super::model::ViewerId;
 use super::super::notifications;
 use super::super::ports::{
-    ChoicePurpose, Desktop, KnownHostsStore, SettingsBackend, SharingService, ViewerLauncher,
-    WakeOnLan,
+    ChoicePurpose, Desktop, KnownHostsStore, SettingsBackend, SharingService, UnattendedAccess,
+    ViewerLauncher, WakeOnLan,
 };
 use super::Controller;
 use crate::text;
@@ -24,7 +24,8 @@ impl<
     B: SettingsBackend,
     W: WakeOnLan,
     D: Desktop,
-> Controller<S, L, K, B, W, D>
+    U: UnattendedAccess,
+> Controller<S, L, K, B, W, D, U>
 {
     /// Opens the dialog for `purpose`; the choice comes back as
     /// `AppEvent::Chosen`.

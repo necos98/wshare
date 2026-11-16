@@ -11,6 +11,7 @@ members = [
     "crates/net",
     "crates/discovery",
     "crates/input",
+    "crates/input_desktop",
     "crates/app",
     "crates/cli-shim",
 ]
@@ -35,6 +36,7 @@ render = { path = "crates/render" }
 net = { path = "crates/net" }
 discovery = { path = "crates/discovery" }
 input = { path = "crates/input" }
+input_desktop = { path = "crates/input_desktop" }
 
 [profile.release]
 lto = "thin"

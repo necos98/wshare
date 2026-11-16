@@ -21,6 +21,7 @@ use super::remembered::RememberedHosts;
 use super::settings::Settings;
 use super::settings_state::Page;
 use super::transfers::FileTransfers;
+use super::unattended_state::UnattendedState;
 
 /// Identifies a viewer process launched by the interface.
 pub type ViewerId = u64;
@@ -168,6 +169,8 @@ impl Sharing {
                 height,
             } => self.screen = Some(text::shared_screen(&monitor, width, height)),
             HostEvent::InputBlocked => self.input_blocked = true,
+            // Never sent here: the window does not share with unattended access.
+            HostEvent::SecureAttentionRequested => {}
             HostEvent::Transfer(event) => {
                 self.files.apply(event);
             }
@@ -282,6 +285,9 @@ pub struct GuiState {
     /// Counts the times the selected host asked for the PIN again; the
     /// window empties and focuses the PIN field whenever it changes.
     pub pin_prompts: u64,
+    /// The listed host whose unattended access asked for its password:
+    /// its row shows a password field, even if it remembers this PC.
+    pub password_for: Option<String>,
     /// The saved preferences (see `settings`).
     pub settings: Settings,
     pub page: Page,
@@ -298,6 +304,8 @@ pub struct GuiState {
     pub notifications: Vec<Notification>,
     /// A problem with files (nobody to send to, a folder not opened...).
     pub files_notice: Option<String>,
+    /// Unattended access (the service), as the settings page shows it.
+    pub unattended: UnattendedState,
 }
 
 impl GuiState {
@@ -369,7 +377,12 @@ impl GuiState {
                     .filter(|host_id| self.host_row(host_id).is_some());
                 let status = match (cause, listed_host) {
                     (
-                        Some(pin_cause @ (FailureCause::PinRequired | FailureCause::WrongPin)),
+                        Some(
+                            pin_cause @ (FailureCause::PinRequired
+                            | FailureCause::WrongPin
+                            | FailureCause::PasswordRequired
+                            | FailureCause::WrongPassword),
+                        ),
                         Some(host_id),
                     ) => {
                         self.ask_pin_again(id, host_id, &pin_cause);
@@ -385,18 +398,26 @@ impl GuiState {
         }
     }
 
-    /// A listed host refused the connection for want of a (right) PIN: its
-    /// row stays selected with an empty PIN field that takes the keyboard
-    /// and says why, instead of a failed viewer line.
+    /// A listed host refused the connection for want of a (right) PIN, or
+    /// password of its unattended access: its row stays selected with an
+    /// empty field that takes the keyboard and says why, instead of a
+    /// failed viewer line.
     fn ask_pin_again(&mut self, viewer: ViewerId, host_id: String, cause: &FailureCause) {
         self.viewers.retain(|v| v.id != viewer);
         if *cause == FailureCause::PinRequired {
             self.remembered.pin_required(&host_id);
         }
+        let asks_password = matches!(
+            cause,
+            FailureCause::PasswordRequired | FailureCause::WrongPassword
+        );
+        self.password_for = asks_password.then(|| host_id.clone());
         self.selected_host = Some(host_id);
         self.connect_error = Some(
             match cause {
                 FailureCause::WrongPin => text::PIN_WRONG,
+                FailureCause::PasswordRequired => text::PASSWORD_AGAIN,
+                FailureCause::WrongPassword => text::PASSWORD_WRONG,
                 _ => text::PIN_AGAIN,
             }
             .to_string(),
@@ -868,6 +889,51 @@ pub(crate) mod tests {
         assert_eq!(state.connect_error.as_deref(), Some(text::PIN_WRONG));
         assert!(state.viewers.is_empty(), "the row says it, not a line");
         assert_eq!(state.pin_prompts, prompts + 1, "the PIN field is refocused");
+    }
+
+    #[test]
+    fn a_password_request_asks_for_it_in_the_row_of_a_remembered_host() {
+        let (mut state, id) = remembered_office();
+        state.apply_viewer_update(7, failed_with(FailureCause::PasswordRequired));
+        assert_eq!(state.selected_host.as_deref(), Some(id.as_str()));
+        assert_eq!(state.password_for.as_deref(), Some(id.as_str()));
+        assert_eq!(state.connect_error.as_deref(), Some(text::PASSWORD_AGAIN));
+        assert!(
+            state.host_row(&id).unwrap().remembered,
+            "the device stays authorized: only the password is missing"
+        );
+        assert!(state.viewers.is_empty(), "the row says it, not a line");
+    }
+
+    #[test]
+    fn a_wrong_password_asks_again_and_a_pin_request_is_not_a_password_one() {
+        let (mut state, id) = remembered_office();
+        state.apply_viewer_update(7, failed_with(FailureCause::WrongPassword));
+        assert_eq!(state.connect_error.as_deref(), Some(text::PASSWORD_WRONG));
+        assert_eq!(state.password_for.as_deref(), Some(id.as_str()));
+
+        state.viewers.push(ViewerSession {
+            id: 8,
+            label: "UFFICIO".into(),
+            address: addr("192.168.1.3:7420"),
+            host_id: Some(id.clone()),
+            status: ViewerStatus::Connecting,
+            files: FileTransfers::default(),
+        });
+        state.apply_viewer_update(8, failed_with(FailureCause::PinRequired));
+        assert_eq!(state.password_for, None);
+        assert_eq!(state.connect_error.as_deref(), Some(text::PIN_AGAIN));
+    }
+
+    #[test]
+    fn an_unauthorized_device_is_a_failed_line() {
+        let (mut state, _) = remembered_office();
+        state.apply_viewer_update(7, failed_with(FailureCause::NotAuthorized));
+        assert_eq!(state.password_for, None);
+        assert_eq!(
+            state.viewers[0].status_line(),
+            format!("UFFICIO: {}", text::NOT_AUTHORIZED)
+        );
     }
 
     #[test]

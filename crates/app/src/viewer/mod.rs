@@ -332,8 +332,14 @@ fn authenticate(
             pin.clone(),
             || announce_waiting(reporting),
         )) {
-            Err(e) if pin.is_none() && is_pin_required(&e) => {
-                pin = prompt_pin(&format!("{label} requires the PIN: "), reporting)?;
+            Err(e) if pin.is_none() && requested_credential(&e).is_some() => {
+                let question = match requested_credential(&e) {
+                    Some(Credential::Password) => {
+                        format!("{label} requires the password of its unattended access: ")
+                    }
+                    _ => format!("{label} requires the PIN: "),
+                };
+                pin = prompt_pin(&question, reporting)?;
                 if pin.is_none() {
                     return Err(e);
                 }
@@ -343,9 +349,21 @@ fn authenticate(
     }
 }
 
-fn is_pin_required(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<ViewerFailure>()
-        == Some(&ViewerFailure::Rejected(RejectReason::PinRequired))
+/// What a host that refused us for want of one asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Credential {
+    Pin,
+    /// The password of the host's unattended access (sent as the PIN).
+    Password,
+}
+
+/// The credential the host refused `error` for not having, if any.
+fn requested_credential(error: &anyhow::Error) -> Option<Credential> {
+    match error.downcast_ref::<ViewerFailure>()? {
+        ViewerFailure::Rejected(RejectReason::PinRequired) => Some(Credential::Pin),
+        ViewerFailure::Rejected(RejectReason::PasswordRequired) => Some(Credential::Password),
+        _ => None,
+    }
 }
 
 /// One connection attempt: TLS (pinned for a remembered host, presenting
@@ -511,10 +529,17 @@ mod tests {
     }
 
     #[test]
-    fn only_pin_required_triggers_the_prompt() {
+    fn only_a_missing_pin_or_password_triggers_the_prompt() {
         let failure = |reason| anyhow::Error::new(ViewerFailure::Rejected(reason));
-        assert!(is_pin_required(&failure(RejectReason::PinRequired)));
-        assert!(!is_pin_required(&failure(RejectReason::WrongPin)));
-        assert!(!is_pin_required(&anyhow!("PIN required")));
+        let asked = |reason| requested_credential(&failure(reason));
+        assert_eq!(asked(RejectReason::PinRequired), Some(Credential::Pin));
+        assert_eq!(
+            asked(RejectReason::PasswordRequired),
+            Some(Credential::Password)
+        );
+        assert_eq!(asked(RejectReason::WrongPin), None);
+        assert_eq!(asked(RejectReason::WrongPassword), None);
+        assert_eq!(asked(RejectReason::NotAuthorized), None);
+        assert_eq!(requested_credential(&anyhow!("PIN required")), None);
     }
 }

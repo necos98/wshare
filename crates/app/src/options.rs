@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use codec::Codec;
 
 use crate::access_mode::AccessMode;
+use crate::unattended::UnattendedPolicy;
 
 pub const DEFAULT_PORT: u16 = 7420;
 
@@ -71,6 +72,10 @@ pub struct HostOptions {
     /// Where the viewer's files land; `None`: this user's
     /// `Downloads\wshare` (see `paths::default_downloads`).
     pub downloads: Option<PathBuf>,
+    /// Set by the unattended-access agent only (see `unattended`): just
+    /// authorized devices are let in, with its password if it has one, and
+    /// neither the PIN nor `access` count.
+    pub unattended: Option<UnattendedPolicy>,
 }
 
 #[cfg(test)]

@@ -14,8 +14,10 @@ use crate::viewer::report::FailureCause;
 
 mod audio;
 mod transfer;
+mod unattended;
 pub use audio::*;
 pub use transfer::*;
+pub use unattended::*;
 
 // --- Why a viewer ended -------------------------------------------------
 
@@ -55,6 +57,9 @@ pub fn viewer_failure(cause: &FailureCause) -> String {
         FailureCause::TooManyRequests => {
             "Troppe richieste di accesso: attendi un minuto e riprova.".to_string()
         }
+        FailureCause::PasswordRequired => PASSWORD_AGAIN.to_string(),
+        FailureCause::WrongPassword => "Password di accesso non presidiato errata.".to_string(),
+        FailureCause::NotAuthorized => NOT_AUTHORIZED.to_string(),
         FailureCause::HostCannotStream(detail) => format!(
             "Il computer ha rifiutato la connessione: {}.",
             cannot_stream(detail)
@@ -95,6 +100,9 @@ pub fn reject_reason(reason: &RejectReason) -> String {
         RejectReason::Denied => "rifiutato da chi usa questo computer".to_string(),
         RejectReason::Expired => "nessuna risposta alla richiesta di accesso".to_string(),
         RejectReason::TooManyRequests => "troppe richieste di accesso".to_string(),
+        RejectReason::PasswordRequired => "password non inserita".to_string(),
+        RejectReason::WrongPassword => "password errata".to_string(),
+        RejectReason::NotAuthorized => "dispositivo non autorizzato".to_string(),
         RejectReason::Other(text) => text.clone(),
     }
 }

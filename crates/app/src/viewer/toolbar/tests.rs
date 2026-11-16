@@ -18,8 +18,8 @@ fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Rect {
 }
 
 /// Hand-built layout, independent of the renderer's numbers. For a
-/// 1000 px window: handle 440..560 x 0..12; seven buttons of 100 px from
-/// x = 150 to 850 (y 5..35) in a bar 100..900 x 0..40.
+/// 1000 px window: handle 440..560 x 0..12; eight buttons of 100 px from
+/// x = 100 to 900 (y 5..35) in a bar 50..950 x 0..40.
 fn fake(window: (u32, u32), _scale: f32, count: usize, expanded: bool) -> ToolbarGeometry {
     let cx = window.0 as i32 / 2;
     let start = cx - count as i32 * 50;
@@ -52,13 +52,14 @@ fn t(ms: u64, base: Instant) -> Instant {
 }
 
 const ON_HANDLE: (i32, i32) = (500, 5);
-const ON_FULLSCREEN: (i32, i32) = (200, 20);
-const ON_SCREEN: (i32, i32) = (300, 20);
-const ON_QUALITY: (i32, i32) = (400, 20);
-const ON_AUDIO: (i32, i32) = (500, 20);
-const ON_FILES: (i32, i32) = (600, 20);
-const ON_STATS: (i32, i32) = (700, 20);
-const ON_DISCONNECT: (i32, i32) = (800, 20);
+const ON_FULLSCREEN: (i32, i32) = (150, 20);
+const ON_SCREEN: (i32, i32) = (250, 20);
+const ON_QUALITY: (i32, i32) = (350, 20);
+const ON_AUDIO: (i32, i32) = (450, 20);
+const ON_FILES: (i32, i32) = (550, 20);
+const ON_SECURE_ATTENTION: (i32, i32) = (650, 20);
+const ON_STATS: (i32, i32) = (750, 20);
+const ON_DISCONNECT: (i32, i32) = (850, 20);
 const ON_BAR_GAP: (i32, i32) = (500, 38);
 const VIDEO: (i32, i32) = (500, 300);
 
@@ -76,7 +77,7 @@ fn a_window_has_the_bar_too() {
     assert!(b.view().expanded, "the handle reveals the bar");
     assert!(mv(&mut b, ON_STATS, now).consumed);
     assert!(b.wants_arrow());
-    assert_eq!(b.view().hovered, Some(5));
+    assert_eq!(b.view().hovered, Some(6));
     mv(&mut b, VIDEO, now);
     assert!(b.next_deadline().is_some(), "and it folds away again");
 }
@@ -112,6 +113,7 @@ fn the_first_button_names_the_other_mode_and_hints_the_shortcut() {
             "Qualità",
             "Audio",
             "File",
+            "Ctrl+Alt+Canc",
             "Statistiche",
             "Disconnetti"
         ]
@@ -124,6 +126,7 @@ fn the_first_button_names_the_other_mode_and_hints_the_shortcut() {
             "Scegli la qualità del video",
             "Disattiva l'audio dell'altro computer",
             "Invia file all'altro computer o annulla i trasferimenti",
+            "Invia Ctrl+Alt+Canc all'altro computer (solo con l'accesso non presidiato)",
             "Mostra o nascondi le statistiche (Ctrl+Alt+I)",
             "Chiudi la connessione"
         ]
@@ -163,6 +166,7 @@ fn view_starts_collapsed_in_fullscreen_with_labels() {
             "Qualità",
             "Audio",
             "File",
+            "Ctrl+Alt+Canc",
             "Statistiche",
             "Disconnetti"
         ]
@@ -209,13 +213,13 @@ fn stays_open_over_bar_and_tracks_hover() {
     mv(&mut b, ON_HANDLE, now);
     let out = mv(&mut b, ON_STATS, now);
     assert!(out.consumed);
-    assert_eq!(b.view().hovered, Some(5));
+    assert_eq!(b.view().hovered, Some(6));
     assert_eq!(b.next_deadline(), None);
     mv(&mut b, ON_BAR_GAP, now);
     assert_eq!(b.view().hovered, None);
     assert!(b.wants_arrow());
     mv(&mut b, ON_DISCONNECT, now);
-    assert_eq!(b.view().hovered, Some(6));
+    assert_eq!(b.view().hovered, Some(7));
 }
 
 #[test]
@@ -272,6 +276,7 @@ fn click_fires_action_on_release_over_same_button() {
     let now = Instant::now();
     for (pos, action) in [
         (ON_FULLSCREEN, BarAction::ToggleFullscreen),
+        (ON_SECURE_ATTENTION, BarAction::SecureAttention),
         (ON_STATS, BarAction::ToggleStats),
         (ON_DISCONNECT, BarAction::Disconnect),
     ] {

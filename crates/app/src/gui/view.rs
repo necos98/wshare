@@ -8,6 +8,7 @@ use eframe::egui::{
 
 use crate::text;
 use crate::trust::Timestamp;
+use crate::unattended::MAX_PASSWORD_CHARS;
 
 use super::approval_view;
 use super::controller::Intent;
@@ -17,6 +18,9 @@ use super::pairing_view::{self, RememberedAction};
 use super::settings_state::Page;
 use super::settings_view;
 use super::transfers_view;
+
+/// Longest PIN the field takes (a PIN has 6 digits; spaces may surround it).
+const MAX_PIN_CHARS: usize = 16;
 
 /// Text fields being edited; not part of the application state.
 #[derive(Debug, Default)]
@@ -30,6 +34,8 @@ pub struct Drafts {
     last_form: Form,
     /// The `GuiState::pin_prompts` already acted on.
     seen_pin_prompts: u64,
+    /// The password of unattended access in the settings page.
+    unattended_password: String,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +52,7 @@ pub(super) const DETAIL_SIZE: f32 = 12.0;
 pub fn show(ui: &mut Ui, state: &GuiState, drafts: &mut Drafts) -> Vec<Intent> {
     let mut intents = Vec::new();
     if state.page == Page::Settings {
-        settings_view::show(ui, state, &mut intents);
+        settings_view::show(ui, state, &mut drafts.unattended_password, &mut intents);
         return intents;
     }
     egui::ScrollArea::vertical()
@@ -229,13 +235,13 @@ fn network_section(ui: &mut Ui, state: &GuiState, drafts: &mut Drafts, intents: 
             .connect_error
             .as_deref()
             .filter(|_| drafts.last_form == Form::Address);
-        if pin_form(
-            ui,
-            &mut drafts.address_pin,
-            Some(&mut drafts.address),
+        let form = PinForm {
+            address: Some(&mut drafts.address),
             error,
-            false,
-        ) {
+            focus: false,
+            password: false,
+        };
+        if pin_form(ui, &mut drafts.address_pin, form) {
             drafts.last_form = Form::Address;
             let pin = std::mem::take(&mut drafts.address_pin);
             intents.push(Intent::ConnectAddress {
@@ -264,7 +270,19 @@ fn selected_host_form(
         id: row.id.clone(),
         pin,
     };
-    if row.remembered {
+    let asks_password = state.password_for.as_deref() == Some(row.id.as_str());
+    if asks_password {
+        let form = PinForm {
+            address: None,
+            error,
+            focus: std::mem::take(&mut drafts.focus_host_pin),
+            password: true,
+        };
+        if pin_form(ui, &mut drafts.host_pin, form) {
+            drafts.last_form = Form::Host;
+            intents.push(connect(std::mem::take(&mut drafts.host_pin)));
+        }
+    } else if row.remembered {
         match pairing_view::remembered_form(ui, error) {
             Some(RememberedAction::Connect) => {
                 drafts.last_form = Form::Host;
@@ -277,8 +295,13 @@ fn selected_host_form(
             None => {}
         }
     } else {
-        let focus = std::mem::take(&mut drafts.focus_host_pin);
-        if pin_form(ui, &mut drafts.host_pin, None, error, focus) {
+        let form = PinForm {
+            address: None,
+            error,
+            focus: std::mem::take(&mut drafts.focus_host_pin),
+            password: false,
+        };
+        if pin_form(ui, &mut drafts.host_pin, form) {
             drafts.last_form = Form::Host;
             intents.push(connect(std::mem::take(&mut drafts.host_pin)));
         }
@@ -338,16 +361,28 @@ fn host_row(ui: &mut Ui, row: &HostRow, selected: bool) -> Response {
     })
 }
 
+/// How [`pin_form`] looks.
+struct PinForm<'a> {
+    /// The address field, when the form has one.
+    address: Option<&'a mut String>,
+    error: Option<&'a str>,
+    /// The PIN field takes the keyboard.
+    focus: bool,
+    /// A host's unattended access asks for its password, not a PIN: the
+    /// field hides what is typed.
+    password: bool,
+}
+
 /// `[address] [PIN] [Connetti]`; returns true when the user asked to connect.
 /// With an address field the PIN is optional (the host may remember this
-/// PC); without one, the PIN is what the form is for.
-fn pin_form(
-    ui: &mut Ui,
-    pin: &mut String,
-    address: Option<&mut String>,
-    error: Option<&str>,
-    focus_pin: bool,
-) -> bool {
+/// PC); without one, the PIN (or password) is what the form is for.
+fn pin_form(ui: &mut Ui, pin: &mut String, form: PinForm) -> bool {
+    let PinForm {
+        address,
+        error,
+        focus,
+        password,
+    } = form;
     let mut submit = false;
     ui.horizontal(|ui| {
         ui.add_space(8.0);
@@ -362,13 +397,19 @@ fn pin_form(
             submit |= enter_pressed(ui, &field);
             address_given = !address.trim().is_empty();
         }
+        let (hint, limit) = if password {
+            (text::PASSWORD_HINT, MAX_PASSWORD_CHARS)
+        } else {
+            ("PIN", MAX_PIN_CHARS)
+        };
         let field = ui.add(
             TextEdit::singleline(pin)
-                .hint_text("PIN")
+                .hint_text(hint)
+                .password(password)
                 .desired_width(if has_address { 70.0 } else { 110.0 })
-                .char_limit(16),
+                .char_limit(limit),
         );
-        if focus_pin {
+        if focus {
             field.request_focus();
         }
         submit |= enter_pressed(ui, &field);

@@ -6,13 +6,14 @@ use std::sync::OnceLock;
 use anyhow::{Context, Result};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::{FOLDERID_Downloads, KNOWN_FOLDER_FLAG, SHGetKnownFolderPath};
+use windows::core::GUID;
 
 use crate::data_migration;
 
 /// The viewer's own TLS identity, apart from the host's `cert.der` /
 /// `key.der`: both may be created at the same time by different processes.
 const VIEWER_IDENTITY_DIR: &str = "viewer";
-const AUTHORIZED_VIEWERS_FILE: &str = "authorized_viewers.toml";
+pub const AUTHORIZED_VIEWERS_FILE: &str = "authorized_viewers.toml";
 const KNOWN_HOSTS_FILE: &str = "known_hosts.toml";
 const LOGS_DIR: &str = "logs";
 const APP_DIR: &str = "wshare";
@@ -39,6 +40,16 @@ pub fn config_dir() -> Result<PathBuf> {
         eprintln!("wshare: {warning}");
     }
     Ok(DATA_DIR.get_or_init(|| dir).clone())
+}
+
+/// Makes `dir` the data folder of this process instead of the user's: the
+/// unattended-access agent runs as SYSTEM and keeps its identity and
+/// authorized devices in the service's protected folder. Must be called
+/// before anything reads [`config_dir`].
+pub fn use_config_dir(dir: PathBuf) -> Result<()> {
+    DATA_DIR
+        .set(dir)
+        .map_err(|_| anyhow::anyhow!("the data folder was already in use"))
 }
 
 /// Where the opt-in diagnostics are written.
@@ -79,10 +90,15 @@ pub fn default_downloads() -> PathBuf {
 
 /// The Downloads known folder.
 fn known_downloads() -> Option<PathBuf> {
+    known_folder(&FOLDERID_Downloads)
+}
+
+/// A known folder of Windows (`FOLDERID_*`), if Windows can say where.
+pub fn known_folder(id: &GUID) -> Option<PathBuf> {
     // SAFETY: the returned string is read, then freed with the allocator
     // the shell used for it, as documented.
     unsafe {
-        let path = SHGetKnownFolderPath(&FOLDERID_Downloads, KNOWN_FOLDER_FLAG(0), None).ok()?;
+        let path = SHGetKnownFolderPath(id, KNOWN_FOLDER_FLAG(0), None).ok()?;
         let text = path.to_string().ok();
         CoTaskMemFree(Some(path.0.cast_const().cast()));
         text.map(PathBuf::from)

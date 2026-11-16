@@ -7,7 +7,8 @@ use crate::text;
 
 use super::super::notifications;
 use super::super::ports::{
-    Desktop, KnownHostsStore, SettingsBackend, SharingService, ViewerLauncher, WakeOnLan,
+    Desktop, KnownHostsStore, SettingsBackend, SharingService, UnattendedAccess, ViewerLauncher,
+    WakeOnLan,
 };
 use super::super::settings::Settings;
 use super::super::settings_state::Page;
@@ -20,7 +21,8 @@ impl<
     B: SettingsBackend,
     W: WakeOnLan,
     D: Desktop,
-> Controller<S, L, K, B, W, D>
+    U: UnattendedAccess,
+> Controller<S, L, K, B, W, D, U>
 {
     /// Work to do once the window exists: keeps the Windows start-up entry
     /// pointing at this executable (only if the user turned it on) and

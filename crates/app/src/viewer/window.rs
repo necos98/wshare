@@ -304,6 +304,7 @@ impl ViewerWindow {
             BarAction::SelectMonitor(index) => self.ask_host(ControlMessage::SelectMonitor(index)),
             BarAction::SetQuality(quality) => self.ask_host(ControlMessage::SetQuality(quality)),
             BarAction::SetAudio(on) => self.ask_host(ControlMessage::SetAudio(on)),
+            BarAction::SecureAttention => self.ask_host(ControlMessage::SecureAttention),
             BarAction::SendFiles => self.choose_files(),
             BarAction::CancelTransfers => self.files.cancel_all(),
             BarAction::OpenReceived => {

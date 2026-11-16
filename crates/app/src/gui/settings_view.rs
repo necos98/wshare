@@ -9,6 +9,7 @@ use crate::text;
 use super::controller::Intent;
 use super::model::GuiState;
 use super::settings::{CodecChoice, MAX_FPS, MAX_MBPS, MIN_FPS, MIN_MBPS, MIN_PORT, Settings};
+use super::unattended_view;
 use super::view::{DETAIL_SIZE, card, error_color};
 
 const GAP: f32 = 10.0;
@@ -17,7 +18,14 @@ const MBPS_PRESETS: [u32; 8] = [2, 5, 10, 20, 30, 50, 100, 200];
 const PORT_FIELD_WIDTH: f32 = 64.0;
 const PORT_DIGITS: usize = 5;
 
-pub fn show(ui: &mut Ui, state: &GuiState, intents: &mut Vec<Intent>) {
+/// `unattended_password`: the password field of unattended access, as
+/// typed (see `unattended_view`).
+pub fn show(
+    ui: &mut Ui,
+    state: &GuiState,
+    unattended_password: &mut String,
+    intents: &mut Vec<Intent>,
+) {
     ui.horizontal(|ui| {
         if ui.button(format!("← {}", text::SETTINGS_BACK)).clicked() {
             intents.push(Intent::CloseSettings);
@@ -40,6 +48,7 @@ pub fn show(ui: &mut Ui, state: &GuiState, intents: &mut Vec<Intent>) {
             viewing_group(ui, &mut edited);
             startup_group(ui, &mut edited);
             feedback_group(ui, &mut edited);
+            unattended_view::section(ui, &state.unattended, unattended_password, intents);
         });
     if edited != state.settings {
         intents.push(Intent::ChangeSettings(edited));
@@ -68,7 +77,7 @@ fn restart_banner(ui: &mut Ui, state: &GuiState, intents: &mut Vec<Intent>) {
     }
 }
 
-fn group(ui: &mut Ui, title: &str, hint: Option<&str>, add_rows: impl FnOnce(&mut Ui)) {
+pub(super) fn group(ui: &mut Ui, title: &str, hint: Option<&str>, add_rows: impl FnOnce(&mut Ui)) {
     ui.label(RichText::new(title).strong());
     if let Some(hint) = hint {
         ui.label(RichText::new(hint).size(DETAIL_SIZE).weak());

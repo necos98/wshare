@@ -10,7 +10,8 @@
 //! - `sessions`: the connections being admitted and the viewers, within
 //!   their limits (one viewer at a time).
 //! - `admission`: Hello and its verdict (remembered device, PIN or the
-//!   click of the person at the host; busy).
+//!   click of the person at the host; busy; with unattended access only
+//!   authorized devices and its password, see `unattended::rules`).
 //! - `approvals` + `approval_limiter`: the requests to accept or refuse a
 //!   viewer, one at a time and limited per address.
 //! - `pin_attempts` + `pin_guard`: wrong PINs pause their address and,
@@ -135,6 +136,9 @@ pub enum HostEvent {
     /// Windows refused injected input (elevated window, UAC, lock screen).
     /// Sent once per blocked stretch.
     InputBlocked,
+    /// The viewer asked for Ctrl+Alt+Del while remote control is allowed.
+    /// Only with unattended access, whose service can generate it.
+    SecureAttentionRequested,
     /// A file transfer with the viewer started, moved on or ended.
     Transfer(TransferEvent),
     /// Something non-fatal worth showing.

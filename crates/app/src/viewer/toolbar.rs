@@ -45,6 +45,9 @@ pub enum BarAction {
     CancelTransfers,
     /// Open the folder where the host's files landed.
     OpenReceived,
+    /// Ctrl+Alt+Del on the host (only a host with unattended access
+    /// honours it).
+    SecureAttention,
 }
 
 /// What a button does when clicked.
@@ -64,7 +67,7 @@ pub struct BarButton {
 }
 
 /// Number of buttons, whatever the mode.
-const BUTTON_COUNT: usize = 7;
+const BUTTON_COUNT: usize = 8;
 
 /// Buttons, left to right. The first one switches to the other mode, so it
 /// names that; the audio one says whether the host's sound plays
@@ -105,6 +108,11 @@ pub const fn buttons(fullscreen: bool, audio_on: bool) -> [BarButton; BUTTON_COU
             label: text::BAR_FILES,
             tooltip: text::BAR_TIP_FILES,
             role: ButtonRole::Open(MenuKind::Files),
+        },
+        BarButton {
+            label: text::BAR_SECURE_ATTENTION,
+            tooltip: text::BAR_TIP_SECURE_ATTENTION,
+            role: ButtonRole::Act(BarAction::SecureAttention),
         },
         BarButton {
             label: text::BAR_STATS,

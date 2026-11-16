@@ -279,6 +279,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gpu",
+ "input_desktop",
  "windows",
 ]
 
@@ -1100,7 +1101,16 @@ name = "input"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "input_desktop",
  "protocol",
+ "windows",
+]
+
+[[package]]
+name = "input_desktop"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "windows",
 ]
 
@@ -3365,10 +3375,12 @@ dependencies = [
  "gpu",
  "if-addrs",
  "input",
+ "input_desktop",
  "net",
  "pipeline",
  "protocol",
  "render",
+ "ring",
  "serde",
  "tempfile",
  "tokio",

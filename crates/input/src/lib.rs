@@ -16,12 +16,15 @@
 //!
 //! Windows limits (documented, handled as non-fatal):
 //! - UIPI: a non-elevated host cannot inject into elevated windows, and
-//!   nobody can inject into the secure desktop (UAC prompt, lock screen,
-//!   Ctrl+Alt+Del screen). `SendInput` then injects fewer events than asked,
-//!   without a reliable error code; this surfaces as
-//!   [`Outcome::Blocked`] with a `first` flag so the app logs it once.
+//!   only a SYSTEM process attached to it can inject into the secure
+//!   desktop (UAC prompt, lock screen, Ctrl+Alt+Del screen). `SendInput`
+//!   then injects fewer events than asked, without a reliable error code;
+//!   this surfaces as [`Outcome::Blocked`] with a `first` flag so the app
+//!   logs it once. The unattended-access agent is such a process: its
+//!   backend moves to the input desktop and retries (see `input_desktop`).
 //! - Ctrl+Alt+Del (the secure attention sequence) is never honored when
-//!   injected: those keys are just pressed like any other.
+//!   injected: those keys are just pressed like any other. The
+//!   unattended-access service generates it with `SendSAS` instead.
 //! - Injected keys do not auto-repeat: the viewer forwards its own repeats
 //!   as repeated presses, which are injected one by one.
 

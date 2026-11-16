@@ -7,6 +7,7 @@ use protocol::control::{ControlMessage, PROTOCOL_VERSION, RejectReason};
 
 use crate::access_mode::AccessMode;
 use crate::trust::clean_peer_name;
+use crate::unattended::{self, PasswordCheck};
 
 /// What the host knows about the viewer before reading its `Hello`, from
 /// the TLS handshake alone.
@@ -51,8 +52,12 @@ pub struct HelloContext<'a> {
     pub access: AccessMode,
     /// As many viewers as allowed are watching already.
     pub host_busy: bool,
-    /// Too many wrong PINs came from the viewer's address lately.
+    /// Too many wrong PINs (or passwords of unattended access) came from
+    /// the viewer's address lately.
     pub pin_paused: bool,
+    /// Set when this PC is shared with unattended access: what became of
+    /// the password the viewer sent (see `unattended::rules`).
+    pub unattended: Option<PasswordCheck>,
 }
 
 /// Decides whether the first control message of a session admits the
@@ -61,7 +66,8 @@ pub struct HelloContext<'a> {
 /// paused. Anyone else depends on the access mode: the PIN valid right
 /// now (not even checked while its address is paused), or the host's
 /// click, asked for when the mode has it and the viewer sent no PIN (in
-/// «Chiedi conferma», whatever it sent).
+/// «Chiedi conferma», whatever it sent). With unattended access neither the
+/// PIN nor the access mode count: see `unattended::rules`.
 pub fn check_hello(message: &ControlMessage, context: &HelloContext) -> HelloVerdict {
     let ControlMessage::Hello {
         version,
@@ -78,6 +84,12 @@ pub fn check_hello(message: &ControlMessage, context: &HelloContext) -> HelloVer
         return reject(RejectReason::Busy);
     }
     let viewer_name = clean_peer_name(viewer_name);
+    if let Some(password) = context.unattended {
+        return match unattended::verdict(context.trust, password, context.pin_paused) {
+            Ok(()) => accept(viewer_name, AdmittedBy::Device),
+            Err(reason) => reject(reason),
+        };
+    }
     if context.trust == ViewerTrust::Authorized {
         return accept(viewer_name, AdmittedBy::Device);
     }
@@ -148,6 +160,7 @@ mod tests {
             access: AccessMode::PinOnly,
             host_busy: false,
             pin_paused: false,
+            unattended: None,
         }
     }
 
@@ -393,6 +406,67 @@ mod tests {
             panic!()
         };
         assert_eq!(viewer_name, clean_peer_name(&"x".repeat(1000)));
+    }
+
+    fn unattended(trust: ViewerTrust, password: PasswordCheck) -> HelloContext<'static> {
+        HelloContext {
+            unattended: Some(password),
+            ..context(trust)
+        }
+    }
+
+    #[test]
+    fn unattended_access_never_admits_a_device_that_is_not_authorized() {
+        for access in AccessMode::ALL {
+            for pin in [Some(PIN), None] {
+                let context = HelloContext {
+                    access,
+                    ..unattended(ViewerTrust::Unknown, PasswordCheck::NotSet)
+                };
+                assert_eq!(
+                    check_hello(&hello(PROTOCOL_VERSION, pin), &context),
+                    rejected(RejectReason::NotAuthorized),
+                    "{access:?}, {pin:?}: neither the PIN nor a click lets it in"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unattended_access_admits_an_authorized_device_with_its_password() {
+        let verdict = |password| {
+            check_hello(
+                &hello(PROTOCOL_VERSION, Some("x")),
+                &unattended(ViewerTrust::Authorized, password),
+            )
+        };
+        assert_eq!(verdict(PasswordCheck::NotSet), accepted(AdmittedBy::Device));
+        assert_eq!(verdict(PasswordCheck::Right), accepted(AdmittedBy::Device));
+        assert_eq!(
+            verdict(PasswordCheck::Wrong),
+            rejected(RejectReason::WrongPassword)
+        );
+        assert_eq!(
+            verdict(PasswordCheck::Missing),
+            rejected(RejectReason::PasswordRequired)
+        );
+    }
+
+    #[test]
+    fn unattended_access_still_checks_the_version_and_the_free_place_first() {
+        let context = unattended(ViewerTrust::Authorized, PasswordCheck::Right);
+        assert_eq!(
+            check_hello(&hello(PROTOCOL_VERSION + 1, None), &context),
+            rejected(unsupported_version())
+        );
+        let busy = HelloContext {
+            host_busy: true,
+            ..context
+        };
+        assert_eq!(
+            check_hello(&hello(PROTOCOL_VERSION, None), &busy),
+            rejected(RejectReason::Busy)
+        );
     }
 
     #[test]

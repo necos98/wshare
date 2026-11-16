@@ -160,6 +160,8 @@ pub(super) fn describe(event: &HostEvent) -> Vec<(Output, String)> {
         // `wshare host` runs in `AccessMode::PinOnly`: nobody is asked, and
         // the terminal could not answer.
         HostEvent::ApprovalRequested(_) | HostEvent::ApprovalClosed { .. } => vec![],
+        // Sent only by the unattended-access agent, never by `wshare host`.
+        HostEvent::SecureAttentionRequested => vec![],
     }
 }
 

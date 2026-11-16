@@ -244,6 +244,7 @@ fn serve(
             approvals: Arc::clone(approvals),
             pin_guard: PinGuard::new(Arc::clone(state), events.clone()),
             events: events.clone(),
+            unattended: options.unattended.clone(),
         });
         let result = accept_viewers(&host.endpoint, &context).await;
         host.close();

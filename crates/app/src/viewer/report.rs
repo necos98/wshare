@@ -56,6 +56,12 @@ pub enum FailureCause {
     ApprovalExpired,
     /// This PC asked the host for approval too often.
     TooManyRequests,
+    /// The host is shared with unattended access and wants its password.
+    PasswordRequired,
+    WrongPassword,
+    /// The host is shared with unattended access, which this PC may not
+    /// use: it is not among the devices the host authorized.
+    NotAuthorized,
     /// The host refused because it cannot stream its screen; the text is
     /// the host's own explanation.
     HostCannotStream(String),
@@ -63,7 +69,7 @@ pub enum FailureCause {
 }
 
 /// The causes whose exit code identifies them (no detail needed).
-const CODED_CAUSES: [FailureCause; 14] = [
+const CODED_CAUSES: [FailureCause; 17] = [
     FailureCause::PinRequired,
     FailureCause::WrongPin,
     FailureCause::UnsupportedVersion,
@@ -78,6 +84,9 @@ const CODED_CAUSES: [FailureCause; 14] = [
     FailureCause::Denied,
     FailureCause::ApprovalExpired,
     FailureCause::TooManyRequests,
+    FailureCause::PasswordRequired,
+    FailureCause::WrongPassword,
+    FailureCause::NotAuthorized,
 ];
 
 impl FailureCause {
@@ -99,6 +108,9 @@ impl FailureCause {
             Self::Denied => 22,
             Self::ApprovalExpired => 23,
             Self::TooManyRequests => 24,
+            Self::PasswordRequired => 25,
+            Self::WrongPassword => 26,
+            Self::NotAuthorized => 27,
             Self::Other(_) => GENERIC_EXIT_CODE,
         }
     }
@@ -127,6 +139,9 @@ impl FailureCause {
             Self::Denied => "denied",
             Self::ApprovalExpired => "approval-expired",
             Self::TooManyRequests => "too-many-requests",
+            Self::PasswordRequired => "password-required",
+            Self::WrongPassword => "wrong-password",
+            Self::NotAuthorized => "not-authorized",
             Self::HostCannotStream(_) => "host-cannot-stream",
             Self::Other(_) => "other",
         }

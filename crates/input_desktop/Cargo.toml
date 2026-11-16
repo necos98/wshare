@@ -1,0 +1,14 @@
+[package]
+name = "input_desktop"
+version.workspace = true
+edition.workspace = true
+
+# Keeps a thread on the desktop that receives the user input (Default, or
+# Winlogon for the lock screen, sign-in and UAC prompts), for the processes
+# of unattended access (see the README). Off in every other process.
+[dependencies]
+anyhow.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_StationsAndDesktops",
+] }

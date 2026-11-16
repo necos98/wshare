@@ -10,7 +10,7 @@ use protocol::transfer::{FileEntry, StreamHeader, TransferError, TransferId, Tra
 
 use super::events::{Direction, Failure, Kind, Outcome, TransferInfo};
 use super::listing::{self, Listing};
-use super::part_file::{PartFile, blocking};
+use super::part_file::PartFile;
 use super::plan::{Placed, total_size};
 use super::receiving::Receiving;
 use super::registry::{Stage, Transfer};
@@ -69,16 +69,13 @@ impl Shared {
         }
         let shared = self.clone();
         self.spawn(async move {
-            let listing = blocking(move || {
-                listing::list(&picked).map_err(|e| std::io::Error::other(e.to_string()))
-            })
-            .await;
-            let listing = match listing {
-                Ok(listing) => listing,
-                Err(e) => {
-                    return shared
-                        .stillborn(unsent, Outcome::Failed(Failure::Detail(e.to_string())));
+            let listing = match tokio::task::spawn_blocking(move || listing::list(&picked)).await {
+                Ok(Ok(listing)) => listing,
+                Ok(Err(error)) => {
+                    return shared.stillborn(unsent, Outcome::Failed(Failure::Listing(error)));
                 }
+                // The walk was stopped: the session is ending.
+                Err(_) => return,
             };
             let mut registry = shared.registry();
             if registry.is_full() {
@@ -159,9 +156,9 @@ impl Shared {
         let shared = self.clone();
         self.spawn(async move {
             let received = async {
-                let part = PartFile::create(placed.target.clone())
-                    .await
-                    .map_err(|e| StreamError::Failed(format!("cannot create the file: {e}")))?;
+                let part = PartFile::create(placed.target.clone()).await.map_err(|e| {
+                    StreamError::Failed(TransferError::CannotCreateFile(e.to_string()))
+                })?;
                 receive_file(stream, part, placed.size, cancel, &progress).await
             };
             match received.await {

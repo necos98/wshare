@@ -172,7 +172,7 @@ mod tests {
     use net::Fingerprint;
     use pipeline::HostStats;
     use protocol::control::RejectReason;
-    use protocol::transfer::TransferId;
+    use protocol::transfer::{TransferError, TransferId};
 
     use super::Output::{Stderr, Stdout};
     use super::*;
@@ -325,7 +325,9 @@ mod tests {
             }),
             TransferEvent::Finished {
                 id,
-                outcome: Outcome::Failed(Failure::Detail(forged.into())),
+                outcome: Outcome::Failed(Failure::Cause(TransferError::StreamFailed(
+                    forged.into(),
+                ))),
             },
         ];
         for event in events {

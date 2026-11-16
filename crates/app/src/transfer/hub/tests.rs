@@ -323,10 +323,12 @@ async fn a_failure_told_by_the_other_pc_is_kept_on_one_short_line() {
     );
     pair.viewer.hub().on_message(TransferMessage::Failed {
         id,
-        reason: TransferError::Failed(forged),
+        reason: TransferError::StreamFailed(forged),
     });
     pair.run_until(|_, viewer| viewer.outcome().is_some()).await;
-    let Some(Outcome::Failed(Failure::Detail(detail))) = pair.viewer.outcome() else {
+    let Some(Outcome::Failed(Failure::Cause(TransferError::StreamFailed(detail)))) =
+        pair.viewer.outcome()
+    else {
         panic!("not a failure: {:?}", pair.viewer.outcome());
     };
     assert!(

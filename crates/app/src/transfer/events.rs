@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use protocol::transfer::{TransferError, TransferId};
 
+use super::listing::ListingError;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Sending,
@@ -47,28 +49,16 @@ pub enum Outcome {
     Interrupted,
 }
 
-/// Why a transfer failed. The known causes are typed (their words are in
+/// Why a transfer failed. Every cause is typed (their words are in
 /// `crate::text`); only the technical detail of an I/O error stays text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
-    /// A cause the two PCs know: this one's, or the other PC's. Never
-    /// `TransferError::Failed`, whose text is [`Self::Detail`] (see
-    /// [`Self::from_error`]).
+    /// A cause the two PCs know: this one's, or the other PC's.
     Cause(TransferError),
     /// The permission to receive was taken back while it ran.
     NoLongerAllowed,
-    /// The technical detail of what broke (an I/O error...).
-    Detail(String),
-}
-
-impl Failure {
-    /// The failure a reason of the other PC (or of this one) stands for.
-    pub fn from_error(error: TransferError) -> Self {
-        match error {
-            TransferError::Failed(detail) => Self::Detail(detail),
-            known => Self::Cause(known),
-        }
-    }
+    /// The files picked here could not be listed: nothing was proposed.
+    Listing(ListingError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

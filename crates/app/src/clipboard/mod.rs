@@ -29,7 +29,7 @@ mod virtual_files;
 mod window;
 
 pub use access::{AccessError, ClipboardAccess};
-pub use file_sharing::FileSharing;
+pub use file_sharing::{FileSharing, NotShared};
 pub use rules::{HostRules, Outgoing, ViewerRules};
 pub use sync::{ClipboardSync, Received, share_copied_files};
 pub use system::SystemClipboard;

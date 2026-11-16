@@ -6,6 +6,8 @@
 use std::fmt;
 use std::io;
 
+use crate::transfer::listing::ListingError;
+
 /// OS error of a UDP bind on a port that is taken (`WSAEADDRINUSE`).
 const WSAEADDRINUSE: i32 = 10048;
 
@@ -106,7 +108,7 @@ pub enum HostWarning {
     ClipboardFailed(String),
     /// Files copied on this PC cannot be pasted on the viewer (too many,
     /// unreadable...).
-    FilesNotShared(String),
+    FilesNotShared(ListingError),
     /// The monitor or quality the viewer chose could not be streamed: the
     /// stream went on as it was.
     ScreenUnavailable(String),
@@ -154,8 +156,8 @@ impl fmt::Display for HostWarning {
                 protocol::control::MAX_CLIPBOARD_BYTES / 1024
             ),
             Self::ClipboardFailed(detail) => write!(f, "clipboard sharing failed: {detail}"),
-            Self::FilesNotShared(detail) => {
-                write!(f, "the copied files cannot be shared: {detail}")
+            Self::FilesNotShared(error) => {
+                write!(f, "the copied files cannot be shared: {error}")
             }
             Self::ScreenUnavailable(detail) => {
                 write!(f, "the screen the viewer chose cannot be shared: {detail}")

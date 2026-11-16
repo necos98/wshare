@@ -12,6 +12,7 @@ use crate::clipboard::{
     AccessError, ClipboardAccess, ClipboardSync, FileSharing, Outgoing, Received, SystemClipboard,
     ViewerRules, share_copied_files,
 };
+use crate::transfer::listing::ListingError;
 
 pub struct ViewerClipboard<A = SystemClipboard> {
     /// `None` if the clipboard could not be listened to.
@@ -67,8 +68,8 @@ impl<A: ClipboardAccess> ViewerClipboard<A> {
                 return None;
             }
         };
-        let not_shared = Box::new(|detail: String| {
-            eprintln!("warning: the copied files cannot be shared: {detail}");
+        let not_shared = Box::new(|error: ListingError| {
+            eprintln!("warning: the copied files cannot be shared: {error}");
         });
         share_copied_files(&outgoing, files, not_shared);
         match outgoing {

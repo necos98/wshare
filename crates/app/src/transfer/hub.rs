@@ -14,7 +14,7 @@ use net::{FileChannel, FileReceiver, IncomingFile};
 use protocol::control::ControlMessage;
 #[cfg(test)]
 use protocol::transfer::OfferId;
-use protocol::transfer::{StreamHeader, TransferMessage};
+use protocol::transfer::{StreamHeader, TransferError, TransferMessage};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use super::events::{TransferCommand, TransferEvent, TransferObserver};
@@ -24,6 +24,7 @@ use super::listing::{self, ListingError};
 use super::paste::PasteLink;
 use super::registry::{Registry, Role, Stage};
 use super::shared::{Shared, TransferPermissions};
+use super::streams::StreamError;
 
 /// How often progress is reported while something moves.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
@@ -210,8 +211,7 @@ fn route(shared: &Arc<Shared>, header: &StreamHeader, stream: FileReceiver) {
         Some(placed) => shared.receive_pushed(header.id, receiving, placed, stream),
         None => {
             stream.cancel();
-            let detail = "a file that is not in the list".to_string();
-            shared.fail(header.id, super::streams::StreamError::Failed(detail));
+            shared.fail(header.id, StreamError::Failed(TransferError::NotInList));
         }
     }
 }
@@ -231,6 +231,8 @@ async fn report_progress(shared: Arc<Shared>) {
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod failure_tests;
 #[cfg(test)]
 mod guard_tests;
 #[cfg(test)]

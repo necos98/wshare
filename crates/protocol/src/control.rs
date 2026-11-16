@@ -87,7 +87,12 @@ use crate::transfer::TransferMessage;
 ///    [`RejectReason`] (`HostStopped`, `UnexpectedMessage`, `NoHello`,
 ///    `LeftBeforeHello`, `UnreadableHello`, `LeftBeforeWelcome`) keep the
 ///    text form.
-pub const PROTOCOL_VERSION: u16 = 13;
+/// 14: `TransferError` also tells apart the failures of a file on its way
+///    (stream broken, file unreadable or shrunk, file that cannot be
+///    created, written or saved, too much or too little data, file not in
+///    the list, not sent, not the one asked for); its English text form
+///    `Failed` is gone.
+pub const PROTOCOL_VERSION: u16 = 14;
 
 /// Upper bound for one control message; protects against garbage lengths.
 /// Sized for the largest cursor image (256x256 RGBA = 256 KiB) plus margin.

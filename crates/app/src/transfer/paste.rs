@@ -124,8 +124,7 @@ impl Shared {
                 () = waiting.closed() => shared.cancel_here(id),
                 () = tokio::time::sleep(FIRST_BYTE_TIMEOUT) => {
                     if shared.still_waiting(id) {
-                        let detail = "the other computer did not send the file".into();
-                        shared.fail(id, StreamError::Failed(detail));
+                        shared.fail(id, StreamError::Failed(TransferError::NotSent));
                     }
                 }
             }
@@ -155,8 +154,7 @@ impl Shared {
         if *entry != header.entry {
             drop(registry);
             stream.cancel();
-            let detail = "the file announced is not the one asked for".into();
-            return self.fail(id, StreamError::Failed(detail));
+            return self.fail(id, StreamError::Failed(TransferError::NotAsked));
         }
         let Some(chunks) = chunks.take() else {
             return stream.cancel();

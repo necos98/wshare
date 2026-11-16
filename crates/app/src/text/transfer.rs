@@ -6,7 +6,11 @@ use std::path::Path;
 
 use protocol::transfer::TransferError;
 
-use crate::transfer::{ActiveTransfer, Direction, Ended, Failure, Outcome, Summary};
+use crate::transfer::{ActiveTransfer, Direction, Ended, Outcome, Summary};
+
+mod cause;
+pub use cause::listing_error;
+use cause::{cause, failure};
 
 const KILOBYTE: f64 = 1e3;
 const MEGABYTE: f64 = 1e6;
@@ -147,32 +151,6 @@ fn refusal(reason: &TransferError) -> String {
     }
 }
 
-/// Why a transfer failed, as the end of a sentence.
-fn failure(failure: &Failure) -> String {
-    match failure {
-        Failure::Cause(reason) => cause(reason),
-        Failure::NoLongerAllowed => "non più consentito su questo computer".into(),
-        Failure::Detail(detail) => detail.clone(),
-    }
-}
-
-fn cause(reason: &TransferError) -> String {
-    match reason {
-        TransferError::NotAllowed => "non consentito dall'altro computer".into(),
-        TransferError::Invalid => "i file sono stati rifiutati perché non validi".into(),
-        TransferError::Unavailable => "i file non sono più disponibili".into(),
-        TransferError::TooManyTransfers => "troppi trasferimenti contemporanei".into(),
-        TransferError::NoFreeName => "nessun nome libero per i file".into(),
-        TransferError::CannotCreateFolders(detail) => {
-            format!("impossibile creare le cartelle ({detail})")
-        }
-        TransferError::PlanningFailed(detail) => {
-            format!("preparazione dei file interrotta ({detail})")
-        }
-        TransferError::Failed(detail) => detail.clone(),
-    }
-}
-
 /// Where received files are, for the notification.
 pub fn received_in(folder: &Path) -> String {
     format!("Salvati in {}", folder.display())
@@ -183,7 +161,8 @@ mod tests {
     use protocol::transfer::TransferId;
 
     use super::*;
-    use crate::transfer::{Kind, TransferInfo};
+    use crate::transfer::listing::ListingError;
+    use crate::transfer::{Failure, Kind, TransferInfo};
 
     #[test]
     fn sizes_read_as_people_say_them() {
@@ -240,7 +219,10 @@ mod tests {
         assert!(ended(Outcome::Cancelled { by_peer: true }).contains("dall'altro computer"));
         assert!(ended(Outcome::Refused(TransferError::NotAllowed)).contains("non accetta"));
         assert!(
-            ended(Outcome::Failed(Failure::Detail("disco pieno".into()))).ends_with("disco pieno")
+            ended(Outcome::Failed(Failure::Cause(
+                TransferError::CannotWriteFile("disco pieno".into())
+            )))
+            .ends_with("(disco pieno)")
         );
         assert!(ended(Outcome::Interrupted).contains("interrotto"));
     }
@@ -295,6 +277,18 @@ mod tests {
             (
                 failed(Failure::NoLongerAllowed),
                 "Trasferimento di «Foto» non riuscito: non più consentito su questo computer",
+            ),
+            (
+                cause(TransferError::Incomplete),
+                "Trasferimento di «Foto» non riuscito: un file è arrivato incompleto",
+            ),
+            (
+                cause(TransferError::CannotCreateFile("accesso negato".into())),
+                "Trasferimento di «Foto» non riuscito: impossibile creare un file (accesso negato)",
+            ),
+            (
+                failed(Failure::Listing(ListingError::Nothing)),
+                "Trasferimento di «Foto» non riuscito: nessun file da inviare",
             ),
         ] {
             assert_eq!(text, expected);

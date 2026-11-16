@@ -14,8 +14,8 @@ use tokio::sync::watch;
 use super::events::{EventSink, Throttle};
 use super::{HostEvent, HostWarning};
 use crate::clipboard::{
-    AccessError, ClipboardAccess, ClipboardSync, FileSharing, HostRules, Outgoing, Received,
-    SystemClipboard, share_copied_files,
+    AccessError, ClipboardAccess, ClipboardSync, FileSharing, HostRules, NotShared, Outgoing,
+    Received, SystemClipboard, share_copied_files,
 };
 
 /// At most one warning about a failing clipboard this often: each change
@@ -199,10 +199,10 @@ impl<A: ClipboardAccess> SessionClipboard<A> {
     }
 
     /// Reports why copied files could not be offered.
-    fn files_not_shared(&self) -> Box<dyn FnOnce(String) + Send> {
+    fn files_not_shared(&self) -> NotShared {
         let events = self.events.clone();
-        Box::new(move |detail| {
-            events.emit(HostEvent::Warning(HostWarning::FilesNotShared(detail)));
+        Box::new(move |error| {
+            events.emit(HostEvent::Warning(HostWarning::FilesNotShared(error)));
         })
     }
 

@@ -106,10 +106,6 @@ pub enum TransferError {
     /// The files are no longer offered (the clipboard changed) or cannot be
     /// read.
     Unavailable,
-    /// Anything else (a full disk...), as text for people. Its index (3)
-    /// is the one it has always had: the variants below came with
-    /// protocol 13.
-    Failed(String),
     /// The receiver already runs as many transfers as it admits.
     TooManyTransfers,
     /// The receiver could not create the folders of the files; the text is
@@ -119,6 +115,29 @@ pub enum TransferError {
     NoFreeName,
     /// The receiver's planning of the files broke off; the text is why.
     PlanningFailed(String),
+    /// The stream of a file could not be opened, or broke; the text is
+    /// why.
+    StreamFailed(String),
+    /// The sender could not open or read a file; the text is why.
+    CannotReadFile(String),
+    /// A file got shorter on the sender's disk since it was listed.
+    FileShrank,
+    /// The receiver could not create a file; the text is why.
+    CannotCreateFile(String),
+    /// The receiver could not write a file; the text is why.
+    CannotWriteFile(String),
+    /// The receiver could not save a file once complete; the text is why.
+    CannotSaveFile(String),
+    /// A file brought more bytes than its entry announced.
+    TooMuchData,
+    /// A file ended before the bytes its entry announced.
+    Incomplete,
+    /// A stream named a file that is not in the list accepted.
+    NotInList,
+    /// The file asked for (to paste it) did not come in time.
+    NotSent,
+    /// The file that came is not the one asked for (to paste it).
+    NotAsked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,24 +316,32 @@ mod tests {
         fn accept_failed_cancel_completed() {
             let id = TransferId(9);
             assert_eq!(payload(TransferMessage::Accept { id }), [18, 1, 9]);
-            // Reasons: 0 not allowed, 1 invalid, 2 unavailable, 3 text,
-            // 4 too many transfers, 5 folders (text), 6 no free name,
-            // 7 planning (text).
+            // Reasons: 0 not allowed, 1 invalid, 2 unavailable, 3 too many
+            // transfers, 4 folders (text), 5 no free name, 6 planning
+            // (text), 7 stream (text), 8 read (text), 9 file shrank,
+            // 10 create (text), 11 write (text), 12 save (text), 13 too
+            // much data, 14 incomplete, 15 not in the list, 16 not sent,
+            // 17 not asked.
+            let text = |index: u8| vec![index, 2, b'n', b'o'];
             for (reason, bytes) in [
                 (TransferError::NotAllowed, vec![0]),
                 (TransferError::Invalid, vec![1]),
                 (TransferError::Unavailable, vec![2]),
-                (TransferError::Failed("no".into()), vec![3, 2, b'n', b'o']),
-                (TransferError::TooManyTransfers, vec![4]),
-                (
-                    TransferError::CannotCreateFolders("no".into()),
-                    vec![5, 2, b'n', b'o'],
-                ),
-                (TransferError::NoFreeName, vec![6]),
-                (
-                    TransferError::PlanningFailed("no".into()),
-                    vec![7, 2, b'n', b'o'],
-                ),
+                (TransferError::TooManyTransfers, vec![3]),
+                (TransferError::CannotCreateFolders("no".into()), text(4)),
+                (TransferError::NoFreeName, vec![5]),
+                (TransferError::PlanningFailed("no".into()), text(6)),
+                (TransferError::StreamFailed("no".into()), text(7)),
+                (TransferError::CannotReadFile("no".into()), text(8)),
+                (TransferError::FileShrank, vec![9]),
+                (TransferError::CannotCreateFile("no".into()), text(10)),
+                (TransferError::CannotWriteFile("no".into()), text(11)),
+                (TransferError::CannotSaveFile("no".into()), text(12)),
+                (TransferError::TooMuchData, vec![13]),
+                (TransferError::Incomplete, vec![14]),
+                (TransferError::NotInList, vec![15]),
+                (TransferError::NotSent, vec![16]),
+                (TransferError::NotAsked, vec![17]),
             ] {
                 let mut expected = vec![18, 2, 9];
                 expected.extend(bytes);

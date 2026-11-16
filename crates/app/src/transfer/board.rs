@@ -217,7 +217,7 @@ mod tests {
         assert_eq!(
             board.apply(TransferEvent::Finished {
                 id: TransferId(9),
-                outcome: Outcome::Failed(Failure::Detail("x".into())),
+                outcome: Outcome::Failed(Failure::NoLongerAllowed),
             }),
             None
         );

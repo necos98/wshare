@@ -57,7 +57,17 @@ fn reason_text(reason: &TransferError) -> String {
             format!("cannot create the folders: {detail}")
         }
         TransferError::PlanningFailed(detail) => format!("planning failed: {detail}"),
-        TransferError::Failed(detail) => detail.clone(),
+        TransferError::StreamFailed(detail) => format!("the connection of a file broke: {detail}"),
+        TransferError::CannotReadFile(detail) => format!("cannot read a file: {detail}"),
+        TransferError::FileShrank => "a file got shorter since it was picked".into(),
+        TransferError::CannotCreateFile(detail) => format!("cannot create a file: {detail}"),
+        TransferError::CannotWriteFile(detail) => format!("cannot write a file: {detail}"),
+        TransferError::CannotSaveFile(detail) => format!("cannot save a file: {detail}"),
+        TransferError::TooMuchData => "a file brought more data than announced".into(),
+        TransferError::Incomplete => "a file arrived incomplete".into(),
+        TransferError::NotInList => "a file that is not in the list".into(),
+        TransferError::NotSent => "the other computer did not send the file".into(),
+        TransferError::NotAsked => "the file announced is not the one asked for".into(),
     }
 }
 
@@ -65,7 +75,7 @@ fn failure_text(failure: &Failure) -> String {
     match failure {
         Failure::Cause(reason) => reason_text(reason),
         Failure::NoLongerAllowed => "no longer allowed on this computer".into(),
-        Failure::Detail(detail) => detail.clone(),
+        Failure::Listing(error) => error.to_string(),
     }
 }
 
@@ -138,8 +148,12 @@ mod tests {
         let ended = |outcome| describe(&TransferEvent::Finished { id, outcome }).unwrap();
         let lines = [
             describe(&TransferEvent::Started(info)).unwrap(),
-            ended(Outcome::Failed(Failure::Detail(forged.into()))),
-            ended(Outcome::Refused(TransferError::Failed(forged.into()))),
+            ended(Outcome::Failed(Failure::Cause(
+                TransferError::StreamFailed(forged.into()),
+            ))),
+            ended(Outcome::Refused(TransferError::CannotSaveFile(
+                forged.into(),
+            ))),
         ];
         for line in lines {
             assert!(!line.contains(char::is_control), "{line:?}");

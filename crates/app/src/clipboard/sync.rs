@@ -8,7 +8,7 @@ use super::access::{AccessError, ClipboardAccess, Retry};
 use super::rules::{ClipboardGuard, Outgoing};
 use protocol::transfer::{FileEntry, OfferId};
 
-use super::file_sharing::FileSharing;
+use super::file_sharing::{FileSharing, NotShared};
 use super::system::SystemClipboard;
 use super::virtual_files;
 use super::window::ClipboardWindow;
@@ -115,11 +115,7 @@ impl<A: ClipboardAccess> ClipboardSync<A> {
 /// offered to the other PC (`on_error` hears why they cannot be); anything
 /// else withdraws the files offered before. The same files still copied
 /// change nothing.
-pub fn share_copied_files(
-    outgoing: &Outgoing,
-    sharing: &dyn FileSharing,
-    on_error: Box<dyn FnOnce(String) + Send>,
-) {
+pub fn share_copied_files(outgoing: &Outgoing, sharing: &dyn FileSharing, on_error: NotShared) {
     match outgoing {
         Outgoing::SendFiles(picked) => sharing.offer(picked.clone(), on_error),
         Outgoing::Unchanged => {}

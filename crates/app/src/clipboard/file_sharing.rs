@@ -5,12 +5,16 @@
 
 use std::path::PathBuf;
 
+use crate::transfer::listing::ListingError;
 use crate::transfer::{PasteLink, TransferHub};
+
+/// Hears why the files copied here cannot be offered.
+pub type NotShared = Box<dyn FnOnce(ListingError) + Send>;
 
 pub trait FileSharing: Sync {
     /// Files were copied here: announce them to the other PC. `on_error`
-    /// hears, in English, why they cannot be (too many, unreadable...).
-    fn offer(&self, picked: Vec<PathBuf>, on_error: Box<dyn FnOnce(String) + Send>);
+    /// hears why they cannot be (too many, unreadable...).
+    fn offer(&self, picked: Vec<PathBuf>, on_error: NotShared);
     /// Something else was copied: the files offered can no longer be
     /// pasted on the other PC.
     fn withdraw(&self);
@@ -19,8 +23,8 @@ pub trait FileSharing: Sync {
 }
 
 impl FileSharing for TransferHub {
-    fn offer(&self, picked: Vec<PathBuf>, on_error: Box<dyn FnOnce(String) + Send>) {
-        self.offer_clipboard_files(picked, move |error| on_error(error.to_string()));
+    fn offer(&self, picked: Vec<PathBuf>, on_error: NotShared) {
+        self.offer_clipboard_files(picked, on_error);
     }
 
     fn withdraw(&self) {
@@ -39,7 +43,7 @@ pub mod fake {
     use std::path::PathBuf;
     use std::sync::Mutex;
 
-    use super::FileSharing;
+    use super::{FileSharing, NotShared};
     use crate::transfer::PasteLink;
 
     #[derive(Default)]
@@ -49,7 +53,7 @@ pub mod fake {
     }
 
     impl FileSharing for FakeSharing {
-        fn offer(&self, picked: Vec<PathBuf>, _on_error: Box<dyn FnOnce(String) + Send>) {
+        fn offer(&self, picked: Vec<PathBuf>, _on_error: NotShared) {
             self.offered.lock().unwrap().push(picked);
         }
 

@@ -190,9 +190,10 @@ pub fn host_warning(warning: &HostWarning) -> String {
         HostWarning::ClipboardFailed(detail) => {
             format!("Condivisione degli appunti non riuscita: {detail}")
         }
-        HostWarning::FilesNotShared(detail) => {
-            format!("I file copiati non si possono incollare sull'altro computer: {detail}")
-        }
+        HostWarning::FilesNotShared(error) => format!(
+            "I file copiati non si possono incollare sull'altro computer: {}",
+            listing_error(error)
+        ),
         HostWarning::ScreenUnavailable(detail) => format!(
             "Impossibile condividere lo schermo scelto dal visualizzatore: resta quello di \
              prima ({detail})."
@@ -598,6 +599,7 @@ pub fn indicator_connected(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transfer::listing::ListingError;
 
     #[test]
     fn every_viewer_failure_has_its_italian_text() {
@@ -900,6 +902,16 @@ mod tests {
             (
                 HostWarning::ClipboardFailed("busy".into()),
                 "Condivisione degli appunti non riuscita: busy",
+            ),
+            (
+                HostWarning::FilesNotShared(ListingError::TooMany),
+                "I file copiati non si possono incollare sull'altro computer: più di 4096 file \
+                 e cartelle",
+            ),
+            (
+                HostWarning::FilesNotShared(ListingError::Nothing),
+                "I file copiati non si possono incollare sull'altro computer: nessun file da \
+                 inviare",
             ),
             (
                 HostWarning::ScreenUnavailable("in use".into()),

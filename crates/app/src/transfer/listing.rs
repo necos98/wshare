@@ -40,12 +40,17 @@ pub enum ListingError {
         path: PathBuf,
         reason: PathError,
     },
+    /// The disk could not be read there; `detail` is the I/O error.
     Unreadable {
         path: PathBuf,
         detail: String,
     },
+    /// A picked path without a name of its own (a drive, `..`).
+    Unnamed(PathBuf),
 }
 
+/// The English text, for the terminal (the Italian one is in
+/// `crate::text`).
 impl fmt::Display for ListingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -53,6 +58,7 @@ impl fmt::Display for ListingError {
             Self::TooMany => write!(f, "more than {MAX_TRANSFER_ENTRIES} files and folders"),
             Self::Unsendable { path, reason } => write!(f, "{}: {reason}", path.display()),
             Self::Unreadable { path, detail } => write!(f, "{}: {detail}", path.display()),
+            Self::Unnamed(path) => write!(f, "{}: not a file or folder", path.display()),
         }
     }
 }
@@ -75,10 +81,7 @@ pub fn list(picked: &[PathBuf]) -> Result<Listing, ListingError> {
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .ok_or_else(|| ListingError::Unreadable {
-                path: path.clone(),
-                detail: "not a file or folder".into(),
-            })?;
+            .ok_or_else(|| ListingError::Unnamed(path.clone()))?;
         let name = unique_name(&name, metadata.is_dir(), |n| roots.iter().any(|r| r == n))
             .ok_or(ListingError::TooMany)?;
         let root = SafePath::name(&name).map_err(|reason| unsendable(path, reason))?;
@@ -209,6 +212,16 @@ mod tests {
             list(&[dir.path().join("assente")]),
             Err(ListingError::Unreadable { .. })
         ));
+    }
+
+    #[test]
+    fn a_path_without_a_name_is_not_sendable() {
+        let dir = tempfile::tempdir().unwrap();
+        let unnamed = dir.path().join("..");
+        assert_eq!(
+            list(std::slice::from_ref(&unnamed)),
+            Err(ListingError::Unnamed(unnamed))
+        );
     }
 
     #[test]

@@ -188,8 +188,12 @@ mod tests {
                 files: 1,
                 total_bytes: 1,
             }),
-            finished(Outcome::Failed(Failure::Detail(FORGED.into()))),
-            finished(Outcome::Refused(TransferError::Failed(FORGED.into()))),
+            finished(Outcome::Failed(Failure::Cause(
+                TransferError::StreamFailed(FORGED.into()),
+            ))),
+            finished(Outcome::Refused(TransferError::CannotSaveFile(
+                FORGED.into(),
+            ))),
         ]
     }
 

@@ -138,12 +138,9 @@ impl Shared {
     pub fn fail(&self, id: TransferId, error: StreamError) {
         match error {
             StreamError::Cancelled => self.cancel_here(id),
-            StreamError::Failed(detail) => {
-                if self.finish(id, Outcome::Failed(Failure::Detail(detail.clone()))) {
-                    self.send(TransferMessage::Failed {
-                        id,
-                        reason: TransferError::Failed(detail),
-                    });
+            StreamError::Failed(reason) => {
+                if self.finish(id, Outcome::Failed(Failure::Cause(reason.clone()))) {
+                    self.send(TransferMessage::Failed { id, reason });
                 }
             }
         }
@@ -159,7 +156,7 @@ impl Shared {
         let outcome = if offered {
             Outcome::Refused(reason)
         } else {
-            Outcome::Failed(Failure::from_error(reason))
+            Outcome::Failed(Failure::Cause(reason))
         };
         self.finish(id, outcome);
     }
@@ -189,15 +186,25 @@ impl Shared {
 fn clean_peer_reason(reason: TransferError) -> TransferError {
     let clean = |detail: String| printable::clean(&detail, MAX_PEER_REASON_CHARS);
     match reason {
-        TransferError::Failed(detail) => TransferError::Failed(clean(detail)),
         TransferError::CannotCreateFolders(detail) => {
             TransferError::CannotCreateFolders(clean(detail))
         }
         TransferError::PlanningFailed(detail) => TransferError::PlanningFailed(clean(detail)),
+        TransferError::StreamFailed(detail) => TransferError::StreamFailed(clean(detail)),
+        TransferError::CannotReadFile(detail) => TransferError::CannotReadFile(clean(detail)),
+        TransferError::CannotCreateFile(detail) => TransferError::CannotCreateFile(clean(detail)),
+        TransferError::CannotWriteFile(detail) => TransferError::CannotWriteFile(clean(detail)),
+        TransferError::CannotSaveFile(detail) => TransferError::CannotSaveFile(clean(detail)),
         known @ (TransferError::NotAllowed
         | TransferError::Invalid
         | TransferError::Unavailable
         | TransferError::TooManyTransfers
-        | TransferError::NoFreeName) => known,
+        | TransferError::NoFreeName
+        | TransferError::FileShrank
+        | TransferError::TooMuchData
+        | TransferError::Incomplete
+        | TransferError::NotInList
+        | TransferError::NotSent
+        | TransferError::NotAsked) => known,
     }
 }

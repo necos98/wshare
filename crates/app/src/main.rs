@@ -6,6 +6,7 @@
 
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
+mod access_mode;
 mod bench;
 mod cli;
 mod clipboard;

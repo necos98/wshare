@@ -9,6 +9,7 @@ use eframe::egui::{
 use crate::text;
 use crate::trust::Timestamp;
 
+use super::approval_view;
 use super::controller::Intent;
 use super::model::{GuiState, HostRow, Sharing, ViewerSession, ViewerStatus, format_pin};
 use super::pairing_view::{self, RememberedAction};
@@ -36,7 +37,7 @@ enum Form {
     Address,
 }
 
-const GAP: f32 = 10.0;
+pub(super) const GAP: f32 = 10.0;
 /// Font size of secondary lines (details, warnings).
 pub(super) const DETAIL_SIZE: f32 = 12.0;
 
@@ -49,6 +50,9 @@ pub fn show(ui: &mut Ui, state: &GuiState, drafts: &mut Drafts) -> Vec<Intent> {
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
+            if let Some(prompt) = &state.sharing.approval {
+                approval_view::show(ui, prompt, &mut intents);
+            }
             sharing_section(ui, &state.sharing, &mut intents);
             if let Some(notice) = &state.settings_notice {
                 ui.add_space(4.0);
@@ -271,6 +275,10 @@ fn selected_host_form(
         drafts.last_form = Form::Host;
         intents.push(connect(std::mem::take(&mut drafts.host_pin)));
     }
+    if pairing_view::ask_access(ui) {
+        drafts.last_form = Form::Host;
+        intents.push(Intent::RequestAccess { id: row.id.clone() });
+    }
 }
 
 /// One computer of the list; clickable when it can be connected to.
@@ -380,8 +388,8 @@ fn viewers_section(ui: &mut Ui, viewers: &[ViewerSession], intents: &mut Vec<Int
     ui.separator();
     for viewer in viewers {
         match &viewer.status {
-            ViewerStatus::Connecting | ViewerStatus::Connected => {
-                let connecting = viewer.status == ViewerStatus::Connecting;
+            ViewerStatus::Connecting | ViewerStatus::AwaitingApproval | ViewerStatus::Connected => {
+                let connecting = viewer.is_connecting();
                 ui.horizontal(|ui| {
                     if connecting {
                         ui.spinner();

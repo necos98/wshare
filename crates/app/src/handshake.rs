@@ -5,6 +5,7 @@ use std::hash::{BuildHasher, Hasher};
 
 use protocol::control::{ControlMessage, PROTOCOL_VERSION, RejectReason};
 
+use crate::access_mode::AccessMode;
 use crate::trust::clean_peer_name;
 
 /// What the host knows about the viewer before reading its `Hello`, from
@@ -27,8 +28,18 @@ pub enum AdmittedBy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HelloVerdict {
-    Accept { viewer_name: String, by: AdmittedBy },
-    Reject { reason: RejectReason },
+    Accept {
+        viewer_name: String,
+        by: AdmittedBy,
+    },
+    /// Only the person at the host can let this viewer in: it is asked
+    /// about, and never admitted without their click.
+    AskHost {
+        viewer_name: String,
+    },
+    Reject {
+        reason: RejectReason,
+    },
 }
 
 /// What the host knows when a `Hello` arrives.
@@ -37,6 +48,7 @@ pub struct HelloContext<'a> {
     /// The PIN valid right now.
     pub expected_pin: &'a str,
     pub trust: ViewerTrust,
+    pub access: AccessMode,
     /// As many viewers as allowed are watching already.
     pub host_busy: bool,
     /// Too many wrong PINs came from the viewer's address lately.
@@ -46,8 +58,10 @@ pub struct HelloContext<'a> {
 /// Decides whether the first control message of a session admits the
 /// viewer: the version must match; a busy host refuses everyone; then an
 /// authorized device needs no PIN (whatever PIN it sends) and is never
-/// paused, while anyone else needs the PIN valid right now, which is not
-/// even checked while its address is paused.
+/// paused. Anyone else depends on the access mode: the PIN valid right
+/// now (not even checked while its address is paused), or the host's
+/// click, asked for when the mode has it and the viewer sent no PIN (in
+/// «Chiedi conferma», whatever it sent).
 pub fn check_hello(message: &ControlMessage, context: &HelloContext) -> HelloVerdict {
     let ControlMessage::Hello {
         version,
@@ -63,20 +77,25 @@ pub fn check_hello(message: &ControlMessage, context: &HelloContext) -> HelloVer
     if context.host_busy {
         return reject(RejectReason::Busy);
     }
-    let expected_pin = context.expected_pin;
-    let by = match (context.trust, pin.as_deref().map(str::trim)) {
-        (ViewerTrust::Authorized, _) => AdmittedBy::Device,
-        (ViewerTrust::Unknown, _) if context.pin_paused => {
-            return reject(RejectReason::TooManyAttempts);
-        }
-        (ViewerTrust::Unknown, None | Some("")) => return reject(RejectReason::PinRequired),
-        (ViewerTrust::Unknown, Some(pin)) if pins_match(pin, expected_pin) => AdmittedBy::Pin,
-        (ViewerTrust::Unknown, Some(_)) => return reject(RejectReason::WrongPin),
-    };
-    HelloVerdict::Accept {
-        viewer_name: clean_peer_name(viewer_name),
-        by,
+    let viewer_name = clean_peer_name(viewer_name);
+    if context.trust == ViewerTrust::Authorized {
+        return accept(viewer_name, AdmittedBy::Device);
     }
+    let given = pin.as_deref().map(str::trim).filter(|pin| !pin.is_empty());
+    if !context.access.takes_pin() {
+        return HelloVerdict::AskHost { viewer_name };
+    }
+    match given {
+        None if context.access.asks_confirmation() => HelloVerdict::AskHost { viewer_name },
+        _ if context.pin_paused => reject(RejectReason::TooManyAttempts),
+        None => reject(RejectReason::PinRequired),
+        Some(pin) if pins_match(pin, context.expected_pin) => accept(viewer_name, AdmittedBy::Pin),
+        Some(_) => reject(RejectReason::WrongPin),
+    }
+}
+
+fn accept(viewer_name: String, by: AdmittedBy) -> HelloVerdict {
+    HelloVerdict::Accept { viewer_name, by }
 }
 
 /// The answer to a viewer of another protocol version, including one whose
@@ -126,6 +145,7 @@ mod tests {
         HelloContext {
             expected_pin: PIN,
             trust,
+            access: AccessMode::PinOnly,
             host_busy: false,
             pin_paused: false,
         }
@@ -190,6 +210,93 @@ mod tests {
 
     fn rejected(reason: RejectReason) -> HelloVerdict {
         HelloVerdict::Reject { reason }
+    }
+
+    fn in_mode(access: AccessMode, trust: ViewerTrust) -> HelloContext<'static> {
+        HelloContext {
+            access,
+            ..context(trust)
+        }
+    }
+
+    fn asked() -> HelloVerdict {
+        HelloVerdict::AskHost {
+            viewer_name: "laptop".into(),
+        }
+    }
+
+    #[test]
+    fn confirmation_asks_about_every_unknown_viewer_whatever_pin_it_sends() {
+        let context = in_mode(AccessMode::Confirmation, ViewerTrust::Unknown);
+        for pin in [None, Some(""), Some("000000"), Some(PIN)] {
+            assert_eq!(
+                check_hello(&hello(PROTOCOL_VERSION, pin), &context),
+                asked(),
+                "{pin:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pin_or_confirmation_checks_a_pin_and_asks_when_there_is_none() {
+        let context = in_mode(AccessMode::PinOrConfirmation, ViewerTrust::Unknown);
+        let verdict = |pin| check_hello(&hello(PROTOCOL_VERSION, pin), &context);
+        assert_eq!(verdict(Some(PIN)), accepted(AdmittedBy::Pin));
+        assert_eq!(verdict(Some("000000")), rejected(RejectReason::WrongPin));
+        for none in [None, Some(""), Some("  ")] {
+            assert_eq!(verdict(none), asked(), "{none:?}");
+        }
+    }
+
+    #[test]
+    fn a_paused_address_can_still_be_asked_about_but_never_guesses_a_pin() {
+        let paused = HelloContext {
+            pin_paused: true,
+            ..in_mode(AccessMode::PinOrConfirmation, ViewerTrust::Unknown)
+        };
+        assert_eq!(
+            check_hello(&hello(PROTOCOL_VERSION, None), &paused),
+            asked()
+        );
+        assert_eq!(
+            check_hello(&hello(PROTOCOL_VERSION, Some(PIN)), &paused),
+            rejected(RejectReason::TooManyAttempts)
+        );
+    }
+
+    #[test]
+    fn authorized_devices_are_never_asked_about() {
+        for access in AccessMode::ALL {
+            assert_eq!(
+                check_hello(
+                    &hello(PROTOCOL_VERSION, None),
+                    &in_mode(access, ViewerTrust::Authorized)
+                ),
+                accepted(AdmittedBy::Device),
+                "{access:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_busy_host_or_another_version_is_refused_before_anyone_is_asked() {
+        for access in AccessMode::ALL {
+            let busy = HelloContext {
+                host_busy: true,
+                ..in_mode(access, ViewerTrust::Unknown)
+            };
+            assert_eq!(
+                check_hello(&hello(PROTOCOL_VERSION, None), &busy),
+                rejected(RejectReason::Busy)
+            );
+            assert_eq!(
+                check_hello(
+                    &hello(PROTOCOL_VERSION + 1, None),
+                    &in_mode(access, ViewerTrust::Unknown)
+                ),
+                rejected(unsupported_version())
+            );
+        }
     }
 
     #[test]

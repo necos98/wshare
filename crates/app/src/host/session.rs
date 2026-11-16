@@ -22,6 +22,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::sync::watch;
 
 use super::admission::{Admission, Applicant, admit, send_rejection, viewer_trust};
+use super::approvals::Approvals;
 use super::clipboard::SessionClipboard;
 use super::devices::Devices;
 use super::events::EventSink;
@@ -52,6 +53,7 @@ pub(super) struct SessionContext {
     pub(super) monitor: AtomicUsize,
     pub(super) state: Arc<SharedState>,
     pub(super) devices: Arc<Devices>,
+    pub(super) approvals: Arc<Approvals>,
     pub(super) pin_guard: PinGuard,
     pub(super) events: EventSink,
 }
@@ -76,13 +78,16 @@ pub(super) async fn serve_viewer(session: Session, ctx: &SessionContext, ticket:
     let applicant = Applicant {
         address,
         trust: viewer_trust(certificate.as_ref(), &ctx.devices),
+        handle: &handle,
     };
 
     match admit(&mut tx, &mut rx, ctx, applicant, ticket, &mut cancel).await {
-        Admission::Admitted { viewer_name } => {
-            if let Some(fingerprint) = certificate {
-                ctx.devices.record_access(fingerprint, &viewer_name);
-            }
+        Admission::Admitted {
+            viewer_name,
+            remember,
+        } => {
+            ctx.devices
+                .record_admitted(certificate, &viewer_name, remember);
             let viewer = Viewer {
                 address,
                 name: viewer_name,

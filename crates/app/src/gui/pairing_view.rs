@@ -59,6 +59,18 @@ pub(super) enum RememberedAction {
 }
 
 /// `Accesso memorizzato [Connetti] [Dimentica]`: no PIN field.
+/// Under the PIN of a host that does not remember this PC: connects without
+/// one so the person at the host can accept it. True when clicked.
+pub(super) fn ask_access(ui: &mut Ui) -> bool {
+    let mut clicked = false;
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        clicked = ui.small_button(text::ASK_ACCESS).clicked();
+    });
+    ui.add_space(4.0);
+    clicked
+}
+
 pub(super) fn remembered_form(ui: &mut Ui, error: Option<&str>) -> Option<RememberedAction> {
     let mut action = None;
     ui.horizontal(|ui| {

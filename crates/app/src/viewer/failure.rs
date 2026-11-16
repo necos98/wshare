@@ -65,6 +65,9 @@ impl ViewerFailure {
             }
             Self::Rejected(RejectReason::Busy) => FailureCause::HostBusy,
             Self::Rejected(RejectReason::TooManyAttempts) => FailureCause::TooManyAttempts,
+            Self::Rejected(RejectReason::Denied) => FailureCause::Denied,
+            Self::Rejected(RejectReason::Expired) => FailureCause::ApprovalExpired,
+            Self::Rejected(RejectReason::TooManyRequests) => FailureCause::TooManyRequests,
             Self::Rejected(RejectReason::Other(text)) => FailureCause::Other(text.clone()),
             Self::HostChanged(_) => FailureCause::HostChanged,
             Self::TimedOut(_) => FailureCause::TimedOut,
@@ -132,6 +135,9 @@ mod tests {
             ),
             (RejectReason::Busy, FailureCause::HostBusy),
             (RejectReason::TooManyAttempts, FailureCause::TooManyAttempts),
+            (RejectReason::Denied, FailureCause::Denied),
+            (RejectReason::Expired, FailureCause::ApprovalExpired),
+            (RejectReason::TooManyRequests, FailureCause::TooManyRequests),
             (
                 RejectReason::Other("busy".into()),
                 FailureCause::Other("busy".into()),

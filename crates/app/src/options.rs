@@ -2,6 +2,8 @@
 
 use codec::Codec;
 
+use crate::access_mode::AccessMode;
+
 pub const DEFAULT_PORT: u16 = 7420;
 
 const BITS_PER_MEGABIT: u32 = 1_000_000;
@@ -56,6 +58,9 @@ pub struct HostOptions {
     /// Share copied text with the viewer (and accept the viewer's, if
     /// remote control is allowed).
     pub share_clipboard: bool,
+    /// How an unknown viewer is let in. `wshare host` has nobody to ask,
+    /// so it always uses [`AccessMode::PinOnly`].
+    pub access: AccessMode,
 }
 
 #[cfg(test)]

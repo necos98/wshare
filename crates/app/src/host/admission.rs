@@ -4,15 +4,18 @@
 //!
 //! Trust rests only on the fingerprint proven by the TLS handshake: a
 //! viewer whose certificate is among the authorized devices needs no PIN
-//! and is never paused; anyone else must give the PIN valid right now.
+//! and is never paused; anyone else must give the PIN valid right now or,
+//! when the access mode has it, be accepted by the person at the host with
+//! an explicit click (see [`super::approvals`]).
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use net::{ControlReceiver, ControlSender, Fingerprint};
+use net::{ControlReceiver, ControlSender, Fingerprint, SessionHandle};
 use protocol::ProtocolError;
 use protocol::control::{ControlMessage, RejectReason};
 
+use super::approvals::ApprovalOutcome;
 use super::devices::Devices;
 use super::session::SessionContext;
 use super::state::{Cancelled, SessionTicket};
@@ -27,8 +30,10 @@ const REJECT_DELAY: Duration = Duration::from_secs(1);
 
 /// Result of the Hello exchange.
 pub(super) enum Admission {
-    /// The viewer holds one of the viewer places of the host.
-    Admitted { viewer_name: String },
+    /// The viewer holds one of the viewer places of the host. `remember`:
+    /// its device is authorized from now on (not so for a viewer the person
+    /// at the host accepted without ticking "remember").
+    Admitted { viewer_name: String, remember: bool },
     /// The viewer was told why.
     Refused { reason: RejectReason },
     /// The host ended the session before admission completed.
@@ -36,10 +41,12 @@ pub(super) enum Admission {
 }
 
 /// Who is asking to be admitted, from the connection alone.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct Applicant {
+#[derive(Clone, Copy)]
+pub(super) struct Applicant<'a> {
     pub(super) address: SocketAddr,
     pub(super) trust: ViewerTrust,
+    /// Tells when the viewer closed the connection.
+    pub(super) handle: &'a SessionHandle,
 }
 
 /// Whether the certificate the viewer proved is an authorized device.
@@ -51,13 +58,14 @@ pub(super) fn viewer_trust(certificate: Option<&Fingerprint>, devices: &Devices)
 }
 
 /// Waits for Hello, judges it and answers a refusal (after
-/// [`REJECT_DELAY`]). An admitted viewer is not answered yet: Welcome
-/// follows once its stream is ready.
+/// [`REJECT_DELAY`]). A viewer only the person at the host can let in is
+/// told to wait (`AwaitingApproval`) while they are asked. An admitted
+/// viewer is not answered yet: Welcome follows once its stream is ready.
 pub(super) async fn admit(
     tx: &mut ControlSender,
     rx: &mut ControlReceiver,
     ctx: &SessionContext,
-    applicant: Applicant,
+    applicant: Applicant<'_>,
     ticket: &SessionTicket,
     cancel: &mut Cancelled,
 ) -> Admission {
@@ -68,20 +76,36 @@ pub(super) async fn admit(
     let refused = |reason: &str| Admission::Refused {
         reason: RejectReason::Other(reason.to_string()),
     };
-    let verdict = match hello {
+    let decision = match hello {
         Err(_) => return refused("viewer sent no Hello"),
         // A Hello of another protocol version may not decode: tell the
         // viewer so (older viewers can read the answer).
-        Ok(Err(e)) if is_incompatible_hello(&e) => HelloVerdict::Reject {
-            reason: unsupported_version(),
-        },
+        Ok(Err(e)) if is_incompatible_hello(&e) => Decision::Refuse(unsupported_version()),
         Ok(Err(e)) => return refused(&format!("{e:#}")),
         Ok(Ok(None)) => return refused("viewer left before Hello"),
-        Ok(Ok(Some(message))) => claim_place(judge(&message, ctx, applicant), ticket),
+        Ok(Ok(Some(message))) => match judge(&message, ctx, applicant) {
+            HelloVerdict::Accept { viewer_name, .. } => Decision::Admit {
+                viewer_name,
+                remember: true,
+            },
+            HelloVerdict::Reject { reason } => Decision::Refuse(reason),
+            HelloVerdict::AskHost { viewer_name } => {
+                match ask_host(tx, ctx, applicant, viewer_name, cancel).await {
+                    Some(decision) => decision,
+                    None => return Admission::Abandoned,
+                }
+            }
+        },
     };
-    match verdict {
-        HelloVerdict::Accept { viewer_name, .. } => Admission::Admitted { viewer_name },
-        HelloVerdict::Reject { reason } => {
+    match claim_place(decision, ticket) {
+        Decision::Admit {
+            viewer_name,
+            remember,
+        } => Admission::Admitted {
+            viewer_name,
+            remember,
+        },
+        Decision::Refuse(reason) => {
             tokio::select! {
                 () = cancel.wait() => return Admission::Abandoned,
                 () = tokio::time::sleep(REJECT_DELAY) => {}
@@ -92,14 +116,50 @@ pub(super) async fn admit(
     }
 }
 
+/// What is decided about a viewer once the host's checks and, if need be,
+/// its person's click are over.
+enum Decision {
+    Admit { viewer_name: String, remember: bool },
+    Refuse(RejectReason),
+}
+
+/// Tells the viewer to wait and puts it to the person at the host: the
+/// viewer is admitted only by their click, and `remember` says whether
+/// they asked to authorize its device. `None`: the viewer left or the
+/// service stopped while it waited.
+async fn ask_host(
+    tx: &mut ControlSender,
+    ctx: &SessionContext,
+    applicant: Applicant<'_>,
+    viewer_name: String,
+    cancel: &mut Cancelled,
+) -> Option<Decision> {
+    tx.send(&ControlMessage::AwaitingApproval).await.ok()?;
+    let outcome = tokio::select! {
+        () = cancel.wait() => return None,
+        _ = applicant.handle.closed() => return None,
+        outcome = ctx.approvals.ask(applicant.address, &viewer_name) => outcome,
+    };
+    Some(match outcome {
+        ApprovalOutcome::Accepted { remember } => Decision::Admit {
+            viewer_name,
+            remember,
+        },
+        ApprovalOutcome::Refused => Decision::Refuse(RejectReason::Denied),
+        ApprovalOutcome::Expired => Decision::Refuse(RejectReason::Expired),
+        ApprovalOutcome::NotAsked => Decision::Refuse(RejectReason::TooManyRequests),
+    })
+}
+
 /// Checks `message` against the host's state right now and counts the
 /// PIN it carried, if that PIN was checked.
-fn judge(message: &ControlMessage, ctx: &SessionContext, applicant: Applicant) -> HelloVerdict {
+fn judge(message: &ControlMessage, ctx: &SessionContext, applicant: Applicant<'_>) -> HelloVerdict {
     let ip = applicant.address.ip();
     let expected_pin = ctx.state.pin();
     let context = HelloContext {
         expected_pin: &expected_pin,
         trust: applicant.trust,
+        access: ctx.state.access(),
         host_busy: ctx.state.viewers_full(),
         pin_paused: applicant.trust == ViewerTrust::Unknown && ctx.pin_guard.is_paused(ip),
     };
@@ -119,12 +179,10 @@ fn judge(message: &ControlMessage, ctx: &SessionContext, applicant: Applicant) -
 
 /// An accepted viewer still needs a free place: another one may have been
 /// admitted since the check.
-fn claim_place(verdict: HelloVerdict, ticket: &SessionTicket) -> HelloVerdict {
-    match verdict {
-        HelloVerdict::Accept { .. } if !ticket.admit() => HelloVerdict::Reject {
-            reason: RejectReason::Busy,
-        },
-        verdict => verdict,
+fn claim_place(decision: Decision, ticket: &SessionTicket) -> Decision {
+    match decision {
+        Decision::Admit { .. } if !ticket.admit() => Decision::Refuse(RejectReason::Busy),
+        decision => decision,
     }
 }
 
@@ -141,3 +199,7 @@ pub(super) async fn send_rejection(tx: &mut ControlSender, reason: RejectReason)
     let _ = tx.send(&ControlMessage::Rejected { reason }).await;
     let _ = tx.finish();
 }
+
+#[cfg(test)]
+#[path = "admission_tests.rs"]
+mod tests;

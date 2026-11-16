@@ -8,7 +8,8 @@
 //!   `system_settings` (settings file, `autostart` registry entry,
 //!   monitors).
 //! - `view` draws the state and returns intents (`pairing_view` the parts
-//!   about remembered PCs, `settings_view` the settings page); `app` is the
+//!   about remembered PCs, `settings_view` the settings page, `approval_view`
+//!   the request of a viewer to be accepted, whose state is `approval`); `app` is the
 //!   eframe glue; `tray` the notification-area icon (`status_icon` its
 //!   variants, `balloon` its notifications, `notifications` which events
 //!   deserve one) and `overlay` the always-visible "who is connected" bar.
@@ -22,6 +23,8 @@
 //! "Esci" in the tray menu always quits.
 
 mod app;
+mod approval;
+mod approval_view;
 mod autostart;
 mod balloon;
 mod controller;

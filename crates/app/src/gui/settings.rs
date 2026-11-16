@@ -7,6 +7,7 @@
 use codec::Codec;
 use serde::{Deserialize, Serialize};
 
+use crate::access_mode::AccessMode;
 use crate::options::{DEFAULT_PORT, HostOptions, StreamOptions};
 
 pub const MIN_FPS: u32 = 1;
@@ -59,6 +60,8 @@ pub struct Settings {
     /// Whether copied text is shared with the connected viewer (both ways;
     /// the viewer's text also needs `allow_input`).
     pub share_clipboard: bool,
+    /// How a viewer that is not authorized is let in (see `AccessMode`).
+    pub access: AccessMode,
     // Viewer windows opened from this PC.
     pub viewer_fullscreen: bool,
     pub viewer_stats: bool,
@@ -83,6 +86,7 @@ impl Default for Settings {
             port: DEFAULT_PORT,
             allow_input: true,
             share_clipboard: true,
+            access: AccessMode::PinOnly,
             viewer_fullscreen: false,
             viewer_stats: false,
             viewer_view_only: false,
@@ -155,6 +159,7 @@ impl Settings {
             pin: None,
             view_only: !self.allow_input,
             share_clipboard: self.share_clipboard,
+            access: self.access,
         }
     }
 
@@ -176,6 +181,11 @@ mod tests {
         assert!(settings.allow_input);
         assert!(settings.share_clipboard);
         assert!(settings.notifications && settings.connection_indicator);
+        assert_eq!(
+            settings.access,
+            AccessMode::PinOnly,
+            "the PIN alone by default"
+        );
         assert!(!settings.start_with_windows && !settings.start_minimized);
     }
 
@@ -206,9 +216,11 @@ mod tests {
             port: 9000,
             allow_input: false,
             share_clipboard: false,
+            access: AccessMode::Confirmation,
             ..Settings::default()
         };
         let options = settings.host_options();
+        assert_eq!(options.access, AccessMode::Confirmation);
         assert_eq!(options.stream.monitor, 1);
         assert_eq!(options.stream.fps, 30);
         assert_eq!(options.stream.mbps, 8);

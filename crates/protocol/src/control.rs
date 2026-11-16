@@ -5,9 +5,13 @@
 //! Session handshake:
 //!   viewer -> host  Hello { version, viewer_name, pin }
 //!   host -> viewer  Welcome { host_name, stream }   or  Rejected { reason }
+//!                   or AwaitingApproval, then later Welcome or Rejected
 //! `pin` may be `None`: a viewer the host already authorized is recognised
 //! by its TLS client certificate (see the `net` crate), never by anything
-//! in `Hello`. Otherwise the host answers `Rejected { PinRequired }`.
+//! in `Hello`. Otherwise the host answers `Rejected { PinRequired }`, or,
+//! when the person at the host can accept connections with a click,
+//! `AwaitingApproval` first: the answer follows once they chose (or the
+//! request expired).
 //! then at any time:
 //!   viewer -> host  RequestKeyframe
 //!   viewer -> host  Input(event)            (ignored by view-only hosts)
@@ -60,7 +64,10 @@ use crate::session::{MonitorEntry, Quality};
 /// 8: MonitorList and StreamChanged (host), SelectMonitor and SetQuality
 ///    (viewer): the viewer picks the monitor and the quality mid-session,
 ///    and a resolution change on the host no longer ends it.
-pub const PROTOCOL_VERSION: u16 = 8;
+/// 9: AwaitingApproval (host): the person at the host is asked to accept or
+///    refuse the viewer; `Welcome` or `Rejected` follows. Its refusals
+///    (`Denied`, `Expired`, `TooManyRequests`) keep the text form.
+pub const PROTOCOL_VERSION: u16 = 9;
 
 /// Upper bound for one control message; protects against garbage lengths.
 /// Sized for the largest cursor image (256x256 RGBA = 256 KiB) plus margin.
@@ -115,6 +122,13 @@ pub enum RejectReason {
     /// Too many wrong PINs came from the viewer's address lately: the host
     /// refuses without checking the PIN until the pause is over.
     TooManyAttempts,
+    /// The person at the host refused the viewer.
+    Denied,
+    /// Nobody at the host answered the viewer's request in time.
+    Expired,
+    /// The viewer's address asked for approval too often lately: the host
+    /// refuses without asking the person at the host.
+    TooManyRequests,
     /// Anything else, as text for people.
     Other(String),
 }
@@ -123,6 +137,9 @@ const PIN_REQUIRED_TEXT: &str = "PIN required";
 const WRONG_PIN_TEXT: &str = "wrong PIN";
 const BUSY_TEXT: &str = "host busy: another viewer is connected";
 const TOO_MANY_ATTEMPTS_TEXT: &str = "too many wrong PINs, try again later";
+const DENIED_TEXT: &str = "the host refused the connection";
+const EXPIRED_TEXT: &str = "nobody at the host answered in time";
+const TOO_MANY_REQUESTS_TEXT: &str = "too many connection requests, try again later";
 const CANNOT_STREAM_TEXT_PREFIX: &str = "host cannot stream:";
 /// Protocol 3 hosts wrote "protocol version V not supported (host uses H)";
 /// both forms start and end the same way.
@@ -143,6 +160,9 @@ impl fmt::Display for RejectReason {
             Self::CannotStream(cause) => write!(f, "{CANNOT_STREAM_TEXT_PREFIX} {cause}"),
             Self::Busy => f.write_str(BUSY_TEXT),
             Self::TooManyAttempts => f.write_str(TOO_MANY_ATTEMPTS_TEXT),
+            Self::Denied => f.write_str(DENIED_TEXT),
+            Self::Expired => f.write_str(EXPIRED_TEXT),
+            Self::TooManyRequests => f.write_str(TOO_MANY_REQUESTS_TEXT),
             Self::Other(text) => f.write_str(text),
         }
     }
@@ -161,6 +181,9 @@ impl From<String> for RejectReason {
             WRONG_PIN_TEXT => Self::WrongPin,
             BUSY_TEXT => Self::Busy,
             TOO_MANY_ATTEMPTS_TEXT => Self::TooManyAttempts,
+            DENIED_TEXT => Self::Denied,
+            EXPIRED_TEXT => Self::Expired,
+            TOO_MANY_REQUESTS_TEXT => Self::TooManyRequests,
             _ => match unsupported_version_host(&text) {
                 Some(host) => Self::UnsupportedVersion { host },
                 None => match text.strip_prefix(CANNOT_STREAM_TEXT_PREFIX) {
@@ -231,6 +254,10 @@ pub enum ControlMessage {
     /// The host restarted capture and encoder: the video from now on is
     /// this stream, beginning with a keyframe. Frame ids go on counting.
     StreamChanged(StreamInfo),
+    /// The viewer is not authorized and the person at the host was asked to
+    /// accept or refuse it: sent once, after `Hello`, and followed by
+    /// `Welcome` or `Rejected` (`Denied`, or `Expired` when nobody answered).
+    AwaitingApproval,
 }
 
 /// Serializes `msg` as one length-prefixed frame.
@@ -428,6 +455,16 @@ mod tests {
             ControlMessage::Rejected {
                 reason: RejectReason::TooManyAttempts,
             },
+            ControlMessage::Rejected {
+                reason: RejectReason::Denied,
+            },
+            ControlMessage::Rejected {
+                reason: RejectReason::Expired,
+            },
+            ControlMessage::Rejected {
+                reason: RejectReason::TooManyRequests,
+            },
+            ControlMessage::AwaitingApproval,
             ControlMessage::RequestKeyframe,
             ControlMessage::Bye,
         ]
@@ -467,6 +504,9 @@ mod tests {
             RejectReason::CannotStream("no encoder".into()),
             RejectReason::Busy,
             RejectReason::TooManyAttempts,
+            RejectReason::Denied,
+            RejectReason::Expired,
+            RejectReason::TooManyRequests,
             RejectReason::Other("busy".into()),
         ] {
             assert_eq!(RejectReason::from(reason.to_string()), reason);
@@ -703,6 +743,7 @@ mod tests {
         assert_eq!(index(ControlMessage::SelectMonitor(0)), 14);
         assert_eq!(index(ControlMessage::SetQuality(Quality::Automatic)), 15);
         assert_eq!(index(ControlMessage::StreamChanged(sample_stream())), 16);
+        assert_eq!(index(ControlMessage::AwaitingApproval), 17);
     }
 
     fn sample_stream() -> StreamInfo {
@@ -746,6 +787,33 @@ mod tests {
             assert_eq!(
                 encode_frame(&ControlMessage::SetQuality(quality)),
                 frame_of(&[15, byte])
+            );
+        }
+    }
+
+    #[test]
+    fn awaiting_approval_layout_is_stable() {
+        // Variant 17, no fields.
+        assert_eq!(
+            encode_frame(&ControlMessage::AwaitingApproval),
+            frame_of(&[17])
+        );
+    }
+
+    #[test]
+    fn approval_refusals_are_encoded_as_text() {
+        // Peers of other versions read them as plain text (`Other`), as
+        // they do the reasons added after protocol 4.
+        for (reason, text) in [
+            (RejectReason::Denied, DENIED_TEXT),
+            (RejectReason::Expired, EXPIRED_TEXT),
+            (RejectReason::TooManyRequests, TOO_MANY_REQUESTS_TEXT),
+        ] {
+            let mut expected = vec![2, u8::try_from(text.len()).unwrap()];
+            expected.extend_from_slice(text.as_bytes());
+            assert_eq!(
+                encode_frame(&ControlMessage::Rejected { reason }),
+                frame_of(&expected)
             );
         }
     }

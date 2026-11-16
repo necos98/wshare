@@ -13,6 +13,7 @@ use crate::text;
 use crate::trust::AuthorizedDevice;
 use crate::viewer::report::FailureCause;
 
+use super::approval::ApprovalPrompt;
 use super::notifications::Notification;
 use super::ports::MonitorChoice;
 use super::remembered::RememberedHosts;
@@ -52,6 +53,8 @@ pub struct Sharing {
     pub authorized: Vec<AuthorizedDevice>,
     /// The screen being shared, as a line for people (known while sharing).
     pub screen: Option<String>,
+    /// A viewer waiting for the click that accepts or refuses it.
+    pub approval: Option<ApprovalPrompt>,
 }
 
 impl Default for Sharing {
@@ -68,6 +71,7 @@ impl Default for Sharing {
             error: None,
             authorized: Vec::new(),
             screen: None,
+            approval: None,
         }
     }
 }
@@ -125,6 +129,14 @@ impl Sharing {
             }
             HostEvent::PinChanged { pin } => self.pin = Some(pin),
             HostEvent::AuthorizedDevices(devices) => self.authorized = devices,
+            HostEvent::ApprovalRequested(request) => {
+                self.approval = Some(ApprovalPrompt::new(request));
+            }
+            HostEvent::ApprovalClosed { id } => {
+                if self.approval.as_ref().is_some_and(|prompt| prompt.id == id) {
+                    self.approval = None;
+                }
+            }
             HostEvent::ViewerConnected {
                 viewer_name,
                 address,
@@ -219,6 +231,8 @@ impl HostRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewerStatus {
     Connecting,
+    /// The host asked the person at its PC to accept this one.
+    AwaitingApproval,
     Connected,
     Failed(String),
 }
@@ -239,9 +253,18 @@ impl ViewerSession {
         !matches!(self.status, ViewerStatus::Failed(_))
     }
 
+    /// Still being made: it can be given up.
+    pub fn is_connecting(&self) -> bool {
+        matches!(
+            self.status,
+            ViewerStatus::Connecting | ViewerStatus::AwaitingApproval
+        )
+    }
+
     pub fn status_line(&self) -> String {
         match &self.status {
             ViewerStatus::Connecting => text::viewer_connecting(&self.label),
+            ViewerStatus::AwaitingApproval => text::viewer_awaiting_approval(&self.label),
             ViewerStatus::Connected => text::viewer_connected(&self.label),
             ViewerStatus::Failed(message) => text::viewer_failed(&self.label, message),
         }
@@ -251,6 +274,9 @@ impl ViewerSession {
 /// What a launched viewer process reported.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewerUpdate {
+    /// The host asked the person at its PC to accept this one; the answer
+    /// is still to come.
+    AwaitingApproval,
     /// The handshake succeeded and its window is open.
     Connected,
     /// The process ended. `cause` is why it failed, from its status line or
@@ -331,6 +357,11 @@ impl GuiState {
 
     pub fn apply_viewer_update(&mut self, id: ViewerId, update: ViewerUpdate) {
         match update {
+            ViewerUpdate::AwaitingApproval => {
+                if let Some(viewer) = self.viewer_mut(id).filter(|v| v.is_connecting()) {
+                    viewer.status = ViewerStatus::AwaitingApproval;
+                }
+            }
             ViewerUpdate::Connected => {
                 let Some(viewer) = self.viewer_mut(id) else {
                     return;

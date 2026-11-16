@@ -72,12 +72,14 @@ mod tests {
     use super::super::pin_attempts::{FREE_FAILURES, ROTATE_AFTER};
     use super::super::sessions::SessionLimits;
     use super::*;
+    use crate::access_mode::AccessMode;
 
     fn new_guard() -> (PinGuard, Arc<SharedState>, Receiver<HostEvent>) {
         let state = Arc::new(SharedState::new(
             "123456".into(),
             true,
             true,
+            AccessMode::PinOnly,
             SessionLimits::default(),
         ));
         let (observer, events) = recorder();

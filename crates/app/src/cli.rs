@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use codec::Codec;
 use net::Fingerprint;
 
+use crate::access_mode::AccessMode;
 use crate::options::{DEFAULT_PORT, HostOptions, StreamOptions};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +66,8 @@ wshare - LAN screen sharing (no arguments: open the window)
                network is congested and raises it back gradually
                a viewer that gave the PIN once connects without it from then on
                (remove it from the list in the wshare window)
+               accepting a viewer with a click (the Accesso setting of the window) is not
+               available here: wshare host always requires the PIN from a new viewer
                copied text is shared with the viewer, both ways (the viewer's only if remote
                control is allowed); --no-clipboard turns it off
   wshare view  [HOST | IP[:PORT]] [--pin PIN] [--host-id ID] [--view-only] [--fullscreen] [--stats]
@@ -162,6 +165,7 @@ fn parse_host(args: &[String]) -> Result<HostOptions> {
         pin: None,
         view_only: false,
         share_clipboard: true,
+        access: AccessMode::PinOnly,
     };
     for_each_arg(args, |flag, value| {
         if stream_flag(&mut options.stream, flag, value)? {
@@ -267,6 +271,11 @@ mod tests {
         assert_eq!(h.stream, StreamOptions::default());
         assert_eq!(h.port, DEFAULT_PORT);
         assert_eq!(h.pin, None);
+        assert_eq!(
+            h.access,
+            AccessMode::PinOnly,
+            "no one to ask on the command line"
+        );
         assert!(!h.view_only);
         assert!(h.share_clipboard);
     }

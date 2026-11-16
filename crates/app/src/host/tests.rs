@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use super::events::recording::{next, recorder};
 use super::{HostEvent, HostHandle};
+use crate::access_mode::AccessMode;
 use crate::options::{HostOptions, StreamOptions};
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -20,6 +21,7 @@ fn options(monitor: usize) -> HostOptions {
         pin: Some("123456".into()),
         view_only: false,
         share_clipboard: true,
+        access: AccessMode::PinOnly,
     }
 }
 

@@ -7,8 +7,9 @@ use anyhow::{Result, bail};
 use net::Fingerprint;
 
 use super::*;
+use crate::access_mode::AccessMode;
 use crate::gui::ports::MonitorChoice;
-use crate::host::{HostEvent, HostFailure};
+use crate::host::{ApprovalAnswer, ApprovalId, HostEvent, HostFailure};
 use crate::options::HostOptions;
 use crate::trust::KnownHost;
 
@@ -62,6 +63,13 @@ impl SharingControl for FakeControl {
             .borrow_mut()
             .calls
             .push(format!("clipboard {shared}"));
+    }
+    fn set_access_mode(&self, access: AccessMode) {
+        self.0.borrow_mut().calls.push(format!("access {access:?}"));
+    }
+    fn answer_approval(&self, id: ApprovalId, answer: ApprovalAnswer) {
+        let call = format!("approval {id} {answer:?}");
+        self.0.borrow_mut().calls.push(call);
     }
     fn new_pin(&self) -> String {
         self.0.borrow_mut().calls.push("new_pin".into());

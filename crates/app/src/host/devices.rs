@@ -44,6 +44,21 @@ impl Devices {
         );
     }
 
+    /// Records an admitted viewer: always for one that gave the PIN or was
+    /// authorized already, and for one the person at the host accepted only
+    /// when they asked to remember it (`remember`). A viewer without a
+    /// certificate cannot be recognised later, so it is never recorded.
+    pub(super) fn record_admitted(
+        &self,
+        certificate: Option<Fingerprint>,
+        name: &str,
+        remember: bool,
+    ) {
+        if remember && let Some(fingerprint) = certificate {
+            self.record_access(fingerprint, name);
+        }
+    }
+
     /// Removes the viewer: its next connection needs the PIN. A session it
     /// has open now goes on.
     pub(super) fn remove(&self, fingerprint: &Fingerprint) {
@@ -113,6 +128,22 @@ mod tests {
             events.try_recv().is_err(),
             "removing an unknown viewer changes nothing"
         );
+    }
+
+    #[test]
+    fn an_accepted_viewer_is_authorized_only_when_asked_to_be_remembered() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = AuthorizedDevices::load(dir.path().join("authorized.toml"));
+        let (observer, _events) = recorder();
+        let devices = Devices::new(store, EventSink::new(observer));
+        let once = Identity::generate("once").unwrap().fingerprint();
+        let always = Identity::generate("always").unwrap().fingerprint();
+
+        devices.record_admitted(Some(once), "UNA VOLTA", false);
+        devices.record_admitted(None, "SENZA CERTIFICATO", true);
+        assert!(!devices.is_authorized(&once));
+        devices.record_admitted(Some(always), "SEMPRE", true);
+        assert!(devices.is_authorized(&always));
     }
 
     #[test]

@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::watch;
 
 use super::sessions::{SessionId, SessionLimits, Sessions};
+use crate::access_mode::AccessMode;
 
 /// Fires a one-shot cancellation that async code can await.
 ///
@@ -61,6 +62,7 @@ pub(super) enum SessionRefusal {
 
 pub(super) struct SharedState {
     pin: Mutex<String>,
+    access: Mutex<AccessMode>,
     input_allowed: watch::Sender<bool>,
     clipboard_shared: watch::Sender<bool>,
     stop: Cancel,
@@ -75,11 +77,13 @@ impl SharedState {
         pin: String,
         input_allowed: bool,
         clipboard_shared: bool,
+        access: AccessMode,
         limits: SessionLimits,
     ) -> Self {
         let (stop, stop_listener) = Cancel::new();
         Self {
             pin: Mutex::new(pin),
+            access: Mutex::new(access),
             input_allowed: watch::channel(input_allowed).0,
             clipboard_shared: watch::channel(clipboard_shared).0,
             stop,
@@ -97,6 +101,15 @@ impl SharedState {
     pub(super) fn replace_pin(&self, pin: String) -> String {
         *lock(&self.pin) = pin.clone();
         pin
+    }
+
+    /// How an unknown viewer is let in, for the next connection attempts.
+    pub(super) fn access(&self) -> AccessMode {
+        *lock(&self.access)
+    }
+
+    pub(super) fn set_access(&self, access: AccessMode) {
+        *lock(&self.access) = access;
     }
 
     /// Changes the input permission; sessions watching it are woken only on
@@ -209,6 +222,7 @@ mod tests {
             "111111".into(),
             true,
             true,
+            AccessMode::PinOnly,
             SessionLimits::default(),
         ))
     }
@@ -219,6 +233,14 @@ mod tests {
         assert_eq!(state.pin(), "111111");
         assert_eq!(state.replace_pin("222222".into()), "222222");
         assert_eq!(state.pin(), "222222");
+    }
+
+    #[test]
+    fn the_access_mode_is_read_at_each_attempt_and_starts_as_given() {
+        let state = state();
+        assert_eq!(state.access(), AccessMode::PinOnly);
+        state.set_access(AccessMode::Confirmation);
+        assert_eq!(state.access(), AccessMode::Confirmation);
     }
 
     #[test]

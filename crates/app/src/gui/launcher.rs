@@ -77,6 +77,10 @@ impl ViewerLauncher for ProcessLauncher {
                 let mut failure = None;
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                     match ViewerReport::parse(&line) {
+                        Some(ViewerReport::AwaitingApproval) => inbox.send(AppEvent::Viewer {
+                            id,
+                            update: ViewerUpdate::AwaitingApproval,
+                        }),
                         Some(ViewerReport::Connected { .. }) => inbox.send(AppEvent::Viewer {
                             id,
                             update: ViewerUpdate::Connected,

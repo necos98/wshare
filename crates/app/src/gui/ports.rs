@@ -10,7 +10,8 @@ use anyhow::Result;
 use discovery::DiscoveryEvent;
 use net::Fingerprint;
 
-use crate::host::HostEvent;
+use crate::access_mode::AccessMode;
+use crate::host::{ApprovalAnswer, ApprovalId, HostEvent};
 use crate::options::HostOptions;
 use crate::trust::KnownHost;
 
@@ -87,6 +88,10 @@ pub trait SharingControl {
     fn set_input_allowed(&self, allowed: bool);
     /// Turns the shared clipboard on or off, also for a viewer connected now.
     fn set_clipboard_shared(&self, shared: bool);
+    /// Changes how a viewer that is not authorized is let in.
+    fn set_access_mode(&self, access: AccessMode);
+    /// Answers the request of a viewer waiting for a click.
+    fn answer_approval(&self, id: ApprovalId, answer: ApprovalAnswer);
     fn new_pin(&self) -> String;
     fn disconnect_viewer(&self);
     /// Removes an authorized viewer: its next connection needs the PIN.

@@ -3,6 +3,7 @@
 
 use eframe::egui::{self, Align, ComboBox, Layout, RichText, TextEdit, Ui};
 
+use crate::access_mode::AccessMode;
 use crate::text;
 
 use super::controller::Intent;
@@ -104,6 +105,7 @@ fn sharing_group(ui: &mut Ui, state: &GuiState, edited: &mut Settings) {
         port_row(ui, edited);
         ui.checkbox(&mut edited.allow_input, text::SETTINGS_ALLOW_INPUT);
         ui.checkbox(&mut edited.share_clipboard, text::SETTINGS_SHARE_CLIPBOARD);
+        access_row(ui, edited);
     });
 }
 
@@ -192,6 +194,24 @@ fn choices(presets: &[u32], current: u32, range: (u32, u32)) -> Vec<u32> {
     choices.sort_unstable();
     choices.dedup();
     choices
+}
+
+fn access_row(ui: &mut Ui, edited: &mut Settings) {
+    ui.horizontal(|ui| {
+        ui.label(text::SETTINGS_ACCESS);
+        ComboBox::from_id_salt("settings_access")
+            .selected_text(text::access_mode(edited.access))
+            .show_ui(ui, |ui| {
+                for mode in AccessMode::ALL {
+                    ui.selectable_value(&mut edited.access, mode, text::access_mode(mode));
+                }
+            });
+    });
+    ui.label(
+        RichText::new(text::SETTINGS_ACCESS_HINT)
+            .size(DETAIL_SIZE)
+            .weak(),
+    );
 }
 
 fn codec_row(ui: &mut Ui, edited: &mut Settings) {

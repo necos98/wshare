@@ -30,6 +30,9 @@ fn stream(codec: VideoCodec) -> StreamInfo {
 enum Answer {
     Welcome(VideoCodec),
     Reject(RejectReason),
+    /// Tells the viewer to wait for the person at the host, then gives the
+    /// answer.
+    AfterApproval(Box<Answer>),
 }
 
 /// A host answering each connection with the next scripted answer (the last
@@ -62,6 +65,13 @@ impl ScriptedHost {
                         continue;
                     };
                     pins.lock().unwrap().push(pin);
+                    let answer = match answer {
+                        Answer::AfterApproval(answer) => {
+                            tx.send(&ControlMessage::AwaitingApproval).await.unwrap();
+                            *answer
+                        }
+                        answer => answer,
+                    };
                     let reply = match answer {
                         Answer::Welcome(codec) => ControlMessage::Welcome {
                             host_name: "HOST".into(),
@@ -69,6 +79,7 @@ impl ScriptedHost {
                             input_allowed: true,
                         },
                         Answer::Reject(reason) => ControlMessage::Rejected { reason },
+                        Answer::AfterApproval(_) => unreachable!("one wait only"),
                     };
                     tx.send(&reply).await.unwrap();
                     // Keep the connection up: dropping it would close it.
@@ -307,4 +318,76 @@ fn only_a_quality_other_than_automatic_is_asked_for_again() {
         quality_request(Quality::Low),
         Some(ControlMessage::SetQuality(Quality::Low))
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_that_asks_its_person_is_waited_for_and_then_welcomes() {
+    let host = ScriptedHost::start(vec![Answer::AfterApproval(Box::new(Answer::Welcome(
+        VideoCodec::H264,
+    )))]);
+    let waited = std::cell::Cell::new(false);
+    let connected = connect(
+        host.address,
+        Some(host.identity.fingerprint()),
+        None,
+        None,
+        || waited.set(true),
+    )
+    .await
+    .unwrap();
+    assert!(waited.get(), "the viewer reports that it waits");
+    assert_eq!(connected.host_name, "HOST");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_after_the_wait_ends_the_viewer_with_its_cause() {
+    for reason in [RejectReason::Denied, RejectReason::Expired] {
+        let host = ScriptedHost::start(vec![Answer::AfterApproval(Box::new(Answer::Reject(
+            reason.clone(),
+        )))]);
+        let error = connect(
+            host.address,
+            Some(host.identity.fingerprint()),
+            None,
+            None,
+            || {},
+        )
+        .await
+        .err()
+        .expect("refused");
+        assert_eq!(
+            failure_of(error),
+            ViewerFailure::Rejected(reason),
+            "told apart from every other refusal"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reconnection_waits_for_the_host_person_without_reporting_it() {
+    let host = ScriptedHost::start(vec![Answer::AfterApproval(Box::new(Answer::Welcome(
+        VideoCodec::H264,
+    )))]);
+    let (_keep, mut outgoing) = unbounded_channel();
+    reestablish_in_time(&host.plan(None), &mut outgoing)
+        .await
+        .unwrap();
+    assert_eq!(host.attempts(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reconnection_the_person_refuses_is_not_retried() {
+    let host = ScriptedHost::start(vec![Answer::AfterApproval(Box::new(Answer::Reject(
+        RejectReason::Denied,
+    )))]);
+    let (_keep, mut outgoing) = unbounded_channel();
+    let stop = reestablish_in_time(&host.plan(None), &mut outgoing)
+        .await
+        .err()
+        .expect("must not connect");
+    assert_eq!(
+        stop,
+        Stop::Failed(ViewerFailure::Rejected(RejectReason::Denied))
+    );
+    assert_eq!(host.attempts(), 1);
 }

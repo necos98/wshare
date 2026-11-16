@@ -8,7 +8,10 @@
 //! - `accept`: every connection on its own task until stopped.
 //! - `sessions`: the connections being admitted and the viewers, within
 //!   their limits (one viewer at a time).
-//! - `admission`: Hello and its verdict (remembered device or PIN; busy).
+//! - `admission`: Hello and its verdict (remembered device, PIN or the
+//!   click of the person at the host; busy).
+//! - `approvals` + `approval_limiter`: the requests to accept or refuse a
+//!   viewer, one at a time and limited per address.
 //! - `pin_attempts` + `pin_guard`: wrong PINs pause their address and,
 //!   too many overall, rotate the PIN.
 //! - `session`: one viewer from Hello to goodbye.
@@ -30,6 +33,8 @@
 
 mod accept;
 mod admission;
+mod approval_limiter;
+mod approvals;
 mod cause;
 mod clipboard;
 mod console;
@@ -51,6 +56,8 @@ mod state;
 mod stream_setup;
 mod streaming;
 #[cfg(test)]
+mod test_context;
+#[cfg(test)]
 mod tests;
 
 use std::net::SocketAddr;
@@ -60,8 +67,10 @@ use net::Fingerprint;
 use pipeline::HostStats;
 use protocol::control::RejectReason;
 
+pub use approvals::{ApprovalAnswer, ApprovalId, ApprovalRequest};
 pub use cause::{HostFailure, HostWarning, SessionFailure};
 
+use crate::access_mode::AccessMode;
 use crate::options::HostOptions;
 use crate::trust::AuthorizedDevice;
 
@@ -85,6 +94,13 @@ pub enum HostEvent {
     /// after `Listening` and whenever the list changes (a viewer admitted
     /// or removed, a last access updated).
     AuthorizedDevices(Vec<AuthorizedDevice>),
+    /// A viewer that is not authorized waits for the person at this PC to
+    /// accept or refuse it (see [`HostHandle::answer_approval`]). It is let
+    /// in only by an explicit `Accept`; without an answer it is refused
+    /// after a while.
+    ApprovalRequested(ApprovalRequest),
+    /// The request is over, answered or not: the prompt can go.
+    ApprovalClosed { id: ApprovalId },
     ViewerConnected {
         viewer_name: String,
         address: SocketAddr,
@@ -153,6 +169,19 @@ impl HostHandle {
     /// nothing it sends is written to this PC's clipboard.
     pub fn set_clipboard_shared(&self, shared: bool) {
         self.service.state().set_clipboard_shared(shared);
+    }
+
+    /// Changes how a viewer that is not authorized is let in, effective for
+    /// the next connection attempts. Viewers connected now, and requests
+    /// already open, are not affected.
+    pub fn set_access_mode(&self, access: AccessMode) {
+        self.service.state().set_access(access);
+    }
+
+    /// Answers the request `id` (see [`HostEvent::ApprovalRequested`]).
+    /// Does nothing if it is not open anymore (expired, or the viewer left).
+    pub fn answer_approval(&self, id: ApprovalId, answer: ApprovalAnswer) {
+        self.service.approvals().answer(id, answer);
     }
 
     /// Generates a new random PIN for the next connections and reports it

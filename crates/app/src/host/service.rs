@@ -21,6 +21,7 @@ use net::{HostEndpoint, Identity};
 use protocol::control::PROTOCOL_VERSION;
 
 use super::accept::accept_viewers;
+use super::approvals::{APPROVAL_TIMEOUT, Approvals};
 use super::devices::Devices;
 use super::events::EventSink;
 use super::pin_guard::{PinGuard, rotate_pin};
@@ -40,6 +41,7 @@ const RUNTIME_WORKERS: usize = 2;
 pub(super) struct Service {
     state: Arc<SharedState>,
     devices: Arc<Devices>,
+    approvals: Arc<Approvals>,
     events: EventSink,
     thread: Option<JoinHandle<()>>,
 }
@@ -53,15 +55,18 @@ impl Service {
             pin,
             !options.view_only,
             options.share_clipboard,
+            options.access,
             SessionLimits::default(),
         ));
         let (store, load_warning) = AuthorizedDevices::load(paths::authorized_viewers_file()?);
         let devices = Arc::new(Devices::new(store, events.clone()));
+        let approvals = Arc::new(Approvals::new(events.clone(), APPROVAL_TIMEOUT));
         let (setup_tx, setup_rx) = channel();
         let thread = {
             let shared = Shared {
                 state: state.clone(),
                 devices: devices.clone(),
+                approvals: approvals.clone(),
                 events: events.clone(),
                 load_warning,
             };
@@ -74,6 +79,7 @@ impl Service {
             Ok(Ok(())) => Ok(Self {
                 state,
                 devices,
+                approvals,
                 events,
                 thread: Some(thread),
             }),
@@ -94,6 +100,10 @@ impl Service {
 
     pub(super) fn devices(&self) -> &Devices {
         &self.devices
+    }
+
+    pub(super) fn approvals(&self) -> &Approvals {
+        &self.approvals
     }
 
     /// Rotates the PIN for future connections and reports it.
@@ -138,6 +148,7 @@ enum Exit {
 struct Shared {
     state: Arc<SharedState>,
     devices: Arc<Devices>,
+    approvals: Arc<Approvals>,
     events: EventSink,
     /// Why the authorized devices could not be loaded, reported once
     /// listening (the first event must be `Listening`).
@@ -175,6 +186,7 @@ fn serve(
     let Shared {
         state,
         devices,
+        approvals,
         events,
         load_warning,
     } = shared;
@@ -220,6 +232,7 @@ fn serve(
             monitor: AtomicUsize::new(options.stream.monitor),
             state: Arc::clone(state),
             devices: Arc::clone(devices),
+            approvals: Arc::clone(approvals),
             pin_guard: PinGuard::new(Arc::clone(state), events.clone()),
             events: events.clone(),
         });

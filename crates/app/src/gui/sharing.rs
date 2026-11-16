@@ -5,7 +5,8 @@ use std::thread::{self, JoinHandle};
 use anyhow::Result;
 use net::Fingerprint;
 
-use crate::host::{HostEvent, HostHandle, HostObserver};
+use crate::access_mode::AccessMode;
+use crate::host::{ApprovalAnswer, ApprovalId, HostEvent, HostHandle, HostObserver};
 use crate::options::HostOptions;
 
 use super::ports::{AppEvent, Inbox, PendingStop, SharingControl, SharingService};
@@ -64,6 +65,14 @@ impl SharingControl for RunningHost {
 
     fn set_clipboard_shared(&self, shared: bool) {
         self.handle.set_clipboard_shared(shared);
+    }
+
+    fn set_access_mode(&self, access: AccessMode) {
+        self.handle.set_access_mode(access);
+    }
+
+    fn answer_approval(&self, id: ApprovalId, answer: ApprovalAnswer) {
+        self.handle.answer_approval(id, answer);
     }
 
     fn new_pin(&self) -> String {

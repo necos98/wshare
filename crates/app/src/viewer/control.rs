@@ -293,6 +293,7 @@ async fn reestablish(
                 Some(plan.host),
                 plan.identity.as_ref(),
                 plan.pin.clone(),
+                || {},
             )
             .await
         };

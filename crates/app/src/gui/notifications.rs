@@ -1,5 +1,6 @@
 //! What is worth a balloon in the notification area: a viewer that
-//! connects, leaves, or is refused. Pure decisions; `tray` shows them.
+//! asks to connect, connects, leaves, or is refused. Pure decisions; `tray`
+//! shows them.
 
 use crate::host::HostEvent;
 use crate::text;
@@ -22,6 +23,9 @@ pub fn for_host_event(event: &HostEvent, viewer: Option<&ConnectedViewer>) -> Op
         }
         HostEvent::ViewerRejected { address, reason } => {
             text::viewer_rejected(address.ip(), reason)
+        }
+        HostEvent::ApprovalRequested(request) => {
+            text::approval_message(&request.viewer_name, request.address.ip())
         }
         _ => return None,
     };

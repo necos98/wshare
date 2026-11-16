@@ -33,6 +33,8 @@ pub struct WshareApp {
     /// Opened hidden, but there is no tray icon to reopen it from: the
     /// window must be shown (minimized) instead.
     reveal_minimized: bool,
+    /// The window was put above the others for a request that waits.
+    raised: bool,
     quitting: bool,
 }
 
@@ -52,6 +54,7 @@ impl WshareApp {
             shell,
             hidden: minimized && has_tray,
             reveal_minimized: minimized && !has_tray,
+            raised: false,
             quitting: false,
         }
     }
@@ -63,6 +66,11 @@ impl WshareApp {
                 ctx.send_viewport_cmd(ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
                 ctx.send_viewport_cmd(ViewportCommand::Focus);
+            }
+            WindowCommand::BringToFront => {
+                self.execute(ctx, WindowCommand::Show);
+                self.raised = true;
+                ctx.send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
             }
             WindowCommand::HideToTray if self.shell.tray.is_some() => {
                 self.hidden = true;
@@ -89,6 +97,11 @@ impl WshareApp {
             ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
         }
         let state = self.controller.state();
+        if self.raised && state.sharing.approval.is_none() {
+            // Answered, or over: the window is an ordinary one again.
+            self.raised = false;
+            ctx.send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
+        }
         if let Some(tray) = &mut self.shell.tray {
             tray.sync(state);
         }

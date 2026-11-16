@@ -4,6 +4,8 @@
 //! this contract, never from the wording of messages (those are English, for
 //! terminals):
 //! - a status line on stdout, written only when [`REPORT_ENV`] is set:
+//!   `@wshare:awaiting-approval` when the host asked the person at its PC to
+//!   accept this one (the handshake goes on once they answered),
 //!   `@wshare:connected:<host name>` once the handshake succeeded, or
 //!   `@wshare:failed:<cause>[:<detail>]` when the viewer ends because of a
 //!   [`FailureCause`];
@@ -23,6 +25,7 @@ const LINE_PREFIX: &str = "@wshare:";
 const SEPARATOR: char = ':';
 const CONNECTED_TAG: &str = "connected";
 const FAILED_TAG: &str = "failed";
+const AWAITING_APPROVAL_TAG: &str = "awaiting-approval";
 
 /// Why a viewer could not connect or had to end.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +49,12 @@ pub enum FailureCause {
     HostBusy,
     /// The host pauses this PC after too many wrong PINs.
     TooManyAttempts,
+    /// The person at the host refused this PC.
+    Denied,
+    /// Nobody at the host answered the request in time.
+    ApprovalExpired,
+    /// This PC asked the host for approval too often.
+    TooManyRequests,
     /// The host refused because it cannot stream its screen; the text is
     /// the host's own explanation.
     HostCannotStream(String),
@@ -53,7 +62,7 @@ pub enum FailureCause {
 }
 
 /// The causes whose exit code identifies them (no detail needed).
-const CODED_CAUSES: [FailureCause; 11] = [
+const CODED_CAUSES: [FailureCause; 14] = [
     FailureCause::PinRequired,
     FailureCause::WrongPin,
     FailureCause::UnsupportedVersion,
@@ -65,6 +74,9 @@ const CODED_CAUSES: [FailureCause; 11] = [
     FailureCause::ConnectionLost,
     FailureCause::HostBusy,
     FailureCause::TooManyAttempts,
+    FailureCause::Denied,
+    FailureCause::ApprovalExpired,
+    FailureCause::TooManyRequests,
 ];
 
 impl FailureCause {
@@ -83,6 +95,9 @@ impl FailureCause {
             Self::HostBusy => 19,
             Self::TooManyAttempts => 20,
             Self::HostDisconnected => 21,
+            Self::Denied => 22,
+            Self::ApprovalExpired => 23,
+            Self::TooManyRequests => 24,
             Self::Other(_) => GENERIC_EXIT_CODE,
         }
     }
@@ -108,6 +123,9 @@ impl FailureCause {
             Self::ConnectionLost => "connection-lost",
             Self::HostBusy => "host-busy",
             Self::TooManyAttempts => "too-many-attempts",
+            Self::Denied => "denied",
+            Self::ApprovalExpired => "approval-expired",
+            Self::TooManyRequests => "too-many-requests",
             Self::HostCannotStream(_) => "host-cannot-stream",
             Self::Other(_) => "other",
         }
@@ -133,7 +151,12 @@ impl FailureCause {
 /// One status line of the viewer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewerReport {
-    Connected { host_name: String },
+    /// The host asked the person at its PC to accept this one; the answer
+    /// is still to come.
+    AwaitingApproval,
+    Connected {
+        host_name: String,
+    },
     Failed(FailureCause),
 }
 
@@ -141,6 +164,7 @@ impl ViewerReport {
     /// The stdout line, without the line break.
     pub fn to_line(&self) -> String {
         match self {
+            Self::AwaitingApproval => format!("{LINE_PREFIX}{AWAITING_APPROVAL_TAG}"),
             Self::Connected { host_name } => {
                 format!(
                     "{LINE_PREFIX}{CONNECTED_TAG}{SEPARATOR}{}",
@@ -162,6 +186,9 @@ impl ViewerReport {
     /// for a malformed one.
     pub fn parse(line: &str) -> Option<Self> {
         let rest = line.trim_end().strip_prefix(LINE_PREFIX)?;
+        if rest == AWAITING_APPROVAL_TAG {
+            return Some(Self::AwaitingApproval);
+        }
         let (kind, rest) = rest.split_once(SEPARATOR)?;
         match kind {
             CONNECTED_TAG => Some(Self::Connected {
@@ -211,6 +238,7 @@ mod tests {
         reports.push(ViewerReport::Connected {
             host_name: String::new(),
         });
+        reports.push(ViewerReport::AwaitingApproval);
         for report in reports {
             assert_eq!(ViewerReport::parse(&report.to_line()), Some(report));
         }
@@ -237,6 +265,22 @@ mod tests {
         assert_eq!(
             ViewerReport::Failed(FailureCause::HostDisconnected).to_line(),
             "@wshare:failed:host-disconnected"
+        );
+        assert_eq!(
+            ViewerReport::Failed(FailureCause::Denied).to_line(),
+            "@wshare:failed:denied"
+        );
+        assert_eq!(
+            ViewerReport::Failed(FailureCause::ApprovalExpired).to_line(),
+            "@wshare:failed:approval-expired"
+        );
+        assert_eq!(
+            ViewerReport::Failed(FailureCause::TooManyRequests).to_line(),
+            "@wshare:failed:too-many-requests"
+        );
+        assert_eq!(
+            ViewerReport::AwaitingApproval.to_line(),
+            "@wshare:awaiting-approval"
         );
         assert_eq!(
             ViewerReport::Failed(FailureCause::HostCannotStream("no encoder".into())).to_line(),

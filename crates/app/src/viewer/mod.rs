@@ -77,6 +77,9 @@ pub const PIN_ENV: &str = "WSHARE_PIN";
 
 const DISCOVERY_WAIT: Duration = Duration::from_secs(3);
 const WELCOME_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a viewer told to wait for the person at the host keeps waiting:
+/// the time the host gives them, plus room for its own delays.
+const APPROVAL_WAIT: Duration = Duration::from_secs(40);
 /// Time given to the Bye message to leave before the connection closes.
 const GOODBYE_GRACE: Duration = Duration::from_millis(300);
 
@@ -109,7 +112,7 @@ pub fn run(options: ViewOptions) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let connected = authenticate(&runtime, addr, &label, &pairing, given.clone())?;
+    let connected = authenticate(&runtime, addr, &label, &pairing, given.clone(), reporting)?;
     let Connected {
         host_name,
         stream,
@@ -272,11 +275,14 @@ fn authenticate(
     label: &str,
     pairing: &Pairing,
     given: Option<String>,
+    reporting: bool,
 ) -> Result<Connected> {
     let mut pin = match first_attempt(given, pairing.expected().is_some()) {
         FirstAttempt::Pin(pin) => Some(pin),
         FirstAttempt::WithoutPin => None,
-        FirstAttempt::AskPin => ask_pin(&format!("PIN shown on {label}: "))?,
+        FirstAttempt::AskPin => ask_pin(&format!(
+            "PIN shown on {label} (empty: ask the host to accept this PC): "
+        ))?,
     };
     loop {
         match runtime.block_on(connect(
@@ -284,6 +290,7 @@ fn authenticate(
             pairing.expected(),
             pairing.identity(),
             pin.clone(),
+            || announce_waiting(reporting),
         )) {
             Err(e) if pin.is_none() && is_pin_required(&e) => {
                 pin = ask_pin(&format!("{label} requires the PIN: "))?;
@@ -308,6 +315,7 @@ async fn connect(
     expected: Option<Fingerprint>,
     identity: Option<&Identity>,
     pin: Option<String>,
+    awaiting_approval: impl FnOnce(),
 ) -> Result<Connected> {
     let session = net::connect(addr, expected, identity)
         .await
@@ -324,10 +332,12 @@ async fn connect(
     })
     .await
     .map_err(|e| ViewerFailure::ConnectionLost(format!("{e:#}")))?;
-    let answer = tokio::time::timeout(WELCOME_TIMEOUT, rx.recv())
-        .await
-        .map_err(|_| ViewerFailure::no_answer())?
-        .map_err(|e| ViewerFailure::ConnectionLost(format!("{e:#}")))?;
+    let mut answer = next_answer(&mut rx, WELCOME_TIMEOUT).await?;
+    if answer == Some(ControlMessage::AwaitingApproval) {
+        // The person at the host is asked; Welcome or Rejected follows.
+        awaiting_approval();
+        answer = next_answer(&mut rx, APPROVAL_WAIT).await?;
+    }
     match answer {
         Some(ControlMessage::Welcome {
             host_name,
@@ -347,6 +357,26 @@ async fn connect(
         Some(other) => bail!("unexpected answer from the host: {other:?}"),
         None => Err(ViewerFailure::HostLeft.into()),
     }
+}
+
+/// The host's next message of the handshake, within `within`.
+async fn next_answer(
+    rx: &mut ControlReceiver,
+    within: Duration,
+) -> Result<Option<ControlMessage>, ViewerFailure> {
+    tokio::time::timeout(within, rx.recv())
+        .await
+        .map_err(|_| ViewerFailure::no_answer())?
+        .map_err(|e| ViewerFailure::ConnectionLost(format!("{e:#}")))
+}
+
+/// Says the host asked the person at its PC about this one: in a line for
+/// the desktop interface, when it wants them, and for terminals.
+fn announce_waiting(reporting: bool) {
+    if reporting {
+        println!("{}", ViewerReport::AwaitingApproval.to_line());
+    }
+    println!("Waiting for the host to accept this PC...");
 }
 
 /// Asks for the PIN on the terminal; `None` if nothing was typed (or there

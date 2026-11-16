@@ -3,12 +3,12 @@
 
 use net::Fingerprint;
 
-use crate::host::HostFailure;
+use crate::host::{HostEvent, HostFailure};
 use crate::options::DEFAULT_PORT;
 use crate::target::{Target, parse_target};
 use crate::text;
 
-use super::model::{GuiState, ViewerId, ViewerSession, ViewerStatus, ViewerUpdate};
+use super::model::{GuiState, HostRow, ViewerId, ViewerSession, ViewerStatus, ViewerUpdate};
 use super::ports::{
     AppEvent, KnownHostsStore, LaunchRequest, PendingStop, SettingsBackend, SharingControl,
     SharingService, TrayAction, ViewerLauncher,
@@ -24,6 +24,12 @@ pub enum Intent {
     NewPin,
     DisconnectViewer,
     SetInputAllowed(bool),
+    /// The click on "Accetta" or "Rifiuta" of the request of a viewer.
+    AnswerApproval {
+        accept: bool,
+    },
+    /// The "Ricorda questo dispositivo" box of that request.
+    SetApprovalRemember(bool),
     /// Removes a viewer from this PC's authorized devices.
     RemoveDevice(Fingerprint),
     SelectHost(Option<String>),
@@ -31,6 +37,11 @@ pub enum Intent {
     ConnectHost {
         id: String,
         pin: String,
+    },
+    /// Connects to a listed host without a PIN: the host recognises this PC
+    /// or asks the person there to accept it.
+    RequestAccess {
+        id: String,
     },
     /// `pin` may be empty: the host then must recognise this PC.
     ConnectAddress {
@@ -60,6 +71,9 @@ pub enum Intent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowCommand {
     Show,
+    /// A request needs an answer now: the window comes up above the others
+    /// until it is answered.
+    BringToFront,
     HideToTray,
     Quit,
 }
@@ -136,6 +150,8 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBacken
                 }
             }
             Intent::SetInputAllowed(allowed) => self.set_input_allowed(allowed),
+            Intent::AnswerApproval { accept } => self.answer_approval(accept),
+            Intent::SetApprovalRemember(remember) => self.set_approval_remember(remember),
             Intent::OpenSettings => self.open_settings(),
             Intent::CloseSettings => self.state.page = Page::Main,
             Intent::ChangeSettings(settings) => self.change_settings(settings),
@@ -151,6 +167,7 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBacken
                 self.state.connect_error = None;
             }
             Intent::ConnectHost { id, pin } => self.connect_host(&id, &pin),
+            Intent::RequestAccess { id } => self.request_access(&id),
             Intent::ConnectAddress { address, pin } => self.connect_address(&address, &pin),
             Intent::ForgetHost { id } => self.forget_host(&id),
             Intent::DismissViewer(id) => self.state.viewers.retain(|v| v.id != id),
@@ -175,13 +192,17 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBacken
         match event {
             AppEvent::Host { generation, event } => {
                 if generation == self.generation && self.sharing.is_some() {
-                    let stopped = matches!(event, crate::host::HostEvent::Stopped { .. });
+                    let stopped = matches!(event, HostEvent::Stopped { .. });
+                    let asked = matches!(event, HostEvent::ApprovalRequested(_));
                     self.queue_notification(&event);
                     self.state.apply_host_event(event);
                     if stopped && let Some(sharing) = self.sharing.take() {
                         self.restart_pending = false;
                         self.state.restarting = false;
                         sharing.stop();
+                    }
+                    if asked {
+                        return Some(WindowCommand::BringToFront);
                     }
                 }
             }
@@ -286,6 +307,21 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBacken
             self.state.connect_error = Some(text::PIN_MISSING.into());
             return;
         }
+        self.launch_host(row, pin);
+    }
+
+    /// Connects without a PIN to a host that does not remember this PC: if
+    /// its person can accept connections, they are asked; if not, the host
+    /// says a PIN is needed and the row asks for it.
+    fn request_access(&mut self, id: &str) {
+        let Some(row) = self.state.host_row(id) else {
+            self.state.connect_error = Some(text::HOST_GONE.into());
+            return;
+        };
+        self.launch_host(row, None);
+    }
+
+    fn launch_host(&mut self, row: HostRow, pin: Option<String>) {
         match row.address {
             Some(target) if row.compatible => {
                 let request = LaunchRequest {
@@ -360,7 +396,7 @@ impl<S: SharingService, L: ViewerLauncher, K: KnownHostsStore, B: SettingsBacken
             .state
             .viewers
             .iter()
-            .any(|v| v.id == id && v.status == ViewerStatus::Connecting);
+            .any(|v| v.id == id && v.is_connecting());
         if connecting {
             self.launcher.cancel(id);
             self.state.viewers.retain(|v| v.id != id);
@@ -396,6 +432,9 @@ fn setup_error(error: &anyhow::Error) -> String {
     text::sharing_failed(&HostFailure::of(error))
 }
 
+mod approval;
+#[cfg(test)]
+mod approval_tests;
 #[cfg(test)]
 mod connection_tests;
 #[cfg(test)]

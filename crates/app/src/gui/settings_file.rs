@@ -28,6 +28,7 @@ mod tests {
 
     use super::super::settings::CodecChoice;
     use super::*;
+    use crate::access_mode::AccessMode;
 
     fn temp_path() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
@@ -52,6 +53,7 @@ mod tests {
             port: 7500,
             allow_input: false,
             share_clipboard: false,
+            access: AccessMode::PinOrConfirmation,
             viewer_fullscreen: true,
             viewer_stats: true,
             viewer_view_only: true,
@@ -66,12 +68,27 @@ mod tests {
     }
 
     #[test]
+    fn a_file_without_the_access_setting_keeps_the_pin_alone() {
+        let (_dir, path) = temp_path();
+        fs::write(
+            &path,
+            "fps = 30
+",
+        )
+        .unwrap();
+        let (settings, warning) = load_from(&path);
+        assert_eq!(warning, None);
+        assert_eq!(settings.access, AccessMode::PinOnly);
+    }
+
+    #[test]
     fn the_file_is_readable_text() {
         let (_dir, path) = temp_path();
         save_to(&path, &Settings::default()).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("fps = 60"));
         assert!(text.contains("codec = \"h264\""));
+        assert!(text.contains("access = \"pin_only\""));
     }
 
     #[test]

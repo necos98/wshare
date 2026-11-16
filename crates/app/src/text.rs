@@ -8,6 +8,7 @@
 use protocol::control::RejectReason;
 use protocol::session::{MonitorEntry, Quality};
 
+use crate::access_mode::AccessMode;
 use crate::host::{HostFailure, HostWarning, SessionFailure};
 use crate::viewer::report::FailureCause;
 
@@ -41,6 +42,13 @@ pub fn viewer_failure(cause: &FailureCause) -> String {
         }
         FailureCause::TooManyAttempts => {
             "Troppi PIN errati: attendi un minuto e riprova.".to_string()
+        }
+        FailureCause::Denied => "L'altro computer ha rifiutato la connessione.".to_string(),
+        FailureCause::ApprovalExpired => {
+            "Nessuno ha risposto sull'altro computer: la richiesta è scaduta.".to_string()
+        }
+        FailureCause::TooManyRequests => {
+            "Troppe richieste di accesso: attendi un minuto e riprova.".to_string()
         }
         FailureCause::HostCannotStream(detail) => format!(
             "Il computer ha rifiutato la connessione: {}.",
@@ -79,6 +87,9 @@ pub fn reject_reason(reason: &RejectReason) -> String {
         RejectReason::CannotStream(detail) => cannot_stream(detail),
         RejectReason::Busy => "computer già in uso da un altro visualizzatore".to_string(),
         RejectReason::TooManyAttempts => "troppi PIN errati, accesso sospeso".to_string(),
+        RejectReason::Denied => "rifiutato da chi usa questo computer".to_string(),
+        RejectReason::Expired => "nessuna risposta alla richiesta di accesso".to_string(),
+        RejectReason::TooManyRequests => "troppe richieste di accesso".to_string(),
         RejectReason::Other(text) => text.clone(),
     }
 }
@@ -210,6 +221,12 @@ pub fn viewer_failed(label: &str, message: &str) -> String {
     format!("{label}: {message}")
 }
 
+pub const VIEWER_AWAITING_APPROVAL: &str = "In attesa di conferma sull'altro computer…";
+
+pub fn viewer_awaiting_approval(label: &str) -> String {
+    viewer_failed(label, VIEWER_AWAITING_APPROVAL)
+}
+
 // --- Tray icon ----------------------------------------------------------
 
 pub const TRAY_OPEN: &str = "Apri wshare";
@@ -242,6 +259,9 @@ pub fn discovery_unavailable(detail: &str) -> String {
 
 pub const HOST_GONE: &str = "Il computer non è più in rete.";
 pub const PIN_MISSING: &str = "Inserisci il PIN mostrato sull'altro computer.";
+/// Under the PIN of a listed host: connects without one, so the person at
+/// the other computer is asked to accept this PC.
+pub const ASK_ACCESS: &str = "Chiedi l'accesso senza PIN";
 pub const HOST_VERSION_DIFFERS: &str = "Versione di wshare diversa: aggiorna entrambi i computer.";
 pub const HOST_NO_ADDRESS: &str = "Nessun indirizzo raggiungibile.";
 pub const ADDRESS_INVALID: &str = "Indirizzo non valido: scrivi un IP, ad esempio 192.168.1.20";
@@ -403,6 +423,16 @@ pub const SETTINGS_PORT: &str = "Porta";
 pub const SETTINGS_ALLOW_INPUT: &str = "Consenti controllo remoto per impostazione predefinita";
 pub const SETTINGS_SHARE_CLIPBOARD: &str =
     "Condividi appunti (il testo copiato passa da un computer all'altro)";
+pub const SETTINGS_ACCESS: &str = "Accesso";
+pub const SETTINGS_ACCESS_HINT: &str = "Come entra un computer che non è ancora autorizzato. \n     I computer autorizzati entrano sempre senza PIN né conferma.";
+
+pub fn access_mode(mode: AccessMode) -> &'static str {
+    match mode {
+        AccessMode::PinOnly => "Solo PIN",
+        AccessMode::Confirmation => "Chiedi conferma",
+        AccessMode::PinOrConfirmation => "PIN o conferma",
+    }
+}
 
 pub const SETTINGS_VIEWING: &str = "Visualizzazione";
 pub const SETTINGS_VIEWING_HINT: &str = "Valgono per le finestre aperte da ora in poi.";
@@ -451,6 +481,17 @@ pub fn monitors_unavailable(detail: &str) -> String {
 
 pub const NOTIFY_TITLE: &str = "wshare";
 
+/// A viewer asks to connect: also the line of the request window.
+pub fn approval_message(name: &str, ip: impl std::fmt::Display) -> String {
+    format!("{name} ({ip}) vuole connettersi")
+}
+
+pub const APPROVAL_TITLE: &str = "Richiesta di connessione";
+pub const APPROVAL_ACCEPT: &str = "Accetta";
+pub const APPROVAL_REFUSE: &str = "Rifiuta";
+pub const APPROVAL_REMEMBER: &str = "Ricorda questo dispositivo";
+pub const APPROVAL_HINT: &str = "Senza una risposta la richiesta scade e viene rifiutata.";
+
 pub fn notify_connected(name: &str) -> String {
     format!("{name} si è connesso")
 }
@@ -479,6 +520,18 @@ mod tests {
                 "Questo computer richiede il PIN.",
             ),
             (FailureCause::WrongPin, "PIN errato."),
+            (
+                FailureCause::Denied,
+                "L'altro computer ha rifiutato la connessione.",
+            ),
+            (
+                FailureCause::ApprovalExpired,
+                "Nessuno ha risposto sull'altro computer: la richiesta è scaduta.",
+            ),
+            (
+                FailureCause::TooManyRequests,
+                "Troppe richieste di accesso: attendi un minuto e riprova.",
+            ),
             (
                 FailureCause::UnsupportedVersion,
                 "Il computer ha rifiutato la connessione: versione di wshare diversa, aggiorna \
@@ -579,6 +632,18 @@ mod tests {
     #[test]
     fn rejection_reasons_for_the_host() {
         assert_eq!(reject_reason(&RejectReason::WrongPin), "PIN errato");
+        assert_eq!(
+            reject_reason(&RejectReason::Denied),
+            "rifiutato da chi usa questo computer"
+        );
+        assert_eq!(
+            reject_reason(&RejectReason::Expired),
+            "nessuna risposta alla richiesta di accesso"
+        );
+        assert_eq!(
+            reject_reason(&RejectReason::TooManyRequests),
+            "troppe richieste di accesso"
+        );
         assert_eq!(
             reject_reason(&RejectReason::PinRequired),
             "PIN non inserito"
@@ -697,6 +762,20 @@ mod tests {
         for (warning, text) in cases {
             assert_eq!(host_warning(&warning), text);
         }
+    }
+
+    #[test]
+    fn the_request_of_a_viewer_and_the_access_modes_are_worded() {
+        assert_eq!(
+            approval_message("PORTATILE", "192.168.1.7"),
+            "PORTATILE (192.168.1.7) vuole connettersi"
+        );
+        assert_eq!(
+            viewer_awaiting_approval("UFFICIO"),
+            "UFFICIO: In attesa di conferma sull'altro computer…"
+        );
+        let labels: Vec<&str> = AccessMode::ALL.into_iter().map(access_mode).collect();
+        assert_eq!(labels, ["Solo PIN", "Chiedi conferma", "PIN o conferma"]);
     }
 
     #[test]

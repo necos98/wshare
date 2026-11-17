@@ -2,6 +2,7 @@
 name = "pipeline"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 # Pure Rust: no Windows, GPU or network dependencies. Everything here is
 # generic over the traits in `traits.rs` and unit-tested with fakes.

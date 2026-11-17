@@ -2,6 +2,7 @@
 name = "input"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 # Injects the viewer's remote-control events into the host desktop
 # (Win32 SendInput). Policy is pure and unit-tested; the OS calls sit behind

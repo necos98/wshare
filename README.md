@@ -335,3 +335,7 @@ Su una macchina reale, con due PC:
 7. «Disattiva…» (o `wshare service uninstall`): `sc query wshare` non trova
    il servizio e le cartelle `%ProgramFiles%\wshare` e
    `%ProgramData%\wshare-service` non esistono più.
+
+## Licenza
+
+Rilasciato con licenza [MIT](LICENSE).

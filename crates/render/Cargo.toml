@@ -2,6 +2,7 @@
 name = "render"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 # Depends on `gpu` for the frame type, never on `codec`: the renderer shows
 # any NV12 GpuFrame, whoever produced it.

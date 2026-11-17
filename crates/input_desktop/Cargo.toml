@@ -2,6 +2,7 @@
 name = "input_desktop"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 # Keeps a thread on the desktop that receives the user input (Default, or
 # Winlogon for the lock screen, sign-in and UAC prompts), for the processes

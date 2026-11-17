@@ -2,6 +2,7 @@
 name = "release"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "Signed update manifest of wshare: shared by the app (verify) and the release tool (sign)"
 
 # Pure Rust: no I/O besides the release tool's own files, fully unit-testable.

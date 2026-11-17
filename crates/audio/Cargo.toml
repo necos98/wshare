@@ -2,6 +2,7 @@
 name = "audio"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 # WASAPI: the host's sound captured in loopback, the viewer's played back.
 # Only the `windows` crate, nothing to build.
